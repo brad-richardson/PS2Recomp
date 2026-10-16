@@ -30,17 +30,14 @@ inline bool translatorEnabled()
     return env && env[0] == '1';
 }
 
-// Retired SSX 3 lines (Part 3): natural posts the translator owns outright.
-// The venue call rides the radio-intro remap at the gate; the sponsor
-// vessel (0x20C0) carries the flyover line and the finish vessel (0x20C5)
-// start GO, so their stock lines must never sound. One prob-0 family:
-// decide() always drops naturals. Medals (0x20C7) is untouched.
+// Retired SSX 3 lines: natural posts the translator owns outright. The
+// sponsor (0x20C0) and finish (0x20C5) stock lines must never sound and no
+// curated bank voices them, so their naturals drop. One prob-0 family:
+// decide() always drops naturals. Medals (0x20C7) is untouched. Part 3c:
+// start cues (venue, radio, artist, greeting) pass through untouched —
+// only naturals through replaced banks voice, so a2-rewriting remaps and
+// the venue retirement are gone (bb voices the flyover from its bank).
 constexpr uint32_t kRetireFamily = 0x20f0u;
-
-// Synthetic start-cue family (Part 3b): the flyover remap's arbitration tag.
-// Not a Tricky MC event (no flyover family in mc-events-full.tsv); unique
-// alongside kRetireFamily so familyState() never collides.
-constexpr uint32_t kFlyoverFamily = 0x20f1u;
 
 // Tricky MC rule row (Part 1 receipts/mc-events-full.tsv): prob = signed
 // acceptance byte +9 (0..100); rep = repeat-limit byte +8 (0 = unlimited);
@@ -86,11 +83,8 @@ inline const Rule *ruleTable(size_t *countOut)
         {0x2049u, 100, 0, 100, 500}, // PlayerID/Position (bank holds Position)
         {0x204fu, 50, 1, 100, 500}, // Agression (rider-wide curation)
         {kRetireFamily, 0, 0, 0, 500}, // Retired lines: prob 0 drops naturals
-        {0x2020u, 100, 0, 0, 500}, // VenueIntro (start-cue remap, always)
-        {0x201eu, 100, 0, 0, 500}, // Go (start-cue remap, always)
-        {kFlyoverFamily, 100, 0, 0, 500}, // Pre-race flyover (always)
     };
-    static_assert(sizeof(kRules) / sizeof(kRules[0]) <= 24u,
+    static_assert(sizeof(kRules) / sizeof(kRules[0]) <= 16u,
                   "rule table exceeds TranslatorState family slots");
     if (countOut)
         *countOut = sizeof(kRules) / sizeof(kRules[0]);
@@ -140,21 +134,12 @@ inline const Route *routeTable(size_t *countOut)
         {0x2145u, 0x204eu, 0x2145u, 0x0u}, // Icons natural posts (multiplier)
         // Agression responses: gate in place (rider-wide MC curation).
         {0x207eu, 0x204fu, 0x207eu, 0x0u},
-        // Part 3 retirements (prob-0 family drops the naturals): venue is
-        // re-timed to the GO edge; the sponsor vessel carries the flyover
-        // line and the finish vessel carries the start GO, so their stock
-        // lines must never sound. Medals (0x20C7) is untouched.
-        {0x20bbu, kRetireFamily, 0x20bbu, 0x0u},
+        // Part 3c: start cues pass through (no routes for venue, radio,
+        // artist or greeting) — only the sponsor/finish stock lines retire.
+        // The flyover voices from the venue bank (bb natural) and the call
+        // from the artist bank (cf natural) via the 2d composite.
         {0x20c0u, kRetireFamily, 0x20c0u, 0x0u},
         {0x20c5u, kRetireFamily, 0x20c5u, 0x0u},
-        // Part 3b start-cue remaps: the FIRST occurrence of each natural
-        // post is rewritten live to a Tricky vessel (the owner function after
-        // the live post schedules that vessel's bank reads). Later
-        // occurrences are steered to the retire route by the wrapper; the
-        // first venue natural instead borrows the greeting's flyover route.
-        {0x20e5u, 0x2020u, 0x20bbu, 0xbu}, // radio intro -> venue call
-        {0x20cfu, 0x201eu, 0x20c5u, 0xbu}, // artist intro -> Tricky Go
-        {0x20bcu, kFlyoverFamily, 0x20c0u, 0xbu}, // greeting -> flyover
     };
     if (countOut)
         *countOut = sizeof(kRoutes) / sizeof(kRoutes[0]);
@@ -193,7 +178,7 @@ struct FamilyState
 
 struct TranslatorState
 {
-    FamilyState families[24];
+    FamilyState families[16];
     uint32_t lastFamily = 0u; // mcEvent of the last accepted family post
     uint64_t lastRider = 0u;  // race-boundary detector (rider ptr change)
     uint64_t lastTick = 0u;
@@ -280,7 +265,7 @@ inline void noteAccepted(TranslatorState &s, uint32_t mcEvent, uint64_t tick)
     else
     {
         // A different family posting breaks every consecutive run.
-        for (size_t i = 0u; i < 24u; ++i)
+        for (size_t i = 0u; i < 16u; ++i)
             s.families[i].consec = 0u;
         f->consec = 1u;
     }
@@ -407,13 +392,6 @@ struct PollControl
     void *emitImpl = nullptr;
     uint32_t lastClock = 0u;
     bool clockInit = false;
-    // Part 3b start-cue state (guest-tick domain, deterministic). The
-    // first 0x20E5/0x20CF tick remaps live (venue call + GO); later ticks
-    // retire. The first venue natural (loading chatter, measured @2411)
-    // carries the flyover; the gate's venue call rides the radio remap,
-    // so later venue naturals retire.
-    uint64_t goTick = 0u;     // first 0x20E5/0x20CF tick, 0 = unset
-    bool flyoverDone = false; // flyover remap spent (menu greeting or bb)
 };
 
 inline PollControl &pollControl()

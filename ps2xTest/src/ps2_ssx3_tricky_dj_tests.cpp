@@ -75,7 +75,7 @@ void register_ps2_ssx3_tricky_dj_tests()
             venue.aliases.push_back({"/DATA/AUDIO/ENGLISH.BIG", "english-comp"});
             t.IsTrue(modeHasVenueAlias(&venue), "ENGLISH alias row detected"); });
 
-        tc.Run("0x20bb passes with venue alias, drops without; radio/artist always drop",
+        tc.Run("Part 3c: venue/artist pass with alias; radio always drops",
                [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_dj;
@@ -83,45 +83,19 @@ void register_ps2_ssx3_tricky_dj_tests()
             Mode venue;
             venue.aliases.push_back({"/DATA/AUDIO/ENGLISH.BIG", "english-comp"});
             Mode plain;
+            // Curated banks voice with the alias; stock banks drop.
             t.IsTrue(!shouldDrop(0x20bbu, &venue), "venue passes with alias");
             t.IsTrue(shouldDrop(0x20bbu, &plain), "venue drops without alias");
             t.IsTrue(shouldDrop(0x20bbu, nullptr), "venue drops on Stock");
-            t.IsTrue(shouldDrop(0x20cfu, &venue), "artist drops with alias");
+            t.IsTrue(!shouldDrop(0x20cfu, &venue), "artist passes with alias");
+            t.IsTrue(shouldDrop(0x20cfu, &plain), "artist drops without alias");
             t.IsTrue(shouldDrop(0x20e5u, &venue), "radio drops with alias");
+            t.IsTrue(shouldDrop(0x20e5u, &plain), "radio drops without alias");
             t.IsTrue(!shouldDrop(0x2088u, &plain), "rider post never drops");
-            t.IsTrue(!shouldDrop(0x2133u, &venue), "uber post never drops"); });
-
-        tc.Run("Part 3b: radio/artist defer to the live translator when armed",
-               [](TestCase &t)
-               {
-            using namespace ps2_ssx3_tricky_dj;
-            using ps2_ssx3_course::Mode;
-            Mode venue;
-            venue.aliases.push_back({"/DATA/AUDIO/ENGLISH.BIG", "english-comp"});
-            Mode plain;
-            // Gate off: nothing drops.
-            t.IsTrue(!shouldDropPost(0x20cfu, &venue, false, true), "gate off passes");
-            t.IsTrue(!shouldDropPost(0x20bbu, &plain, false, false), "gate off passes");
-            // Ungated posts never drop.
-            t.IsTrue(!shouldDropPost(0x2088u, &plain, true, false), "rider never drops");
-            // Translator armed: radio/artist pass through to the remap.
-            t.IsTrue(!shouldDropPost(0x20cfu, &venue, true, true), "artist defers");
-            t.IsTrue(!shouldDropPost(0x20e5u, &venue, true, true), "radio defers");
-            // Venue exemption is unchanged by the translator knob.
-            t.IsTrue(!shouldDropPost(0x20bbu, &venue, true, true), "venue passes with alias");
-            t.IsTrue(shouldDropPost(0x20bbu, &plain, true, true), "venue drops without alias");
-            // Translator off: the old drops hold.
-            t.IsTrue(shouldDropPost(0x20cfu, &venue, true, false), "artist drops");
-            t.IsTrue(shouldDropPost(0x20e5u, &venue, true, false), "radio drops"); });
-
-        tc.Run("translator knob defaults off, =1 arms", [](TestCase &t)
-               {
-            using namespace ps2_ssx3_tricky_dj;
-            EnvGuard g("PS2X_SSX3_TRICKY_MC");
-            ::unsetenv("PS2X_SSX3_TRICKY_MC");
-            t.IsTrue(!translatorActive(), "unset is off");
-            ::setenv("PS2X_SSX3_TRICKY_MC", "0", 1);
-            t.IsTrue(!translatorActive(), "0 is off");
-            ::setenv("PS2X_SSX3_TRICKY_MC", "1", 1);
-            t.IsTrue(translatorActive(), "=1 is on"); }); });
+            t.IsTrue(!shouldDrop(0x2133u, &venue), "uber post never drops");
+            // Wrapper: gate off passes everything.
+            t.IsTrue(!shouldDropPost(0x20e5u, &venue, false), "gate off passes");
+            t.IsTrue(!shouldDropPost(0x20bbu, &plain, false), "gate off passes");
+            t.IsTrue(shouldDropPost(0x20e5u, &venue, true), "gate on drops radio");
+            t.IsTrue(!shouldDropPost(0x20cfu, &venue, true), "gate on passes artist"); }); });
 }

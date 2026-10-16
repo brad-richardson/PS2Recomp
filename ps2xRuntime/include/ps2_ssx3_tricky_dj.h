@@ -46,15 +46,17 @@ inline bool modeHasVenueAlias(const ps2_ssx3_course::Mode *mode)
     return false;
 }
 
-// Drop decision for a gated post on a Tricky course. The venue post passes
-// when the venue composite is installed; radio/artist always drop.
+// Drop decision for a gated post on a Tricky course. Part 3c: the venue
+// and artist banks carry Tricky takes (flyover/call) behind the ENGLISH
+// alias, so those posts pass when the alias is installed; the radio bank
+// stays stock, so radio intros always drop.
 inline bool shouldDrop(uint32_t a2, const ps2_ssx3_course::Mode *mode)
 {
     if (!isGatedEvent(a2))
         return false;
-    if (a2 == kPaVenueIntroEvent && modeHasVenueAlias(mode))
-        return false;
-    return true;
+    if (a2 == kDjRadioIntroEvent)
+        return true;
+    return !modeHasVenueAlias(mode);
 }
 
 // PS2X_SSX3_TRICKY_DJ_GATE=1 drops the gated posts on Tricky courses.
@@ -65,24 +67,11 @@ inline bool gateEnabled()
     return env && env[0] == '1';
 }
 
-// PS2X_SSX3_TRICKY_MC=1 arms the translator, which remaps the radio/artist
-// start cues live (Part 3b). Read once at apply time; the env is boot-fixed.
-inline bool translatorActive()
-{
-    const char *env = std::getenv("PS2X_SSX3_TRICKY_MC");
-    return env && env[0] == '1';
-}
-
-// Full per-post decision for the wrapper. Radio/artist defer to the live
-// translator when it is armed (it remaps their first occurrence to the
-// venue call and the GO); otherwise the gate drops every gated post but
-// the alias-exempt venue line.
-inline bool shouldDropPost(uint32_t a2, const ps2_ssx3_course::Mode *mode, bool gateOn,
-                            bool translatorOn)
+// Full per-post decision for the wrapper (Part 3c: pass-through design —
+// the DJ gate alone decides; the translator no longer touches start cues).
+inline bool shouldDropPost(uint32_t a2, const ps2_ssx3_course::Mode *mode, bool gateOn)
 {
     if (!gateOn || !isGatedEvent(a2))
-        return false;
-    if (translatorOn && (a2 == kDjRadioIntroEvent || a2 == kDjArtistIntroEvent))
         return false;
     return shouldDrop(a2, mode);
 }

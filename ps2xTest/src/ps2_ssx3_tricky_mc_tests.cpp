@@ -56,43 +56,20 @@ void register_ps2_ssx3_tricky_mc_tests()
             ::setenv("PS2X_SSX3_TRICKY_MC", "1", 1);
             t.IsTrue(translatorEnabled(), "=1 is on"); });
 
-            tc.Run("Part 3b start cues remap to the Tricky vessels", [](TestCase &t)
+            tc.Run("Part 3c start cues pass through (no routes)", [](TestCase &t)
                    {
-            const Route *r = route(0x20e5u);
-            t.IsTrue(r != nullptr && r->mcEvent == 0x2020u && r->outEvent == 0x20bbu &&
-                         r->outT0 == 0xbu,
-                     "radio intro -> venue call");
-            r = route(0x20cfu);
-            t.IsTrue(r != nullptr && r->mcEvent == 0x201eu && r->outEvent == 0x20c5u &&
-                         r->outT0 == 0xbu,
-                     "artist intro -> Tricky Go");
-            r = route(0x20bcu);
-            t.IsTrue(r != nullptr && r->mcEvent == kFlyoverFamily &&
-                         r->outEvent == 0x20c0u && r->outT0 == 0xbu,
-                     "menu greeting -> flyover");
-            // Rules accept always (prob 100, no hold, no rep limit).
-            for (uint32_t fam : {0x2020u, 0x201eu, kFlyoverFamily})
-            {
-                const Rule *rl = rule(fam);
-                t.IsTrue(rl != nullptr && rl->prob == 100u && rl->hold == 0u && rl->rep == 0u,
-                         "start-cue rule always accepts");
-            }
-            // decide() remaps the first occurrence live.
-            TranslatorState s;
-            r = route(0x20e5u);
-            Decision d = decide(s, *r, *rule(0x2020u), 4095u, false);
-            t.IsTrue(d.verdict == Verdict::Remap && d.outEvent == 0x20bbu, "venue remaps");
-            r = route(0x20cfu);
-            d = decide(s, *r, *rule(0x201eu), 4095u, false);
-            t.IsTrue(d.verdict == Verdict::Remap && d.outEvent == 0x20c5u, "Go remaps");
-            r = route(0x20bcu);
-            d = decide(s, *r, *rule(kFlyoverFamily), 1540u, false);
-            t.IsTrue(d.verdict == Verdict::Remap && d.outEvent == 0x20c0u,
-                     "flyover remaps"); });
+            // Only naturals through replaced banks voice: the translator
+            // owns no start cue, so all four pass through untouched.
+            t.IsTrue(route(0x20e5u) == nullptr, "radio intro untouched");
+            t.IsTrue(route(0x20cfu) == nullptr, "artist intro untouched");
+            t.IsTrue(route(0x20bcu) == nullptr, "menu greeting untouched");
+            t.IsTrue(route(0x20bbu) == nullptr, "venue natural untouched");
+            t.IsTrue(findRule(0x2020u) == nullptr, "no VenueIntro rule");
+            t.IsTrue(findRule(0x201eu) == nullptr, "no Go rule"); });
 
-            tc.Run("Part 3 retirements drop naturals", [](TestCase &t)
+            tc.Run("retirements drop sponsor/finish naturals", [](TestCase &t)
                    {
-            for (uint32_t a2 : {0x20bbu, 0x20c0u, 0x20c5u})
+            for (uint32_t a2 : {0x20c0u, 0x20c5u})
             {
                 const Route *rt = route(a2);
                 t.IsTrue(rt != nullptr && rt->mcEvent == kRetireFamily, "retire route");
