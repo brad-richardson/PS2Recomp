@@ -32,12 +32,18 @@ jobs:
           stamp="$(python3 tools/ssx3/prebuilt.py contract)"
           test "$GITHUB_REF_NAME" = "android-prebuilt-$stamp"
           test -z "$(git diff --name-only c5a9d02573410a2085a4b4b831b0b68ba3515440 HEAD -- ps2xRuntime/src/runner/)"
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
       - name: Install build tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake pkg-config autoconf automake libtool gettext
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          command -v sdkmanager
           sdkmanager "ndk;$NDK_VERSION" 'cmake;3.22.1'
       - name: Check download/cache contract
         run: python3 tools/ssx3/test_prebuilt.py
