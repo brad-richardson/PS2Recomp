@@ -59,12 +59,25 @@ void register_ps2_ssx3_tricky_mc_tests()
             tc.Run("tk-audio-1 IDs pass through", [](TestCase &t)
                    {
             t.IsTrue(isForeignEvent(0x20cfu), "DJ artist");
-            t.IsTrue(isForeignEvent(0x20bbu), "PA venue");
             t.IsTrue(isForeignEvent(0x20e5u), "DJ radio");
+            t.IsTrue(!isForeignEvent(0x20bbu), "PA venue is ours (Part 3)");
             t.IsTrue(!isForeignEvent(0x2084u), "Big_Air is ours");
             t.IsTrue(!isForeignEvent(0x2133u), "Uber is ours");
-            t.IsTrue(findRoute(0x20cfu) == nullptr, "no route for DJ");
-            t.IsTrue(findRoute(0x20bbu) == nullptr, "no route for PA venue"); });
+            t.IsTrue(findRoute(0x20cfu) == nullptr, "no route for DJ"); });
+
+            tc.Run("Part 3 retirements drop naturals", [](TestCase &t)
+                   {
+            for (uint32_t a2 : {0x20bbu, 0x20c0u, 0x20c5u})
+            {
+                const Route *rt = route(a2);
+                t.IsTrue(rt != nullptr && rt->mcEvent == kRetireFamily, "retire route");
+                const Rule *rl = rule(kRetireFamily);
+                t.IsTrue(rl != nullptr && rl->prob == 0u, "prob-0 family");
+                TranslatorState s;
+                Decision d = decide(s, *rt, *rl, 5000u, false);
+                t.IsTrue(d.verdict == Verdict::Drop, "natural drops");
+            }
+            t.IsTrue(route(0x20c7u) == nullptr, "medals untouched"); });
 
             tc.Run("remap routes hit the PA vessels", [](TestCase &t)
                    {

@@ -2306,6 +2306,28 @@ void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_mcPostPrev(rdram, ctx, runtime);
         return;
     }
+    // Part 3 flyover: the menu greeting post (live ctx, no chain needed)
+    // carries a second, synthesized post for the flyover vessel (0x20C0,
+    // PA channel). Once per boot, never after GO, so the line plays over
+    // the loading screen and ends before the venue call. The greeting
+    // itself is untouched (no route: passes below as usual).
+    if (a2 == 0x20bcu)
+    {
+        ps2_ssx3_tricky_mc::PollControl &flyPoll = ps2_ssx3_tricky_mc::pollControl();
+        if (!flyPoll.flyoverFired && flyPoll.lastGoTick == 0u && g_mcPostPrev != nullptr)
+        {
+            flyPoll.flyoverFired = true;
+            const uint64_t ftick = mcTickNow(runtime);
+            std::fprintf(stderr, "[ssx3-tricky-mc] flyover synth a2=0x20c0 tick=%llu\n",
+                         static_cast<unsigned long long>(ftick));
+            const uint32_t savedT0 = getRegU32(ctx, 8);
+            setGuestRegU32(ctx, 6, 0x20c0u);
+            setGuestRegU32(ctx, 8, 0x0bu);
+            g_mcPostPrev(rdram, ctx, runtime);
+            setGuestRegU32(ctx, 6, a2);
+            setGuestRegU32(ctx, 8, savedT0);
+        }
+    }
     const Route *route = findRoute(a2);
     if (route == nullptr)
     {

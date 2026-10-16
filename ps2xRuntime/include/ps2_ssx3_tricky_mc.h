@@ -31,10 +31,20 @@ inline bool translatorEnabled()
 }
 
 // Event IDs owned by tk-audio-1's DJ/PA gate: always pass through here.
+// (Part 3: 0x20BB is OURS now — the DJ wrapper still sees it first in the
+// chain and passes it via the venue-alias exemption; the translator drops
+// the loading-time natural and re-posts it at the GO edge.)
 inline bool isForeignEvent(uint32_t a2)
 {
-    return a2 == 0x20cfu || a2 == 0x20bbu || a2 == 0x20e5u;
+    return a2 == 0x20cfu || a2 == 0x20e5u;
 }
+
+// Retired SSX 3 lines (Part 3): natural posts the translator owns outright.
+// Venue (0x20BB) is re-timed to the GO edge; the sponsor vessel (0x20C0)
+// carries the flyover line and the finish vessel (0x20C5) carries the
+// start GO, so their stock lines must never sound. One prob-0 family:
+// decide() always drops naturals. Medals (0x20C7) is untouched.
+constexpr uint32_t kRetireFamily = 0x20f0u;
 
 // Tricky MC rule row (Part 1 receipts/mc-events-full.tsv): prob = signed
 // acceptance byte +9 (0..100); rep = repeat-limit byte +8 (0 = unlimited);
@@ -79,6 +89,7 @@ inline const Rule *ruleTable(size_t *countOut)
         {0x202bu, 100, 0, 100, 500}, // Positioning
         {0x2049u, 100, 0, 100, 500}, // PlayerID/Position (bank holds Position)
         {0x204fu, 50, 1, 100, 500}, // Agression (rider-wide curation)
+        {kRetireFamily, 0, 0, 0, 500}, // Retired lines: prob 0 drops naturals
     };
     if (countOut)
         *countOut = sizeof(kRules) / sizeof(kRules[0]);
@@ -128,6 +139,13 @@ inline const Route *routeTable(size_t *countOut)
         {0x2145u, 0x204eu, 0x2145u, 0x0u}, // Icons natural posts (multiplier)
         // Agression responses: gate in place (rider-wide MC curation).
         {0x207eu, 0x204fu, 0x207eu, 0x0u},
+        // Part 3 retirements (prob-0 family drops the naturals): venue is
+        // re-timed to the GO edge; the sponsor vessel carries the flyover
+        // line and the finish vessel carries the start GO, so their stock
+        // lines must never sound. Medals (0x20C7) is untouched.
+        {0x20bbu, kRetireFamily, 0x20bbu, 0x0u},
+        {0x20c0u, kRetireFamily, 0x20c0u, 0x0u},
+        {0x20c5u, kRetireFamily, 0x20c5u, 0x0u},
     };
     if (countOut)
         *countOut = sizeof(kRoutes) / sizeof(kRoutes[0]);
@@ -380,6 +398,11 @@ struct PollControl
     void *emitImpl = nullptr;
     uint32_t lastClock = 0u;
     bool clockInit = false;
+    // Part 3 start-sequence state (all guest-tick domain, deterministic).
+    bool prevRacing = false;     // race clock advanced on the previous poll
+    uint64_t lastGoTick = 0u;    // last GO edge served (1200-tick cooldown)
+    uint64_t goPendingTick = 0u; // Go synth due (venue + 120 ticks)
+    bool flyoverFired = false;   // flyover synth fired once (wrapper)
 };
 
 inline PollControl &pollControl()
@@ -415,6 +438,32 @@ inline void pollMcTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
         racing = (!rsOk || rs == 0u) && (!pc.clockInit || clock != pc.lastClock);
         pc.clockInit = true;
         pc.lastClock = clock;
+    }
+    // Part 3 start sequence (Tricky courses only; deterministic in the
+    // guest-tick domain). GO edge = race clock starts advancing (the same
+    // signal TK44 uses for meter visibility). Venue re-posts 0x20BB at the
+    // edge (its member carries the Tricky call); the start GO (0x20C5
+    // vessel) follows 120 ticks later, Tricky's VenueIntro->Go order. The
+    // flyover fires from the wrapper (live ctx, no chain needed).
+    if (pc.emit != nullptr)
+    {
+        if (racing && !pc.prevRacing &&
+            (pc.lastGoTick == 0u || (tick >= pc.lastGoTick && tick - pc.lastGoTick > 1200u)))
+        {
+            pc.lastGoTick = tick;
+            pc.goPendingTick = tick + 120u;
+            std::fprintf(stderr, "[ssx3-tricky-mc] venue synth a2=0x20bb tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
+            pc.emit(pc.emitImpl, rdram, rr, 0x20bbu, 0xbu, tick);
+        }
+        pc.prevRacing = racing;
+        if (pc.goPendingTick != 0u && tick >= pc.goPendingTick)
+        {
+            pc.goPendingTick = 0u;
+            std::fprintf(stderr, "[ssx3-tricky-mc] go synth a2=0x20c5 tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
+            pc.emit(pc.emitImpl, rdram, rr, 0x20c5u, 0xbu, tick);
+        }
     }
     AirState &a = airState();
     if (!pollAirMode(a, rdram, ramSize, rr, tick, racing))
