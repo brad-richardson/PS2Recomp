@@ -2306,28 +2306,6 @@ void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_mcPostPrev(rdram, ctx, runtime);
         return;
     }
-    // Part 3 flyover: the menu greeting post (live ctx, no chain needed)
-    // carries a second, synthesized post for the flyover vessel (0x20C0,
-    // PA channel). Once per boot, never after GO, so the line plays over
-    // the loading screen and ends before the venue call. The greeting
-    // itself is untouched (no route: passes below as usual).
-    if (a2 == 0x20bcu)
-    {
-        ps2_ssx3_tricky_mc::PollControl &flyPoll = ps2_ssx3_tricky_mc::pollControl();
-        if (!flyPoll.flyoverFired && flyPoll.lastGoTick == 0u && g_mcPostPrev != nullptr)
-        {
-            flyPoll.flyoverFired = true;
-            const uint64_t ftick = mcTickNow(runtime);
-            std::fprintf(stderr, "[ssx3-tricky-mc] flyover synth a2=0x20c0 tick=%llu\n",
-                         static_cast<unsigned long long>(ftick));
-            const uint32_t savedT0 = getRegU32(ctx, 8);
-            setGuestRegU32(ctx, 6, 0x20c0u);
-            setGuestRegU32(ctx, 8, 0x0bu);
-            g_mcPostPrev(rdram, ctx, runtime);
-            setGuestRegU32(ctx, 6, a2);
-            setGuestRegU32(ctx, 8, savedT0);
-        }
-    }
     const Route *route = findRoute(a2);
     if (route == nullptr)
     {
@@ -2347,6 +2325,34 @@ void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     Decision d = decide(s, *route, *rule, tick, false);
     if (d.verdict == Verdict::Drop)
     {
+        // Part 3 retirements own the live audio object (a0 = obj + 0x5560
+        // at every PA call site; the chain owner must NOT be reused for
+        // synthesized posts). The venue DROP additionally carries the
+        // one-shot flyover synth on the same live ctx, so the flyover
+        // plays as the course finishes loading and ends before the GO
+        // venue call. Regs are restored; the retired post itself stays
+        // silent (v0=0).
+        if (route->mcEvent == ps2_ssx3_tricky_mc::kRetireFamily && g_mcPostPrev != nullptr)
+        {
+            ps2_ssx3_tricky_mc::PollControl &retPoll = ps2_ssx3_tricky_mc::pollControl();
+            retPoll.paObjA0 = getRegU32(ctx, 4);
+            retPoll.paObjA0Valid = true;
+            if (a2 == 0x20bbu && !retPoll.flyoverFired && retPoll.lastGoTick == 0u)
+            {
+                retPoll.flyoverFired = true;
+                const uint32_t savedA2 = a2;
+                const uint32_t savedT0 = getRegU32(ctx, 8);
+                setGuestRegU32(ctx, 6, 0x20c0u);
+                setGuestRegU32(ctx, 8, 0x0bu);
+                g_mcPostPrev(rdram, ctx, runtime);
+                const uint32_t admitted = getRegU32(ctx, 2);
+                setGuestRegU32(ctx, 6, savedA2);
+                setGuestRegU32(ctx, 8, savedT0);
+                std::fprintf(stderr,
+                             "[ssx3-tricky-mc] flyover synth a2=0x20c0 tick=%llu admitted=%u\n",
+                             static_cast<unsigned long long>(tick), admitted);
+            }
+        }
         std::fprintf(stderr, "[ssx3-tricky-mc] tick=%llu a2=0x%x mc=0x%x DROP (silence)\n",
                      static_cast<unsigned long long>(tick), a2, route->mcEvent);
         setReturnU32(ctx, 0u);

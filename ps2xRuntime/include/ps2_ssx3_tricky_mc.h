@@ -403,6 +403,11 @@ struct PollControl
     uint64_t lastGoTick = 0u;    // last GO edge served (wrapper guard)
     uint64_t goPendingTick = 0u; // Go synth due (venue + 120 ticks)
     bool flyoverFired = false;   // flyover synth fired once (wrapper)
+    // Live audio-manager object for synthesized posts (a0 = obj + 0x5560 at
+    // every PA call site; the chain owner in r4 must NOT be reused).
+    // Recorded from retired natural posts; the GO pair replays it.
+    uint32_t paObjA0 = 0u;
+    bool paObjA0Valid = false;
 };
 
 inline PollControl &pollControl()
@@ -450,7 +455,7 @@ inline void pollMcTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
     // order. The flyover fires from the wrapper (live ctx, no chain needed).
     // Pause/resume replays the pair (documented human-path wart); a slow
     // restart replays it as a new race.
-    if (pc.emit != nullptr)
+    if (pc.emit != nullptr && pc.paObjA0Valid)
     {
         if (racing && tick - pc.lastAdvanceTick > 240u)
         {
@@ -459,7 +464,7 @@ inline void pollMcTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
             pc.goPendingTick = tick + 120u;
             std::fprintf(stderr, "[ssx3-tricky-mc] venue synth a2=0x20bb tick=%llu\n",
                          static_cast<unsigned long long>(tick));
-            pc.emit(pc.emitImpl, rdram, rr, 0x20bbu, 0xbu, tick);
+            pc.emit(pc.emitImpl, rdram, pc.paObjA0, 0x20bbu, 0xbu, tick);
         }
         if (racing)
             pc.lastAdvanceTick = tick;
@@ -468,7 +473,7 @@ inline void pollMcTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
             pc.goPendingTick = 0u;
             std::fprintf(stderr, "[ssx3-tricky-mc] go synth a2=0x20c5 tick=%llu\n",
                          static_cast<unsigned long long>(tick));
-            pc.emit(pc.emitImpl, rdram, rr, 0x20c5u, 0xbu, tick);
+            pc.emit(pc.emitImpl, rdram, pc.paObjA0, 0x20c5u, 0xbu, tick);
         }
     }
     AirState &a = airState();
