@@ -8,6 +8,7 @@
 #include "ps2_input_diag.h"
 #include "ps2_record_env.h"
 #include "ps2_ssx3_course_manifest.h"
+#include "ps2_ssx3_tricky_list.h"
 #include "runtime/ps2_savestate.h"
 #include "Pad.h"
 #include "ps2_log.h"
@@ -1638,6 +1639,76 @@ namespace ps2_stubs
             g_qpNav.lastFire = guestVsyncTick;
             g_qpNav.idx++;
             g_qpNav.stepStart = guestVsyncTick;
+        }
+
+        // tk-menu-1 Part 2: Tricky-list navigator drive
+        // (PS2X_SSX3_TRICKY_LIST=1, default off; also requires the MENU hook
+        // armed with Tricky mode on). Closed-loop pad injection through this
+        // same merge point (ONL10 precedent): one navStep per guest pad read,
+        // keyed by the guest vsync tick, never wall clock. Knob off: two
+        // cached-bool checks; the menu-armed check is one more bool.
+        void tkListDriveOnRead(PadInputState &state, uint64_t guestVsyncTick, PS2Runtime *runtime, int port)
+        {
+            if (port != 0 || !ps2_ssx3_tricky_list::knob() || runtime == nullptr)
+                return;
+            if (!ps2_ssx3_tricky::state().on || !ps2_ssx3_tricky::state().tricky)
+                return;
+            if (!ps2_ssx3_tricky_list::drive().armed && ps2_ssx3_tricky_list::diag())
+            {
+                // Lane diag mapping mode: log the FE view on change (the
+                // Part 2 state-word survey), without arming anything.
+                uint8_t *mapRam = runtime->memory().getRDRAM();
+                if (mapRam)
+                {
+                    const ps2_ssx3_tricky_list::FeView v = ps2_ssx3_tricky_list::readView(
+                        mapRam, ps2_ssx3_course::kRamSize, ps2_ssx3_tricky::state().mapController);
+                    static int s_pSub = -99, s_pRow = -99, s_pEv = -99;
+                    static uint32_t s_pPeak = 99u, s_pType = 99u;
+                    static uint64_t s_pTick = 0u;
+                    if (v.screen != s_pSub || v.row != s_pRow || v.event != s_pEv || v.peak != s_pPeak ||
+                        v.type != s_pType || guestVsyncTick >= s_pTick + 600u)
+                    {
+                        std::fprintf(stderr, "[tklist-map] tick=%llu map=%d scr=%d pk=%u ty=%u row=%d ev=%d\n",
+                                     static_cast<unsigned long long>(guestVsyncTick), v.mapLive ? 1 : 0,
+                                     v.screen, v.peak, v.type, v.row, v.event);
+                        s_pSub = v.screen;
+                        s_pRow = v.row;
+                        s_pEv = v.event;
+                        s_pPeak = v.peak;
+                        s_pType = v.type;
+                        s_pTick = guestVsyncTick;
+                    }
+                }
+                return;
+            }
+            uint8_t *rdram = runtime->memory().getRDRAM();
+            if (!rdram)
+                return;
+            bool done = false, handedOff = false, aborted = false;
+            const uint16_t mask = ps2_ssx3_tricky_list::driveOnRead(
+                rdram, ps2_ssx3_course::kRamSize, ps2_ssx3_tricky::state().mapController, guestVsyncTick, true,
+                true, true, done, handedOff, aborted);
+            if (mask != 0u)
+                state.buttons = static_cast<uint16_t>(state.buttons & ~mask);
+            if (!ps2_ssx3_tricky_list::diag())
+                return;
+            // Lane diag: one line per press edge + phase transitions.
+            static uint16_t s_lastMask = 0u;
+            static int s_lastPhase = -1;
+            const ps2_ssx3_tricky_list::DriveProgress prog = ps2_ssx3_tricky_list::driveProgress();
+            const int phase = static_cast<int>(prog.phase);
+            if (mask != s_lastMask || phase != s_lastPhase || done || aborted)
+            {
+                const ps2_ssx3_tricky_list::FeView v = ps2_ssx3_tricky_list::readView(
+                    rdram, ps2_ssx3_course::kRamSize, ps2_ssx3_tricky::state().mapController);
+                std::fprintf(stderr, "[tklist] tick=%llu mask=0x%04x phase=%s presses=%d map=%d scr=%d pk=%u ty=%u row=%d ev=%d%s%s\n",
+                             static_cast<unsigned long long>(guestVsyncTick), mask,
+                             ps2_ssx3_tricky_list::navPhaseName(prog.phase), prog.presses, v.mapLive ? 1 : 0,
+                             v.screen, v.peak, v.type, v.row, v.event, done ? (handedOff ? " DONE-handoff" : " DONE-back") : "",
+                             aborted ? " ABORT" : "");
+                s_lastMask = mask;
+                s_lastPhase = phase;
+            }
         }
 
         // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD=<path>). PRC1 v4
@@ -4308,6 +4379,8 @@ namespace ps2_stubs
             padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
             qpNavOnRead(state, guestVsyncTick, runtime, port,
                         qpNavUserActive); // ONL10: no-op unless NAV=1+QUICKPLAY=1
+            tkListDriveOnRead(state, guestVsyncTick, runtime,
+                              port); // tk-menu-1: no-op unless TRICKY_LIST=1 and armed
             tk12OnRead(state, guestVsyncTick, runtime, port); // APH1 DEV-ONLY: no-op unless PS2X_TK12_AP_ROUTE set
             padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
             padMarkerOnRead(state, guestVsyncTick, port, slot,

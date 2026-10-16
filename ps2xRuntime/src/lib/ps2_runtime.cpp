@@ -17,6 +17,7 @@
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ssx3_tricky_menu.h"
+#include "ps2_ssx3_tricky_list.h"
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_ssx3_tricky_gems.h"
 #include "ps2_ssx3_tricky_resetvol.h"
@@ -8093,6 +8094,17 @@ void PS2Runtime::run()
         set2Nav.upscale = set2Upscale;
         set2Nav.touch = vpadTouchMode;
     }
+    // tk-menu-1 Part 2: the Tricky course list. Knob off: one cached-bool
+    // check per host frame in the block below; the guest is untouched.
+    const bool tkListOn = ps2_ssx3_tricky_list::knob();
+    ps2_ssx3_tricky_list::ListState tkList;
+    bool tkOpen = false;
+    int tkOpenDeb = 0;  // consecutive Map-live frames (open at kTkDeb)
+    int tkShutDeb = 0;  // consecutive non-Map frames (close at kTkDeb)
+    uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
+    std::vector<int64_t> tkDown; // touch ids currently on the list
+    if (tkListOn)
+        std::fprintf(stderr, "[tklist] overlay on (PS2X_SSX3_TRICKY_LIST=1)\n");
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
     // load + one clock per host frame; the line draws only when perf is on).
     auto set2PerfWinStart = std::chrono::steady_clock::now();
@@ -8759,6 +8771,152 @@ void PS2Runtime::run()
             }
             set2PrevUnion = set2Union;
         }
+        // tk-menu-1 Part 2: the Tricky course list. Knob off: the outer
+        // bool only. While open the list owns the pad (the guest gets
+        // zeros; navigator presses merge on the game thread): physical and
+        // test-span buttons drive the list, never the guest.
+        uint16_t tkGuestMask = 0u;
+        bool tkPublishOwn = false;
+        if (tkListOn && !set2Open)
+        {
+            namespace tkl = ps2_ssx3_tricky_list;
+            const uint64_t tkTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
+            bool tkMapLive = false;
+            tkl::FeView tkView;
+            if (ps2_ssx3_tricky::state().on && ps2_ssx3_tricky::state().tricky)
+            {
+                if (uint8_t *tkRam = m_memory.getRDRAM())
+                {
+                    tkView = tkl::readView(tkRam, ps2_ssx3_course::kRamSize,
+                                           ps2_ssx3_tricky::state().mapController);
+                    tkMapLive = tkView.mapLive;
+                }
+            }
+            if (tkMapLive)
+            {
+                tkShutDeb = 0;
+                if (!tkOpen && ++tkOpenDeb >= 4)
+                {
+                    tkOpen = true;
+                    std::fprintf(stderr, "[tklist] open scr=%d peak=%u type=%u\n", tkView.screen,
+                                 tkView.peak, tkView.type);
+                }
+            }
+            else
+            {
+                tkOpenDeb = 0;
+                if (tkOpen && ++tkShutDeb >= 6)
+                {
+                    tkOpen = false;
+                    tkl::driveDisarm();
+                    tkDown.clear();
+                    std::fprintf(stderr, "[tklist] close\n");
+                }
+            }
+            if (tkOpen)
+            {
+                tkPublishOwn = true; // zeros (driving edges merge on the game thread)
+                const tkl::DriveProgress prog = tkl::driveProgress();
+                if (prog.done)
+                {
+                    tkl::driveDisarm();
+                    if (!prog.handedOff)
+                        tkOpen = false; // backed out: the guest already left
+                }
+                else if (prog.aborted)
+                {
+                    tkl::driveDisarm();
+                    ps2x::ui::toast("Tricky list: couldn't reach it", 3.0f);
+                    std::fprintf(stderr, "[tklist] aborted after %d presses\n", prog.presses);
+                }
+                else if (prog.driving)
+                {
+                    // Any fresh press cancels the drive (the user takes over).
+                    if ((ds1TrueRaw & ~tkPrevUnion) != 0u)
+                    {
+                        tkl::driveDisarm();
+                        std::fprintf(stderr, "[tklist] drive cancelled by user\n");
+                    }
+                }
+                else if (tkMapLive)
+                {
+                    // Browsing: pad edges drive the list (only while the
+                    // guest is on a Map screen; during the handoff gap the
+                    // overlay waits for the close debounce, arming nothing).
+                    const uint16_t tkEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
+                    if (tkEdge & ps2x::vpad::kUp)
+                        tkl::listMove(tkList, true);
+                    else if (tkEdge & ps2x::vpad::kDown)
+                        tkl::listMove(tkList, false);
+                    if (tkEdge & (ps2x::vpad::kLeft | ps2x::vpad::kRight))
+                        tkl::listToggle(tkList);
+                    if (tkEdge & ps2x::vpad::kTriangle)
+                        tkl::driveArmBackOut(tkTick);
+                    else if (tkEdge & ps2x::vpad::kCross)
+                    {
+                        const tkl::Course &c = tkl::kCourses[tkList.sel];
+                        tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                        std::fprintf(stderr, "[tklist] ride %s (peak %u type %u row %u ev %d)\n", c.name,
+                                     tkl::listGoal(tkList).peak, tkl::listGoal(tkList).type,
+                                     tkl::listGoal(tkList).row, c.event);
+                    }
+                    // Touch: row taps highlight (a tap on the highlighted
+                    // row rides), toggle/select/back legends act.
+                    const tkl::ListGeom tkGeom = tkl::listLayout(screenWidth, screenHeight);
+                    ps2x::vpad::TouchPoint tkts[8];
+                    const int tkn = set2SampleTouches(tkts);
+                    std::vector<int64_t> tkStill;
+                    for (int i = 0; i < tkn; ++i)
+                    {
+                        tkStill.push_back(tkts[i].id);
+                        if (std::find(tkDown.begin(), tkDown.end(), tkts[i].id) != tkDown.end())
+                            continue;
+                        tkDown.push_back(tkts[i].id);
+                        const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
+                        if (hit >= 0 && hit <= 9)
+                        {
+                            if (tkList.sel == hit)
+                            {
+                                const tkl::Course &c = tkl::kCourses[tkList.sel];
+                                tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                            }
+                            else
+                                tkList.sel = static_cast<uint8_t>(hit);
+                        }
+                        else if (hit == 10)
+                            tkl::listToggle(tkList);
+                        else if (hit == 11)
+                        {
+                            const tkl::Course &c = tkl::kCourses[tkList.sel];
+                            tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                        }
+                        else if (hit == 12)
+                            tkl::driveArmBackOut(tkTick);
+                    }
+                    std::vector<int64_t> tkLeft;
+                    for (int64_t id : tkDown)
+                        if (std::find(tkStill.begin(), tkStill.end(), id) != tkStill.end())
+                            tkLeft.push_back(id);
+                    tkDown = tkLeft;
+                }
+                tkPrevUnion = ds1TrueRaw;
+            }
+            else
+                tkPrevUnion = ds1TrueRaw;
+        }
+        else if (tkListOn)
+        {
+            // The settings panel took over (or the knob block was skipped):
+            // track the union so no stale edges fire, and close the list
+            // (its drive disarms; the guest is paused under the panel).
+            tkPrevUnion = ds1TrueRaw;
+            if (tkOpen)
+            {
+                tkOpen = false;
+                ps2_ssx3_tricky_list::driveDisarm();
+                tkDown.clear();
+            }
+        }
         // SET2: no vpad path this frame (Odin play, desktop, or a controller
         // in use): sample touches for the gear dot (they never reach the
         // guest here, so nothing is dropped).
@@ -8789,7 +8947,89 @@ void PS2Runtime::run()
                 set2Down = set2Left;
             }
         }
-        if (set2Open)
+        if (tkPublishOwn)
+        {
+            // tk-menu-1: the list owns the pad. The guest gets zeros (the
+            // navigator's presses merge on the game thread); the overlay
+            // draws full-screen over the presented frame, never into it.
+            publishPad(0, m_memory.gs().vsyncTick.load());
+            ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
+            if (!skipGl)
+            {
+                namespace tkl = ps2_ssx3_tricky_list;
+                const tkl::ListGeom tkg = tkl::listLayout(screenWidth, screenHeight);
+                const tkl::DriveProgress tkProg = tkl::driveProgress();
+                const int tkTitle = std::max(18, static_cast<int>(screenHeight / 24.0f));
+                const int tkRow = std::max(14, static_cast<int>(screenHeight / 32.0f));
+                const int tkSmall = std::max(12, static_cast<int>(screenHeight / 44.0f));
+                // Backdrop (the styling pass brings the disc mountain art).
+                DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                              Color{10, 18, 38, 255});
+                DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(tkg.titleY + tkg.titleH),
+                              Color{16, 28, 56, 255});
+                // Title bar (stock bar colour 154,62,2, Part 1 §4).
+                DrawRectangle(static_cast<int>(tkg.titleX), static_cast<int>(tkg.titleY),
+                              static_cast<int>(tkg.titleW), static_cast<int>(tkg.titleH), Color{154, 62, 2, 255});
+                DrawText("SELECT EVENT", static_cast<int>(tkg.titleX) + 12, static_cast<int>(tkg.titleY) + 6,
+                         tkTitle, RAYWHITE);
+                DrawText("SSX Tricky courses in Tricky order", static_cast<int>(tkg.titleX) + 14,
+                         static_cast<int>(tkg.titleY + tkg.titleH) + 4, tkSmall, Color{200, 210, 225, 255});
+                // Course rows (right-aligned near-black on light rows in the
+                // stock screen; v1: light text on dark rows, orange select).
+                for (int i = 0; i < 10; ++i)
+                {
+                    const tkl::Course &c = tkl::kCourses[i];
+                    const bool sel = (tkList.sel == i);
+                    DrawRectangle(static_cast<int>(tkg.rowX), static_cast<int>(tkg.rowY[i]),
+                                  static_cast<int>(tkg.rowW), static_cast<int>(tkg.rowH) - 2,
+                                  sel ? Color{154, 62, 2, 255} : Color{24, 36, 62, 255});
+                    std::string label = c.name;
+                    if (c.nOpts > 1)
+                    {
+                        label += (tkList.opt[i] == 0 ? "   < Race >" : "   < Jam >");
+                    }
+                    const int tw = MeasureText(label.c_str(), tkRow);
+                    DrawText(label.c_str(), static_cast<int>(tkg.rowX + tkg.rowW) - tw - 10,
+                             static_cast<int>(tkg.rowY[i]) + 2, tkRow,
+                             sel ? RAYWHITE : Color{200, 210, 225, 255});
+                }
+                // Preview/event pane.
+                DrawRectangle(static_cast<int>(tkg.paneX), static_cast<int>(tkg.paneY),
+                              static_cast<int>(tkg.paneW), static_cast<int>(tkg.paneH), Color{16, 28, 56, 255});
+                DrawRectangleLines(static_cast<int>(tkg.paneX), static_cast<int>(tkg.paneY),
+                                   static_cast<int>(tkg.paneW), static_cast<int>(tkg.paneH), Color{154, 62, 2, 255});
+                {
+                    const tkl::Course &c = tkl::kCourses[tkList.sel];
+                    const tkl::CourseOption &goal = tkl::listGoal(tkList);
+                    const char *etype = (c.nOpts > 1 && tkList.opt[tkList.sel] == 1)
+                                            ? "Jam"
+                                            : (c.raceLabel ? c.raceLabel : "Race");
+                    DrawText(etype, static_cast<int>(tkg.paneX) + 10, static_cast<int>(tkg.paneY) + 6, tkRow,
+                             Color{255, 170, 60, 255});
+                    DrawText(c.name, static_cast<int>(tkg.paneX) + 10,
+                             static_cast<int>(tkg.paneY) + 10 + tkRow, tkTitle, RAYWHITE);
+                    char sub[128];
+                    std::snprintf(sub, sizeof(sub), "Peak %u - event %d%s", goal.peak + 1, c.event,
+                                  c.tp ? "" : " - text card (no preview on disc)");
+                    DrawText(sub, static_cast<int>(tkg.paneX) + 10,
+                             static_cast<int>(tkg.paneY) + 14 + tkRow + tkTitle, tkSmall,
+                             Color{200, 210, 225, 255});
+                    if (tkProg.driving)
+                    {
+                        char drv[128];
+                        std::snprintf(drv, sizeof(drv), "driving: %s (%d presses)",
+                                      tkl::navPhaseName(tkProg.phase), tkProg.presses);
+                        DrawText(drv, static_cast<int>(tkg.paneX) + 10,
+                                 static_cast<int>(tkg.paneY + tkg.paneH) - tkSmall - 8, tkSmall,
+                                 Color{255, 220, 120, 255});
+                    }
+                }
+                // Help bar.
+                DrawText("X Select      Triangle Previous      Up/Down pick      Left/Right Race/Jam",
+                         static_cast<int>(tkg.titleX), static_cast<int>(screenHeight * 0.905f), tkSmall, RAYWHITE);
+            }
+        }
+        else if (set2Open)
         {
             // SET2: the panel owns the pad. Touches hit-test the panel (row
             // taps act as X on that row, dot/outside taps close); nothing

@@ -33,6 +33,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_env_file_tests.cpp
     src/ps2_ssx3_course_manifest_tests.cpp
     src/ps2_ssx3_tricky_menu_tests.cpp
+    src/ps2_ssx3_tricky_list_tests.cpp
     src/ps2_ssx3_lod_tests.cpp
     src/ps2_native_world_tests.cpp
     src/ps2_ssx3_tricky_hud_tests.cpp
