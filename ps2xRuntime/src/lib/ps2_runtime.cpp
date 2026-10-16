@@ -9140,7 +9140,7 @@ void PS2Runtime::run()
                         DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
                                       Color{10, 18, 38, 255});
                     DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
-                                  Color{6, 10, 24, 170});
+                                  Color{6, 10, 24, 120});
                 }
                 else
                 {
@@ -9268,8 +9268,11 @@ void PS2Runtime::run()
                     {
                         char tkrn[16];
                         std::snprintf(tkrn, sizeof(tkrn), "ride%d", tkList.sel);
-                        tkImg(tkrn, tkg.paneX + 10, tkFy - tkSmall * 2 - 4,
-                              static_cast<float>(tkSmall) * 1.7f, RAYWHITE, false);
+                        TkAtlasRect tkrr;
+                        float tkRh = static_cast<float>(tkSmall) * 1.7f;
+                        if (tkSpr(tkrn, tkrr) && tkrr.w > 0)
+                            tkRh = std::min(tkRh, (tkg.paneW - 20) * tkrr.h / tkrr.w);
+                        tkImg(tkrn, tkg.paneX + 10, tkFy - tkSmall * 2 - 4, tkRh, RAYWHITE, false);
                         if (tkProg.driving)
                             tkImg("loading", tkg.paneX + 10, tkFy - tkSmall * 4 - 8,
                                   static_cast<float>(tkSmall) * 1.6f, Color{255, 220, 120, 255}, false);
