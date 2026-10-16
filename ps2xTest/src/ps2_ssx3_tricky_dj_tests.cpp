@@ -89,5 +89,39 @@ void register_ps2_ssx3_tricky_dj_tests()
             t.IsTrue(shouldDrop(0x20cfu, &venue), "artist drops with alias");
             t.IsTrue(shouldDrop(0x20e5u, &venue), "radio drops with alias");
             t.IsTrue(!shouldDrop(0x2088u, &plain), "rider post never drops");
-            t.IsTrue(!shouldDrop(0x2133u, &venue), "uber post never drops"); }); });
+            t.IsTrue(!shouldDrop(0x2133u, &venue), "uber post never drops"); });
+
+        tc.Run("Part 3b: radio/artist defer to the live translator when armed",
+               [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_dj;
+            using ps2_ssx3_course::Mode;
+            Mode venue;
+            venue.aliases.push_back({"/DATA/AUDIO/ENGLISH.BIG", "english-comp"});
+            Mode plain;
+            // Gate off: nothing drops.
+            t.IsTrue(!shouldDropPost(0x20cfu, &venue, false, true), "gate off passes");
+            t.IsTrue(!shouldDropPost(0x20bbu, &plain, false, false), "gate off passes");
+            // Ungated posts never drop.
+            t.IsTrue(!shouldDropPost(0x2088u, &plain, true, false), "rider never drops");
+            // Translator armed: radio/artist pass through to the remap.
+            t.IsTrue(!shouldDropPost(0x20cfu, &venue, true, true), "artist defers");
+            t.IsTrue(!shouldDropPost(0x20e5u, &venue, true, true), "radio defers");
+            // Venue exemption is unchanged by the translator knob.
+            t.IsTrue(!shouldDropPost(0x20bbu, &venue, true, true), "venue passes with alias");
+            t.IsTrue(shouldDropPost(0x20bbu, &plain, true, true), "venue drops without alias");
+            // Translator off: the old drops hold.
+            t.IsTrue(shouldDropPost(0x20cfu, &venue, true, false), "artist drops");
+            t.IsTrue(shouldDropPost(0x20e5u, &venue, true, false), "radio drops"); });
+
+        tc.Run("translator knob defaults off, =1 arms", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_dj;
+            EnvGuard g("PS2X_SSX3_TRICKY_MC");
+            ::unsetenv("PS2X_SSX3_TRICKY_MC");
+            t.IsTrue(!translatorActive(), "unset is off");
+            ::setenv("PS2X_SSX3_TRICKY_MC", "0", 1);
+            t.IsTrue(!translatorActive(), "0 is off");
+            ::setenv("PS2X_SSX3_TRICKY_MC", "1", 1);
+            t.IsTrue(translatorActive(), "=1 is on"); }); });
 }

@@ -2082,6 +2082,7 @@ namespace
 {
     PS2Runtime::RecompiledFunction g_tkDjPostPrev = nullptr;
     bool g_tkDjGate = false; // PS2X_SSX3_TRICKY_DJ_GATE=1 (tk-audio-1 step 3)
+    bool g_tkDjDeferToMc = false; // PS2X_SSX3_TRICKY_MC=1 (Part 3b remap)
     uint64_t g_tkDjDropped = 0u;
     bool g_tkVenuePassLogged = false;
 
@@ -2097,7 +2098,7 @@ namespace
                 mode = &ms.modes[cur - 1u];
         }
         if (g_tkDjGate && mode != nullptr &&
-            ps2_ssx3_tricky_dj::shouldDrop(a2, mode))
+            ps2_ssx3_tricky_dj::shouldDropPost(a2, mode, true, g_tkDjDeferToMc))
         {
             if (ctx != nullptr)
                 ctx->r[2] = _mm_set_epi64x(0, 0);
@@ -2129,6 +2130,7 @@ namespace
     void applyTrickyDjGate(PS2Runtime &runtime)
     {
         g_tkDjGate = ps2_ssx3_tricky_dj::gateEnabled();
+        g_tkDjDeferToMc = ps2_ssx3_tricky_dj::translatorActive();
         if (!g_tkDjGate)
             return;
         constexpr uint32_t kPc = ps2_ssx3_tricky_hud::kSpeechPostFunc;
@@ -2294,12 +2296,11 @@ void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     using namespace ps2_ssx3_tricky_mc;
     const uint32_t a2 = getRegU32(ctx, 6);
-    if (g_mcPostPrev == nullptr || isForeignEvent(a2))
-    {
-        if (g_mcPostPrev != nullptr)
-            g_mcPostPrev(rdram, ctx, runtime);
+    if (g_mcPostPrev == nullptr)
         return;
-    }
+    // Part 3b: every post reaching the chained speech function is classified
+    // by the translator (no foreign events — scheduler-side synthesis cannot
+    // schedule bank reads, so all start cues are remapped live).
     ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
     if (!ms.armed || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
     {
@@ -2319,40 +2320,69 @@ void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
     const uint64_t tick = mcTickNow(runtime);
+    // Part 3b start cues: the first occurrence of each natural start cue
+    // remaps live to its Tricky vessel (the owner function after the live
+    // post schedules that vessel's reads). Same-tick pairs (the radio +
+    // artist intros at the gate) still remap; later ticks retire to
+    // silence so DJ recurrences never replay the venue call or the GO.
+    // The first venue natural (loading chatter) borrows the greeting's
+    // flyover route; the gate's venue call rides the radio remap.
+    if (a2 == 0x20e5u || a2 == 0x20cfu || a2 == 0x20bcu || a2 == 0x20bbu)
+    {
+        PollControl &sc = pollControl();
+        bool use = false;
+        bool flyover = false;
+        if (a2 == 0x20bcu)
+        {
+            use = !sc.flyoverDone;
+            if (use)
+                sc.flyoverDone = true;
+            flyover = use;
+        }
+        else if (a2 == 0x20bbu)
+        {
+            if (!sc.flyoverDone && sc.goTick == 0u)
+            {
+                use = true;
+                flyover = true;
+                sc.flyoverDone = true;
+            }
+        }
+        else
+        {
+            use = (sc.goTick == 0u || tick <= sc.goTick);
+            if (use && sc.goTick == 0u)
+                sc.goTick = tick;
+        }
+        const Route *alt = nullptr;
+        const Rule *altRule = nullptr;
+        if (flyover)
+        {
+            alt = findRoute(0x20bcu);
+            altRule = findRule(kFlyoverFamily);
+        }
+        else if (!use)
+        {
+            alt = findRoute(0x20bbu); // retire route drops it
+            altRule = findRule(kRetireFamily);
+        }
+        if (alt != nullptr && altRule != nullptr)
+        {
+            route = alt;
+            rule = altRule;
+        }
+    }
     TranslatorState &s = translatorState();
     const uint32_t rr = ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
     noteBoundary(s, static_cast<uint64_t>(rr), tick);
     Decision d = decide(s, *route, *rule, tick, false);
     if (d.verdict == Verdict::Drop)
     {
-        // Part 3 retirements own the live audio object (a0 = obj + 0x5560
-        // at every PA call site; the chain owner must NOT be reused for
-        // synthesized posts). The venue DROP additionally carries the
-        // one-shot flyover synth on the same live ctx, so the flyover
-        // plays as the course finishes loading and ends before the GO
-        // venue call. Regs are restored; the retired post itself stays
-        // silent (v0=0).
-        if (route->mcEvent == ps2_ssx3_tricky_mc::kRetireFamily && g_mcPostPrev != nullptr)
-        {
-            ps2_ssx3_tricky_mc::PollControl &retPoll = ps2_ssx3_tricky_mc::pollControl();
-            retPoll.paObjA0 = getRegU32(ctx, 4);
-            retPoll.paObjA0Valid = true;
-            if (a2 == 0x20bbu && !retPoll.flyoverFired && retPoll.lastGoTick == 0u)
-            {
-                retPoll.flyoverFired = true;
-                const uint32_t savedA2 = a2;
-                const uint32_t savedT0 = getRegU32(ctx, 8);
-                setGuestRegU32(ctx, 6, 0x20c0u);
-                setGuestRegU32(ctx, 8, 0x0bu);
-                g_mcPostPrev(rdram, ctx, runtime);
-                const uint32_t admitted = getRegU32(ctx, 2);
-                setGuestRegU32(ctx, 6, savedA2);
-                setGuestRegU32(ctx, 8, savedT0);
-                std::fprintf(stderr,
-                             "[ssx3-tricky-mc] flyover synth a2=0x20c0 tick=%llu admitted=%u\n",
-                             static_cast<unsigned long long>(tick), admitted);
-            }
-        }
+        // Part 3b: retired naturals stay silent (v0=0); the owner function
+        // after the post still runs its own logic, only the PA voice is
+        // suppressed. No synthesized flyover: scheduler-side synthesis
+        // cannot schedule bank reads, so the flyover rides the first live
+        // venue natural (0x20BB) instead.
         std::fprintf(stderr, "[ssx3-tricky-mc] tick=%llu a2=0x%x mc=0x%x DROP (silence)\n",
                      static_cast<unsigned long long>(tick), a2, route->mcEvent);
         setReturnU32(ctx, 0u);

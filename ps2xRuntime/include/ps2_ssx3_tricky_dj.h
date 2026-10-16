@@ -64,4 +64,26 @@ inline bool gateEnabled()
     const char *env = std::getenv("PS2X_SSX3_TRICKY_DJ_GATE");
     return env && env[0] == '1';
 }
+
+// PS2X_SSX3_TRICKY_MC=1 arms the translator, which remaps the radio/artist
+// start cues live (Part 3b). Read once at apply time; the env is boot-fixed.
+inline bool translatorActive()
+{
+    const char *env = std::getenv("PS2X_SSX3_TRICKY_MC");
+    return env && env[0] == '1';
+}
+
+// Full per-post decision for the wrapper. Radio/artist defer to the live
+// translator when it is armed (it remaps their first occurrence to the
+// venue call and the GO); otherwise the gate drops every gated post but
+// the alias-exempt venue line.
+inline bool shouldDropPost(uint32_t a2, const ps2_ssx3_course::Mode *mode, bool gateOn,
+                            bool translatorOn)
+{
+    if (!gateOn || !isGatedEvent(a2))
+        return false;
+    if (translatorOn && (a2 == kDjRadioIntroEvent || a2 == kDjArtistIntroEvent))
+        return false;
+    return shouldDrop(a2, mode);
+}
 } // namespace ps2_ssx3_tricky_dj

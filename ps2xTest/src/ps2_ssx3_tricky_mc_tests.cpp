@@ -56,14 +56,39 @@ void register_ps2_ssx3_tricky_mc_tests()
             ::setenv("PS2X_SSX3_TRICKY_MC", "1", 1);
             t.IsTrue(translatorEnabled(), "=1 is on"); });
 
-            tc.Run("tk-audio-1 IDs pass through", [](TestCase &t)
+            tc.Run("Part 3b start cues remap to the Tricky vessels", [](TestCase &t)
                    {
-            t.IsTrue(isForeignEvent(0x20cfu), "DJ artist");
-            t.IsTrue(isForeignEvent(0x20e5u), "DJ radio");
-            t.IsTrue(!isForeignEvent(0x20bbu), "PA venue is ours (Part 3)");
-            t.IsTrue(!isForeignEvent(0x2084u), "Big_Air is ours");
-            t.IsTrue(!isForeignEvent(0x2133u), "Uber is ours");
-            t.IsTrue(findRoute(0x20cfu) == nullptr, "no route for DJ"); });
+            const Route *r = route(0x20e5u);
+            t.IsTrue(r != nullptr && r->mcEvent == 0x2020u && r->outEvent == 0x20bbu &&
+                         r->outT0 == 0xbu,
+                     "radio intro -> venue call");
+            r = route(0x20cfu);
+            t.IsTrue(r != nullptr && r->mcEvent == 0x201eu && r->outEvent == 0x20c5u &&
+                         r->outT0 == 0xbu,
+                     "artist intro -> Tricky Go");
+            r = route(0x20bcu);
+            t.IsTrue(r != nullptr && r->mcEvent == kFlyoverFamily &&
+                         r->outEvent == 0x20c0u && r->outT0 == 0xbu,
+                     "menu greeting -> flyover");
+            // Rules accept always (prob 100, no hold, no rep limit).
+            for (uint32_t fam : {0x2020u, 0x201eu, kFlyoverFamily})
+            {
+                const Rule *rl = rule(fam);
+                t.IsTrue(rl != nullptr && rl->prob == 100u && rl->hold == 0u && rl->rep == 0u,
+                         "start-cue rule always accepts");
+            }
+            // decide() remaps the first occurrence live.
+            TranslatorState s;
+            r = route(0x20e5u);
+            Decision d = decide(s, *r, *rule(0x2020u), 4095u, false);
+            t.IsTrue(d.verdict == Verdict::Remap && d.outEvent == 0x20bbu, "venue remaps");
+            r = route(0x20cfu);
+            d = decide(s, *r, *rule(0x201eu), 4095u, false);
+            t.IsTrue(d.verdict == Verdict::Remap && d.outEvent == 0x20c5u, "Go remaps");
+            r = route(0x20bcu);
+            d = decide(s, *r, *rule(kFlyoverFamily), 1540u, false);
+            t.IsTrue(d.verdict == Verdict::Remap && d.outEvent == 0x20c0u,
+                     "flyover remaps"); });
 
             tc.Run("Part 3 retirements drop naturals", [](TestCase &t)
                    {
