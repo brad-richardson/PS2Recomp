@@ -1,1 +1,7 @@
-{}
+{
+  "82fcd61da77efd7d2ae449cd53a2a9c55122f53430a245ba8dfa33fc4c29302c": {
+    "tag": "android-prebuilt-82fcd61da77efd7d2ae449cd53a2a9c55122f53430a245ba8dfa33fc4c29302c",
+    "asset": "android-arm64-82fcd61da77efd7d2ae449cd53a2a9c55122f53430a245ba8dfa33fc4c29302c.zip",
+    "sha256": "7762008800fe79534f60421a4c41014d2514178c6ddcde17259ec4315d3ae854"
+  }
+}
