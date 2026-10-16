@@ -27,13 +27,14 @@ void both32(uint8_t *p, uint32_t v)
     p[3] = uint8_t(v >> 24);
 }
 
-size_t putRecord(std::vector<uint8_t> &img, size_t at, const std::string &name, uint32_t lbn, uint32_t size)
+size_t putRecord(std::vector<uint8_t> &img, size_t at, const std::string &name, uint32_t lbn, uint32_t size,
+                 uint8_t flags = 0)
 {
     const size_t len = 33 + name.size() + ((name.size() % 2) == 0 ? 1 : 0);
     img[at] = static_cast<uint8_t>(len);
     both32(&img[at + 2], lbn);
     both32(&img[at + 10], size);
-    img[at + 25] = 0;
+    img[at + 25] = flags;
     img[at + 32] = static_cast<uint8_t>(name.size());
     std::memcpy(&img[at + 33], name.data(), name.size());
     return at + len;
@@ -55,9 +56,9 @@ std::vector<uint8_t> makeSlimPayload()
     std::memcpy(pvd + 1, "CD001", 5);
     putRecord(img, 16 * kSec + 156, std::string(1, '\0'), 20, kSec);
     size_t o = putDots(img, 20, 20);
-    putRecord(img, o, "DATA", 21, kSec);
+    putRecord(img, o, "DATA", 21, kSec, 2);
     o = putDots(img, 21, 20);
-    putRecord(img, o, "WORLDS", 22, kSec);
+    putRecord(img, o, "WORLDS", 22, kSec, 2);
     o = putDots(img, 22, 21);
     putRecord(img, o, "STOCK.BIG;1", 30, 4096);
     std::memset(&img[30 * kSec], 0xA0, kSec);
