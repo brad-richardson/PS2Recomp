@@ -321,7 +321,13 @@ void resolveGpuDefaults()
     const char *fetch = ps2x::gpu_resolve::resolveWorkaround(std::getenv("GE1_ADRENO_FETCH_WORKAROUND"), adreno);
     setenv("GE1_ADRENO_FETCH_WORKAROUND", fetch, 1);
     // H3: Turnip requested but the HAL is unusable -> system driver, not exit 78.
+    // H5 reuses the probe: TUR1 proved prefer_sysmem a real win on the Odin
+    // 830 (Elysium -0.75 p50/-2.0 p99, pixels identical), so keep it, but set
+    // it only when the bundled Turnip serves an Adreno 8xx. Older Adreno +
+    // bundled Turnip falls back to the Mesa default (BANDWIDTH); non-Turnip
+    // drivers ignore the variable. Play envs keep their explicit line.
     const char *turnip = std::getenv("GE1_VK_TURNIP");
+    bool turnipServesAdreno8xx = false;
     if (turnip && std::strcmp(turnip, "1") == 0)
     {
         const TurnipProbe probe = probeTurnipHAL();
@@ -331,7 +337,16 @@ void resolveGpuDefaults()
                          probe.reason);
             setenv("GE1_VK_TURNIP", "0", 1);
         }
+        else
+        {
+            for (const auto &dev : probe.devices)
+                turnipServesAdreno8xx =
+                    turnipServesAdreno8xx || ps2x::gpu_resolve::isAdreno8xx(dev.vendor, dev.name.c_str());
+        }
     }
+    const char *tune = ps2x::gpu_resolve::resolveAutotune(std::getenv("TU_AUTOTUNE_ALGO"), turnipServesAdreno8xx);
+    if (tune)
+        setenv("TU_AUTOTUNE_ALGO", tune, 1);
     // Resolved-knob line: the effective values GE1 is about to open with.
     const char *effTurnip = std::getenv("GE1_VK_TURNIP");
     const char *effBmix = std::getenv("GE1_ADRENO_BLEND_MIX");
