@@ -1,5 +1,15 @@
-#include "Common.h"
+// snd-seam-1 family #9: moved from ps2xRuntime/src/lib/Kernel/Stubs/.
+// Prefer public runtime headers over that dir's private Common.h (K1 did
+// the same for the SIF handshake).
 #include "Ssx3Movie.h"
+
+#include "ps2_runtime.h"
+#include "runtime/ps2_memory.h"
+
+#include <atomic>
+#include <cstring>
+#include <iostream>
+#include <string>
 
 namespace ps2_stubs
 {
