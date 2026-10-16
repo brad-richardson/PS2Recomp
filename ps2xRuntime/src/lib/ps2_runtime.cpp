@@ -15,6 +15,7 @@
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_lod.h"
+#include "ps2_ssx3_tricky_dj.h"
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ssx3_tricky_menu.h"
@@ -2061,6 +2062,88 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-turbo-boot", "SLUS_207.72", 0x00100008u, 0u, ap
 // snd-seam-1 Part 5 slice 2: the stock-meter suppression override lives in
 // the game module now (games/ssx3/module/src/stock_meter.cpp, row
 // "ssx3-tricky-stock-meter").
+
+// tk-audio-2: Tricky-gated stock DJ/PA commentary drops
+// (PS2X_SSX3_TRICKY_DJ_GATE=1, tk-audio-1 step 3). The guest posts stock
+// radio/PA speech events through the speech-queue post function at 0x2B1458
+// (ps2_ssx3_tricky_hud::kSpeechPostFunc): DJ_Artist_Intro (0x20cf),
+// PA_Venue_Intro (0x20bb) and DJ_Radio_Big_Intro (0x20e5, gated via the
+// header). On Tricky courses the wrapper drops the gated posts before the
+// game queues them; the caller observes v0=0 (rejected), the same value the
+// queue returns when it cannot accept a post. Default off: nothing is wrapped
+// and every post calls the original (det-identical). Chains with the MC
+// translator wrapper in either registration order (predecessor chaining); a
+// different ELF (post-func word) refuses and keeps stock speech. tk-meter-1's
+// stock-meter suppression (game module row "ssx3-tricky-stock-meter") is untouched.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_tkDjPostPrev = nullptr;
+    bool g_tkDjGate = false; // PS2X_SSX3_TRICKY_DJ_GATE=1 (tk-audio-1 step 3)
+    uint64_t g_tkDjDropped = 0u;
+
+    void tkDjPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t a2 = (ctx != nullptr) ? getRegU32(ctx, 6) : 0u;
+        bool tricky = false;
+        if (rdram != nullptr)
+        {
+            ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
+            tricky = ms.armed && ps2_ssx3_course::modeCurrent(ms, rdram) != 0u;
+        }
+        if (g_tkDjGate && tricky && ps2_ssx3_tricky_dj::isGatedEvent(a2))
+        {
+            if (ctx != nullptr)
+                ctx->r[2] = _mm_set_epi64x(0, 0);
+            ++g_tkDjDropped;
+            const uint64_t tick = (runtime != nullptr)
+                                      ? static_cast<uint64_t>(runtime->memory().gs().vsyncTick.load(
+                                            std::memory_order_relaxed))
+                                      : 0ull;
+            std::fprintf(stderr, "[ssx3-tricky-dj] dropped post a2=0x%x tick=%llu total=%llu\n",
+                         a2, static_cast<unsigned long long>(tick),
+                         static_cast<unsigned long long>(g_tkDjDropped));
+            return;
+        }
+        if (g_tkDjPostPrev)
+            g_tkDjPostPrev(rdram, ctx, runtime);
+    }
+
+    void applyTrickyDjGate(PS2Runtime &runtime)
+    {
+        g_tkDjGate = ps2_ssx3_tricky_dj::gateEnabled();
+        if (!g_tkDjGate)
+            return;
+        constexpr uint32_t kPc = ps2_ssx3_tricky_hud::kSpeechPostFunc;
+        constexpr uint32_t kWord = 0x0080582du; // daddu $t3,$a0,$zero @0x2b1458
+        const uint8_t *ram = runtime.memory().getRDRAM();
+        uint32_t word = 0u;
+        if (ram)
+            std::memcpy(&word, ram + (kPc & PS2_RAM_MASK), 4u);
+        if (!ram || word != kWord)
+        {
+            std::fprintf(stderr,
+                         "[ssx3-tricky-dj] refused: 0x%x reads 0x%08x, expected 0x%08x; stock speech kept\n",
+                         kPc, word, kWord);
+            return;
+        }
+        PS2Runtime::RecompiledFunction prev = runtime.lookupFunction(kPc);
+        if (!prev || prev == &tkDjPostWrapper)
+            return;
+        g_tkDjPostPrev = prev;
+        if (!runtime.replaceFunction(kPc, &tkDjPostWrapper))
+        {
+            std::fprintf(stderr, "[ssx3-tricky-dj] cannot wrap 0x%x\n", kPc);
+            std::abort();
+        }
+        std::fprintf(stderr, "[ssx3-tricky-dj] speech post wrapped at 0x%x (djgate=1)\n", kPc);
+    }
+}
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-dj-gate",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyTrickyDjGate);
 
 // snd-seam-1 Part 5 slice 3: the draw-distance override lives in the game
 // module now (games/ssx3/module/src/lod_scale.cpp, row "ssx3-lod-scale").

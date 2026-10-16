@@ -389,6 +389,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_SSX3_LOD_SCALE",
         "PS2X_SSX3_MEGA_LAPS", // MGX1: guest-affecting, Tricky MEGA only, owner MGX1
         "PS2X_SSX3_REPLAY_RATE",
+        "PS2X_SSX3_TRICKY_DJ_GATE", // tk-audio-1: guest-affecting, Tricky courses only, owner tk-audio-1
         "PS2X_SSX3_TRICKY_GEMS",
         "PS2X_SSX3_TRICKY_GEMS_TABLE",
         "PS2X_SSX3_TRICKY_GEM_SPIN",

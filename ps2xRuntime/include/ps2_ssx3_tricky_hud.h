@@ -318,6 +318,10 @@ inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t pt
 // 0x29abfc as in boost-add 0x10e990, +0x870 at 0x29ac80 as in func_29AB08
 // with a1 = R). Each hop is F7-validated (segment/alignment/span, no wrap);
 // any failure returns 0 (menus / pre-race: the overlay draws nothing).
+// tk-audio-2: the speech-queue post function wrapped by the DJ-gate and MC
+// translator overrides (tk-meter-1 removed TK47's uber-post wrapper but the
+// post address is unchanged).
+constexpr uint32_t kSpeechPostFunc = 0x2b1458u;
 inline uint32_t resolveChainR(const uint8_t *ram, size_t ramSize)
 {
     if (!ram || ramSize == 0u)

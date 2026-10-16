@@ -40,6 +40,7 @@ void register_game_module_none_tests();
 #endif
 void register_ps2_ssx3_tricky_hud_tests();
 void register_ps2_ssx3_tricky_song_tests();
+void register_ps2_ssx3_tricky_dj_tests();
 void register_ps2_ssx3_tricky_gems_tests();
 void register_ps2_ssx3_tricky_resetvol_tests();
 void register_ps2_ssx3_tricky_layer_tests();
@@ -145,6 +146,7 @@ int main(int argc, char **argv)
 #endif
     register_ps2_ssx3_tricky_hud_tests();
     register_ps2_ssx3_tricky_song_tests();
+    register_ps2_ssx3_tricky_dj_tests();
     register_ps2_ssx3_tricky_gems_tests();
     register_ps2_ssx3_tricky_resetvol_tests();
     register_ps2_ssx3_tricky_layer_tests();
