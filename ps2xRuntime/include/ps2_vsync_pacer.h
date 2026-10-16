@@ -149,6 +149,14 @@ inline bool unpacedFromProcessEnv()
     return unpacedFromEnv(std::getenv("PS2X_UNPACED"));
 }
 
+// mac-speed-1: lab-only host-present decoupling (PS2X_LAB_UNCAPPED=1).
+// Drops the raylib FPS limiter and the GL vsync swap wait so unpaced lab
+// boots measure true headroom. Host waits only; guest state untouched.
+inline bool labUncappedFromEnv(const char *v)
+{
+    return v && std::strcmp(v, "1") == 0;
+}
+
 // Executor-side one-liner: sleep until this vsync's wall deadline when ahead.
 // nowNs/sleepNs round-trip through the steady clock's epoch so the wait lands
 // on the absolute deadline computed by Pacer::onVsync.

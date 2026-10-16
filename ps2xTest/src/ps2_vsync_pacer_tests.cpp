@@ -88,6 +88,15 @@ void register_ps2_vsync_pacer_tests()
             t.IsFalse(ps2_vsync_pacer::unpacedFromEnv("true"), "only exact 1 disables");
         });
 
+        tc.Run("lab uncapped knob parsing", [](TestCase &t)
+        {
+            t.IsTrue(ps2_vsync_pacer::labUncappedFromEnv("1"), "PS2X_LAB_UNCAPPED=1 uncaps");
+            t.IsFalse(ps2_vsync_pacer::labUncappedFromEnv(nullptr), "unset means capped");
+            t.IsFalse(ps2_vsync_pacer::labUncappedFromEnv(""), "empty means capped");
+            t.IsFalse(ps2_vsync_pacer::labUncappedFromEnv("0"), "0 means capped");
+            t.IsFalse(ps2_vsync_pacer::labUncappedFromEnv("true"), "only exact 1 uncaps");
+        });
+
         tc.Run("host pace rate parsing", [](TestCase &t)
         {
             const auto off = ps2_vsync_pacer::hostPaceFromEnv(nullptr, nullptr, nullptr);
