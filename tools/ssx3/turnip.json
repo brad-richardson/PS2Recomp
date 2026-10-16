@@ -1,10 +1,10 @@
 {
   "binary": {
-    "url": "https://github.com/brad-richardson/mesa/releases/download/turnip-ssx3-p1-r2/libvulkan_freedreno.so",
+    "url": "https://github.com/brad-richardson/mesa/releases/download/turnip-ssx3-p1-r3/libvulkan_freedreno.so",
     "sha256": "c11a65e75a60b90ec8bc544452dca550334f38edb11f9426fa0b481e84baab63"
   },
   "notices": {
-    "url": "https://github.com/brad-richardson/mesa/releases/download/turnip-ssx3-p1-r2/turnip-notices.zip",
+    "url": "https://github.com/brad-richardson/mesa/releases/download/turnip-ssx3-p1-r3/turnip-notices.zip",
     "sha256": "bea3eebbaa378429e457884ba288cd965de3256b39babb9ea9a5a29fc232821a"
   }
 }
