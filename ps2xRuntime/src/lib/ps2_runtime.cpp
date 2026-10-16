@@ -8329,6 +8329,12 @@ void PS2Runtime::run()
     uint64_t tkLatchGen = 0;
     uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
     std::vector<int64_t> tkDown; // touch ids currently on the list
+    // Lane shots (PS2X_TK_MENU_2_SHOT=<prefix>): the host present, overlay
+    // included, every 300 overlay frames while the list is open. Headless
+    // Mini evidence for the sheet/video; remove with the lane.
+    const char *tkShotPrefix = std::getenv("PS2X_TK_MENU_2_SHOT");
+    if (tkShotPrefix && !tkShotPrefix[0])
+        tkShotPrefix = nullptr;
     if (tkListOn)
         std::fprintf(stderr, "[tklist] overlay on (PS2X_SSX3_TRICKY_LIST=1)\n");
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
@@ -9573,6 +9579,20 @@ void PS2Runtime::run()
                 DrawTextureRec(tkTex.texture,
                                Rectangle{0.0f, 0.0f, static_cast<float>(tkTw), static_cast<float>(-tkTh)},
                                Vector2{0.0f, 0.0f}, WHITE);
+                if (tkShotPrefix)
+                {
+                    static uint64_t tkShotTick = 0;
+                    if ((tkShotTick++ % 300u) == 0u)
+                    {
+                        char shotPath[512];
+                        std::snprintf(shotPath, sizeof(shotPath), "%s-%llu.png", tkShotPrefix,
+                                      static_cast<unsigned long long>(tkShotTick));
+                        Image tkShotImg = LoadImageFromTexture(tkTex.texture);
+                        ImageFlipVertical(&tkShotImg);
+                        ExportImage(tkShotImg, shotPath);
+                        UnloadImage(tkShotImg);
+                    }
+                }
             }
         }
         else if (set2Open)
