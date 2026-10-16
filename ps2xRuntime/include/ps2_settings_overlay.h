@@ -7,6 +7,8 @@
 // own the settings file layer + relaunch.
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -109,10 +111,12 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf overlay, On-device upscale, Touch
-// controls, Restart. X changes the pending value (Mode/Resolution apply on
-// restart; Perf, Upscale and Touch are live). Restart arms on the first X
-// ("one-line confirm") and fires on the second. Triangle or the chord closes.
+// Rows: Mode, Resolution, Perf, Upscale, Touch, Restart. X changes the
+// pending value (Mode/Resolution apply on restart; Perf, Upscale and Touch
+// are live). Restart arms on the first X ("one-line confirm") and fires on
+// the second. Triangle or the chord closes. Row::Count drives the geometry,
+// hit test and draw loops, so appending a row (e.g. Online) needs no layout
+// change.
 enum class Row : uint8_t
 {
     Mode = 0,
@@ -123,6 +127,57 @@ enum class Row : uint8_t
     Restart = 5,
     Count = 6
 };
+static constexpr int kRowCount = static_cast<int>(Row::Count);
+
+// Short row labels (panel-polish-1, Brad 10-15: every label shows in full;
+// the draw code sets label left, value right, so no dot leaders truncate).
+inline const char *rowLabel(Row r)
+{
+    switch (r)
+    {
+    case Row::Mode:
+        return "Mode";
+    case Row::Res:
+        return "Resolution";
+    case Row::Perf:
+        return "Perf";
+    case Row::Upscale:
+        return "Upscale";
+    case Row::Touch:
+        return "Touch";
+    case Row::Restart:
+        return "Restart";
+    default:
+        return "";
+    }
+}
+
+// Nearest common render-height label for a real frame height in pixels
+// ("480p" .. "2160p"; "" when h == 0, so the caller can fall back). Ties
+// keep the smaller step. The input is measured pixels (the presented frame
+// on GL/iOS, the queued AHB on Android-VK), never 448 x scale.
+inline std::string resHeightLabel(unsigned h)
+{
+    if (h == 0)
+        return "";
+    static const unsigned kSteps[] = {480u, 720u, 960u, 1080u, 1440u, 2160u};
+    unsigned best = kSteps[0];
+    unsigned bestD = (h > best) ? h - best : best - h;
+    for (size_t i = 1; i < sizeof(kSteps) / sizeof(kSteps[0]); ++i)
+    {
+        const unsigned c = kSteps[i];
+        const unsigned d = (h > c) ? h - c : c - h;
+        if (d < bestD)
+        {
+            bestD = d;
+            best = c;
+        }
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%up", best);
+    return std::string(buf);
+}
+
 enum class Mode : uint8_t
 {
     M120 = 0,
@@ -242,14 +297,14 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
 
 // --- Panel geometry + hit test (QSR1 precedent: pure, render loop draws) ---
 //
-// Hit values: 0..5 = row tap (same as X on that row), 6 = gear-dot tap
-// (closed panel: open; open panel: close), -1 = miss (open panel: tap
-// outside closes).
+// Hit values: 0..kRowCount-1 = row tap (same as X on that row),
+// kRowCount = gear-dot tap (closed panel: open; open panel: close),
+// -1 = miss (open panel: tap outside closes).
 struct PanelGeom
 {
     float px = 0, py = 0, pw = 0, ph = 0; // panel rect
     float rowX = 0, rowW = 0;
-    float rowY[6] = {0, 0, 0, 0, 0, 0};
+    float rowY[kRowCount] = {};
     float rowH = 0;
     float dotX = 0, dotY = 0, dotR = 0; // gear dot (closed state)
 };
@@ -263,10 +318,10 @@ inline PanelGeom panelLayout(float w, float h)
     g.py = (h - g.ph) * 0.5f;
     g.rowX = g.px + 22.0f;
     g.rowW = g.pw - 44.0f;
-    // Title block, then 6 even rows (the draw code uses these rects).
+    // Title block, then kRowCount even rows (the draw code uses these rects).
     const float titleH = h / 26.0f + 22.0f;
-    g.rowH = (g.ph - titleH - 34.0f) / 6.0f;
-    for (int i = 0; i < 6; ++i)
+    g.rowH = (g.ph - titleH - 34.0f) / static_cast<float>(kRowCount);
+    for (int i = 0; i < kRowCount; ++i)
         g.rowY[i] = g.py + titleH + i * g.rowH;
     // Gear dot top-right: clear of the vpad shoulders (top corners at 0.10u
     // with 0.07u discs).
@@ -280,12 +335,12 @@ inline int panelHit(const PanelGeom &g, bool open, float x, float y)
 {
     const float ddx = x - g.dotX, ddy = y - g.dotY;
     if (ddx * ddx + ddy * ddy <= g.dotR * g.dotR)
-        return 6;
+        return kRowCount;
     if (!open)
         return -1;
     if (x < g.rowX || x > g.rowX + g.rowW)
         return -1;
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < kRowCount; ++i)
     {
         if (y >= g.rowY[i] && y < g.rowY[i] + g.rowH)
             return i;
@@ -394,6 +449,29 @@ inline const char *resToUpscale(Res r)
     default:
         return ""; // RDefault: no override line
     }
+}
+
+// Projected render height for a pending Res option, from the measured frame
+// height and the effective upscale string (set2EffUpscale: "2", "2.5",
+// "native", "1x", ...). RDefault shows the measured height itself; Native
+// and R2x scale from the implied 1x base (measured / effective, or measured
+// when the effective value is "native", which already renders at display
+// size). Unparseable scales fall back to measured (neutral). Approximate by
+// construction on display-export paths (the output size is setting-blind);
+// the RDefault case is always exact.
+inline unsigned resProjectedH(Res pending, const std::string &eff, unsigned measuredH)
+{
+    if (pending == Res::RDefault || measuredH == 0)
+        return measuredH;
+    float base = static_cast<float>(measuredH);
+    if (eff != "native" && eff != "halfnative")
+    {
+        const float s = std::strtof(eff.c_str(), nullptr);
+        if (s > 0.0f)
+            base = static_cast<float>(measuredH) / s;
+    }
+    const float h = (pending == Res::Native) ? base : base * 2.0f;
+    return static_cast<unsigned>(h + 0.5f);
 }
 
 // android-touch-1: Touch row <-> PS2X_VIRTUAL_PAD. On="1", Off="0",

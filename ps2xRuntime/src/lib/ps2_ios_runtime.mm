@@ -305,6 +305,49 @@ bool panelSize(int &w, int &h)
     return true;
 }
 
+namespace
+{
+// panel-polish-1 safe-area cache (points; written on the main thread only,
+// read from any thread; plain floats are safe for this single-writer use).
+float s_safeL = 0.0f, s_safeT = 0.0f, s_safeR = 0.0f, s_safeB = 0.0f;
+bool s_safeLogged = false;
+} // namespace
+
+void pollSafeInsets()
+{
+    // Throttled by the caller to ~1/s worth of host frames; the dispatch is
+    // fire-and-forget (never blocks the loop thread on the main thread).
+    static uint64_t s_calls = 0;
+    if (++s_calls % 60u != 0u)
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = UIApplication.sharedApplication.keyWindow;
+        if (!window)
+            return;
+        const UIEdgeInsets in = window.safeAreaInsets;
+        s_safeL = static_cast<float>(in.left);
+        s_safeT = static_cast<float>(in.top);
+        s_safeR = static_cast<float>(in.right);
+        s_safeB = static_cast<float>(in.bottom);
+        if (!s_safeLogged)
+        {
+            s_safeLogged = true;
+            std::fprintf(stderr, "[ios-display] safeArea l=%.0f t=%.0f r=%.0f b=%.0f\n",
+                         static_cast<double>(s_safeL), static_cast<double>(s_safeT),
+                         static_cast<double>(s_safeR), static_cast<double>(s_safeB));
+        }
+    });
+}
+
+bool safeInsets(float &left, float &top, float &right, float &bottom)
+{
+    left = s_safeL;
+    top = s_safeT;
+    right = s_safeR;
+    bottom = s_safeB;
+    return true;
+}
+
 void syncWindowSize()
 {
     static bool attached = false;

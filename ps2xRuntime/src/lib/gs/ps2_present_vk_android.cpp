@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -306,6 +307,11 @@ void writePpm(const std::string &path, const std::vector<uint8_t> &rgb, uint32_t
 
 namespace ps2x_present_vk
 {
+// panel-polish-1: last shown AHB size (the panel's Resolution row reads it;
+// see lastShownSize below).
+std::atomic<uint32_t> s_shownW{0u};
+std::atomic<uint32_t> s_shownH{0u};
+
 bool enabled()
 {
     static const bool on = [] {
@@ -498,8 +504,23 @@ bool queue(uint64_t id, uint32_t w, uint32_t h)
     // buffer id keys the unique count (a re-shown buffer reads as a duplicate).
     const bool shown = ledger().queue(id, w, h);
     if (shown)
+    {
         ps2x::perflog::noteWorkerPresent(id);
+        // panel-polish-1: remember the render-target size for the panel's
+        // Resolution row (relaxed atomics: single writer, torn reads only
+        // ever mix one generation, and the panel rounds to coarse labels).
+        s_shownW.store(w, std::memory_order_relaxed);
+        s_shownH.store(h, std::memory_order_relaxed);
+    }
     return shown;
+}
+
+// panel-polish-1: last shown AHB size (see header).
+bool lastShownSize(uint32_t &w, uint32_t &h)
+{
+    w = s_shownW.load(std::memory_order_relaxed);
+    h = s_shownH.load(std::memory_order_relaxed);
+    return w != 0u && h != 0u;
 }
 
 long compareBuffer(AHardwareBuffer *buffer, const uint8_t *rgba, uint32_t w, uint32_t h, uint64_t tick,

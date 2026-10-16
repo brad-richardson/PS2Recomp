@@ -237,6 +237,191 @@ bool androidInputManagerGamepad()
     return found;
 }
 #endif
+#if defined(__ANDROID__)
+// panel-polish-1: display safe insets in raylib screen coordinates (Brad
+// 10-15: the perf overlay must clear rounded corners and the camera cutout).
+// JNI shape mirrors ap1HideSystemBars above. Root system-bars insets maxed
+// per side with the DisplayCutout safe insets (immersive mode zeroes the
+// bars; the cutout side survives). Queried at most 1/s and on window change;
+// zeros on any failure (fail-static: the overlay draws where it always did).
+static bool androidSafeInsets(float &left, float &top, float &right, float &bottom)
+{
+    left = top = right = bottom = 0.0f;
+    struct android_app *app = GetAndroidApp();
+    if (!app || !app->activity || !app->activity->vm || !app->window)
+        return false;
+    static float cL = 0.0f, cT = 0.0f, cR = 0.0f, cB = 0.0f;
+    static bool have = false;
+    static void *lastWindow = nullptr;
+    static auto lastQuery = std::chrono::steady_clock::now() - std::chrono::hours(24);
+    const auto now = std::chrono::steady_clock::now();
+    if (have && lastWindow == app->window && now - lastQuery < std::chrono::seconds(1))
+    {
+        left = cL;
+        top = cT;
+        right = cR;
+        bottom = cB;
+        return true;
+    }
+    JNIEnv *env = nullptr;
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
+    if (app->activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
+        return false;
+    auto failed = [&] {
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+        return false;
+    };
+    bool got = false;
+    float pxL = 0, pxT = 0, pxR = 0, pxB = 0;
+    jobject act = app->activity->clazz;
+    jclass actCls = env->GetObjectClass(act);
+    jmethodID getWindow =
+        actCls ? env->GetMethodID(actCls, "getWindow", "()Landroid/view/Window;") : nullptr;
+    jobject win = (getWindow && !env->ExceptionCheck()) ? env->CallObjectMethod(act, getWindow)
+                                                        : nullptr;
+    jclass winCls = (win && !env->ExceptionCheck()) ? env->GetObjectClass(win) : nullptr;
+    jmethodID getDecor =
+        winCls ? env->GetMethodID(winCls, "getDecorView", "()Landroid/view/View;") : nullptr;
+    jobject view = (getDecor && !env->ExceptionCheck()) ? env->CallObjectMethod(win, getDecor)
+                                                        : nullptr;
+    jclass viewCls = (view && !env->ExceptionCheck()) ? env->GetObjectClass(view) : nullptr;
+    jmethodID getRootInsets =
+        viewCls ? env->GetMethodID(viewCls, "getRootWindowInsets", "()Landroid/view/WindowInsets;")
+                : nullptr;
+    jobject insets = (getRootInsets && !env->ExceptionCheck())
+                         ? env->CallObjectMethod(view, getRootInsets)
+                         : nullptr;
+    if (insets && !env->ExceptionCheck())
+    {
+        jclass insetsCls = env->GetObjectClass(insets);
+        if (android_get_device_api_level() >= 30)
+        {
+            jclass typeCls = env->FindClass("android/view/WindowInsets$Type");
+            jmethodID systemBars =
+                typeCls ? env->GetStaticMethodID(typeCls, "systemBars", "()I") : nullptr;
+            const jint types =
+                (typeCls && systemBars && !env->ExceptionCheck())
+                    ? env->CallStaticIntMethod(typeCls, systemBars)
+                    : 0;
+            jmethodID getInsets =
+                insetsCls ? env->GetMethodID(insetsCls, "getInsets", "(I)Landroid/graphics/Insets;")
+                          : nullptr;
+            jobject bars = (getInsets && types != 0 && !env->ExceptionCheck())
+                               ? env->CallObjectMethod(insets, getInsets, types)
+                               : nullptr;
+            if (bars && !env->ExceptionCheck())
+            {
+                jclass barsCls = env->GetObjectClass(bars);
+                jfieldID fL = barsCls ? env->GetFieldID(barsCls, "left", "I") : nullptr;
+                jfieldID fT = barsCls ? env->GetFieldID(barsCls, "top", "I") : nullptr;
+                jfieldID fR = barsCls ? env->GetFieldID(barsCls, "right", "I") : nullptr;
+                jfieldID fB = barsCls ? env->GetFieldID(barsCls, "bottom", "I") : nullptr;
+                if (fL && fT && fR && fB && !env->ExceptionCheck())
+                {
+                    pxL = static_cast<float>(env->GetIntField(bars, fL));
+                    pxT = static_cast<float>(env->GetIntField(bars, fT));
+                    pxR = static_cast<float>(env->GetIntField(bars, fR));
+                    pxB = static_cast<float>(env->GetIntField(bars, fB));
+                    got = !env->ExceptionCheck();
+                }
+                if (barsCls)
+                    env->DeleteLocalRef(barsCls);
+                env->DeleteLocalRef(bars);
+            }
+            if (typeCls)
+                env->DeleteLocalRef(typeCls);
+        }
+        else
+        {
+            jmethodID gL = env->GetMethodID(insetsCls, "getSystemWindowInsetLeft", "()I");
+            jmethodID gT = env->GetMethodID(insetsCls, "getSystemWindowInsetTop", "()I");
+            jmethodID gR = env->GetMethodID(insetsCls, "getSystemWindowInsetRight", "()I");
+            jmethodID gB = env->GetMethodID(insetsCls, "getSystemWindowInsetBottom", "()I");
+            if (gL && gT && gR && gB && !env->ExceptionCheck())
+            {
+                pxL = static_cast<float>(env->CallIntMethod(insets, gL));
+                pxT = static_cast<float>(env->CallIntMethod(insets, gT));
+                pxR = static_cast<float>(env->CallIntMethod(insets, gR));
+                pxB = static_cast<float>(env->CallIntMethod(insets, gB));
+                got = !env->ExceptionCheck();
+            }
+        }
+        if (got)
+        {
+            // DisplayCutout (API 28+; our minSdk is 29): the camera side.
+            jmethodID getCutout = env->GetMethodID(
+                insetsCls, "getDisplayCutout", "()Landroid/view/DisplayCutout;");
+            jobject cutout = (getCutout && !env->ExceptionCheck())
+                                 ? env->CallObjectMethod(insets, getCutout)
+                                 : nullptr;
+            if (cutout && !env->ExceptionCheck())
+            {
+                jclass cutCls = env->GetObjectClass(cutout);
+                jmethodID sL = cutCls ? env->GetMethodID(cutCls, "getSafeInsetLeft", "()I") : nullptr;
+                jmethodID sT = cutCls ? env->GetMethodID(cutCls, "getSafeInsetTop", "()I") : nullptr;
+                jmethodID sR =
+                    cutCls ? env->GetMethodID(cutCls, "getSafeInsetRight", "()I") : nullptr;
+                jmethodID sB =
+                    cutCls ? env->GetMethodID(cutCls, "getSafeInsetBottom", "()I") : nullptr;
+                if (sL && sT && sR && sB && !env->ExceptionCheck())
+                {
+                    const float cutL = static_cast<float>(env->CallIntMethod(cutout, sL));
+                    const float cutT = static_cast<float>(env->CallIntMethod(cutout, sT));
+                    const float cutR = static_cast<float>(env->CallIntMethod(cutout, sR));
+                    const float cutB = static_cast<float>(env->CallIntMethod(cutout, sB));
+                    if (!env->ExceptionCheck())
+                    {
+                        pxL = std::max(pxL, cutL);
+                        pxT = std::max(pxT, cutT);
+                        pxR = std::max(pxR, cutR);
+                        pxB = std::max(pxB, cutB);
+                    }
+                }
+                if (cutCls)
+                    env->DeleteLocalRef(cutCls);
+                env->DeleteLocalRef(cutout);
+            }
+            if (env->ExceptionCheck())
+                env->ExceptionClear();
+        }
+        if (insetsCls)
+            env->DeleteLocalRef(insetsCls);
+    }
+    if (viewCls)
+        env->DeleteLocalRef(viewCls);
+    if (view)
+        env->DeleteLocalRef(view);
+    if (winCls)
+        env->DeleteLocalRef(winCls);
+    if (win)
+        env->DeleteLocalRef(win);
+    if (actCls)
+        env->DeleteLocalRef(actCls);
+    if (insets)
+        env->DeleteLocalRef(insets);
+    if (!got)
+        return failed();
+    // Pixels -> raylib screen coordinates (same space DrawText uses).
+    const float screenW = static_cast<float>(GetScreenWidth());
+    const float dpi = (screenW > 0.0f) ? static_cast<float>(GetRenderWidth()) / screenW : 1.0f;
+    const float inv = (dpi > 0.0f) ? 1.0f / dpi : 1.0f;
+    cL = pxL * inv;
+    cT = pxT * inv;
+    cR = pxR * inv;
+    cB = pxB * inv;
+    lastWindow = app->window;
+    lastQuery = now;
+    have = true;
+    left = cL;
+    top = cT;
+    right = cR;
+    bottom = cB;
+    return true;
+}
+#endif
 // VK1: raylib's app-command handler, wrapped so the SurfaceControl child is
 // detached before the window goes (TERM_WINDOW) and remade after it returns
 // (the ANativeWindow pointer can be reused across background/foreground).
@@ -7837,6 +8022,26 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_INTEGER_OVERFLOW);
 }
 
+namespace
+{
+// panel-polish-1: perf-overlay origin pad (raylib screen coordinates)
+// clearing the display cutout and rounded corners. Android: live JNI root +
+// cutout insets; iOS: UIKit safeAreaInsets cached on the main thread;
+// elsewhere zero (fail-static: the overlay draws where it always did).
+void set2SafePad(float &left, float &top)
+{
+    left = 0.0f;
+    top = 0.0f;
+#if defined(__ANDROID__)
+    float right = 0.0f, bottom = 0.0f;
+    (void)androidSafeInsets(left, top, right, bottom);
+#elif defined(PS2X_IOS)
+    float right = 0.0f, bottom = 0.0f;
+    (void)ps2x::ios::safeInsets(left, top, right, bottom);
+#endif
+}
+} // namespace
+
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -8076,6 +8281,7 @@ void PS2Runtime::run()
     bool set2Open = false;
     bool set2Eff120 = false;   // effective values, sampled at open
     std::string set2EffUpscale; // effective GE1_UPSCALE (or the platform default)
+    unsigned set2MeasuredH = 0;  // panel-polish-1: last real game-frame height px
     ps2x::set2::Res set2ResAtOpen = ps2x::set2::Res::RDefault;
     uint64_t set2HostFrame = 0;
     uint16_t set2PrevUnion = 0; // nav edge detect
@@ -8326,6 +8532,7 @@ void PS2Runtime::run()
 
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
+        ps2x::ios::pollSafeInsets(); // panel-polish-1: safe-area refresh (throttled inside)
         {
             const int iosScreenW = GetScreenWidth();
             const int iosScreenH = GetScreenHeight();
@@ -8988,7 +9195,7 @@ void PS2Runtime::run()
             std::vector<int64_t> set2Still;
             for (int i = 0; i < set2n; ++i)
             {
-                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != 6)
+                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != ps2x::set2::kRowCount)
                     continue;
                 set2Still.push_back(set2ts[i].id);
                 if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) == set2Down.end())
@@ -9333,10 +9540,12 @@ void PS2Runtime::run()
                     continue;
                 set2Down.push_back(set2ts[i].id);
                 const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
-                if (hit >= 0 && hit <= 5)
+                if (hit >= 0 && hit < ps2x::set2::kRowCount)
                 {
                     set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
-                    set2Nav.restartArmed = (hit == 5) ? set2Nav.restartArmed : false;
+                    set2Nav.restartArmed =
+                        (hit == static_cast<int>(ps2x::set2::Row::Restart)) ? set2Nav.restartArmed
+                                                                           : false;
                     const ps2x::set2::NavOut tapOut =
                         ps2x::set2::navStep(set2Nav, false, false, true, false, false);
                     if (tapOut.action == ps2x::set2::Action::Changed &&
@@ -9425,7 +9634,7 @@ void PS2Runtime::run()
                 int set2Kept = 0;
                 for (int i = 0; i < touches; ++i)
                 {
-                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != 6)
+                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != ps2x::set2::kRowCount)
                     {
                         vpadTouches[set2Kept++] = vpadTouches[i];
                         continue;
@@ -9570,6 +9779,29 @@ void PS2Runtime::run()
                 BeginBlendMode(BLEND_CUSTOM_SEPARATE);
             }
 #endif
+            // panel-polish-1: track the real game-frame height in pixels for
+            // the Resolution row (never 448 x scale). The latched frame on
+            // GL/iOS is real pixels; on Android-VK the CPU frame is a
+            // placeholder, so the last queued AHB (the actual render target)
+            // wins there instead.
+            {
+#if defined(__ANDROID__)
+                const bool set2Vk = ps2x_present_vk::active();
+#else
+                const bool set2Vk = false;
+#endif
+                if (!set2Vk && presentHeight != 0u)
+                    set2MeasuredH = presentHeight;
+#if defined(__ANDROID__)
+                if (set2Vk)
+                {
+                    uint32_t set2Qw = 0, set2Qh = 0;
+                    if (ps2x_present_vk::lastShownSize(set2Qw, set2Qh) && set2Qw != 0u &&
+                        set2Qh != 0u)
+                        set2MeasuredH = std::min(set2Qw, set2Qh);
+                }
+#endif
+            }
             const ps2x::set2::PanelGeom set2dg = ps2x::set2::panelLayout(screenWidth, screenHeight);
             if (set2Open)
             {
@@ -9591,39 +9823,75 @@ void PS2Runtime::run()
                                    Color{255, 140, 40, 255});
                 const int titleFont = std::max(16, static_cast<int>(screenHeight / 26.0f));
                 const int rowFont = std::max(12, static_cast<int>(screenHeight / 34.0f));
-                DrawText("SETTINGS (guest paused)", static_cast<int>(set2dg.px) + 14,
+                // panel-polish-1 (Brad 10-15): plain title; the game still
+                // pauses while the panel is open.
+                DrawText("Settings", static_cast<int>(set2dg.px) + 14,
                          static_cast<int>(set2dg.py) + 10, titleFont, Color{255, 170, 80, 255});
                 const bool modeDirty =
                     (set2Nav.mode == ps2x::set2::Mode::M120) != set2Eff120;
                 const bool resDirty = set2Nav.res != set2ResAtOpen;
+                // panel-polish-1: the real render height (measured pixels),
+                // never the scale factor. Pending options project from the
+                // measured height; default shows the measured height itself.
                 std::string resVal;
-                if (set2Nav.res == ps2x::set2::Res::Native)
-                    resVal = "native";
-                else if (set2Nav.res == ps2x::set2::Res::R2x)
-                    resVal = "2x";
+                if (set2Nav.res == ps2x::set2::Res::RDefault)
+                {
+                    const std::string measured = ps2x::set2::resHeightLabel(set2MeasuredH);
+                    resVal = measured.empty() ? "default (" + set2EffUpscale + ")"
+                                              : measured + " (default)";
+                }
                 else
-                    resVal = "default (" + set2EffUpscale + ")";
-                const std::string rows[6] = {
-                    std::string("Mode .......... ") +
-                        (set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60") +
-                        (modeDirty ? "  (restart)" : ""),
-                    std::string("Resolution .... ") + resVal + (resDirty ? "  (restart)" : ""),
-                    std::string("Perf overlay .. ") + (set2Nav.perf ? "on" : "off"),
-                    std::string("On-device up.. ") + (set2Nav.upscale ? "on" : "off"),
-                    std::string("Touch controls ") + ps2x::set2::touchName(set2Nav.touch),
-                    set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now"};
-                for (int i = 0; i < 6; ++i)
+                {
+                    const unsigned proj = ps2x::set2::resProjectedH(set2Nav.res, set2EffUpscale,
+                                                                    set2MeasuredH);
+                    const std::string label = ps2x::set2::resHeightLabel(proj);
+                    resVal = label.empty() ? ps2x::set2::resToUpscale(set2Nav.res) : label;
+                }
+                if (resDirty)
+                    resVal += "  (restart)";
+                const std::string modeVal =
+                    std::string(set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60") +
+                    (modeDirty ? "  (restart)" : "");
+                const std::string perfVal(set2Nav.perf ? "on" : "off");
+                const std::string upscaleVal(set2Nav.upscale ? "on" : "off");
+                const std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
+                const std::string restartVal =
+                    set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now";
+                for (int i = 0; i < ps2x::set2::kRowCount; ++i)
                 {
                     if (static_cast<int>(set2Nav.sel) == i)
                         DrawRectangle(static_cast<int>(set2dg.rowX) - 6, static_cast<int>(set2dg.rowY[i]),
                                       static_cast<int>(set2dg.rowW) + 12, static_cast<int>(set2dg.rowH),
                                       Color{255, 140, 40, 48});
-                    DrawText(rows[i].c_str(), static_cast<int>(set2dg.rowX),
-                             static_cast<int>(set2dg.rowY[i]) +
-                                 (static_cast<int>(set2dg.rowH) - rowFont) / 2,
-                             rowFont,
-                             static_cast<int>(set2Nav.sel) == i ? Color{255, 200, 130, 255}
-                                                                : Color{230, 235, 245, 255});
+                    const Color rowCol = static_cast<int>(set2Nav.sel) == i
+                                             ? Color{255, 200, 130, 255}
+                                             : Color{230, 235, 245, 255};
+                    const int rowY = static_cast<int>(set2dg.rowY[i]) +
+                                     (static_cast<int>(set2dg.rowH) - rowFont) / 2;
+                    const ps2x::set2::Row row = static_cast<ps2x::set2::Row>(i);
+                    if (row == ps2x::set2::Row::Restart)
+                    {
+                        DrawText(restartVal.c_str(), static_cast<int>(set2dg.rowX), rowY, rowFont,
+                                 rowCol);
+                        continue;
+                    }
+                    // Two columns: short label left, value right-aligned, so
+                    // every label shows in full on Odin, iPad and iPhone.
+                    const char *label = ps2x::set2::rowLabel(row);
+                    const std::string *value = &modeVal;
+                    if (row == ps2x::set2::Row::Res)
+                        value = &resVal;
+                    else if (row == ps2x::set2::Row::Perf)
+                        value = &perfVal;
+                    else if (row == ps2x::set2::Row::Upscale)
+                        value = &upscaleVal;
+                    else if (row == ps2x::set2::Row::Touch)
+                        value = &touchVal;
+                    DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
+                    const int valW = MeasureText(value->c_str(), rowFont);
+                    DrawText(value->c_str(),
+                             static_cast<int>(set2dg.rowX + set2dg.rowW) - valW, rowY, rowFont,
+                             rowCol);
                 }
                 const char *hint = "Up/Down move - X change - Triangle/chord close";
                 DrawText(hint, static_cast<int>(set2dg.px) + 14,
@@ -9644,12 +9912,20 @@ void PS2Runtime::run()
             }
             if (set2Perf)
             {
+                // panel-polish-1 (Brad 10-15): plain "120 fps" + frame ms
+                // (vs/s is guest vsyncs/game updates per second). Kept inside
+                // the display safe area (cutout-aware insets below) so it
+                // never sits in a rounded corner or under a camera cutout.
                 char line[64];
-                std::snprintf(line, sizeof(line), "%.1f vs/s  %.1f ms", set2PerfVs, set2PerfMs);
+                std::snprintf(line, sizeof(line), "%.0f fps  %.1f ms", set2PerfVs, set2PerfMs);
                 const int perfFont = std::max(12, static_cast<int>(screenHeight / 40.0f));
                 const int perfTw = MeasureText(line, perfFont);
-                DrawRectangle(8, 8, perfTw + 16, perfFont + 10, Color{0, 0, 0, 160});
-                DrawText(line, 16, 12, perfFont, Color{140, 255, 140, 230});
+                float set2SafeL = 0.0f, set2SafeT = 0.0f;
+                set2SafePad(set2SafeL, set2SafeT);
+                const int perfOx = static_cast<int>(8.0f + set2SafeL);
+                const int perfOy = static_cast<int>(8.0f + set2SafeT);
+                DrawRectangle(perfOx, perfOy, perfTw + 16, perfFont + 10, Color{0, 0, 0, 160});
+                DrawText(line, perfOx + 8, perfOy + 4, perfFont, Color{140, 255, 140, 230});
             }
 #if defined(__ANDROID__)
             if (vkUnder)

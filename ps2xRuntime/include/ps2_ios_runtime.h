@@ -72,4 +72,11 @@ std::string audioSessionState();
 // setTarget120 + synchronize, then restarts. Main thread.
 bool target120();
 void setTarget120(bool on);
+// panel-polish-1: display safe-area insets in points (== raylib screen
+// coordinates; Brad 10-15 keeps the perf overlay clear of rounded corners
+// and the camera cutout). pollSafeInsets posts a main-thread refresh of the
+// key window's safeAreaInsets (throttled, fire-and-forget); safeInsets
+// serves the cache from any thread. Zeros until the first refresh lands.
+void pollSafeInsets();
+bool safeInsets(float &left, float &top, float &right, float &bottom);
 } // namespace ps2x::ios

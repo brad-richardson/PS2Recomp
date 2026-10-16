@@ -145,21 +145,68 @@ void register_ps2_settings_overlay_tests()
 
     MiniTest::Case("Set2Panel", [](TestCase &tc)
                    {
-        tc.Run("row taps hit 0..5, dot taps hit 6, misses read -1", [](TestCase &t)
+        tc.Run("row taps hit 0..Count-1, dot taps hit Count, misses read -1", [](TestCase &t)
                {
             const auto g = ps2x::set2::panelLayout(1280.0f, 720.0f);
-            for (int i = 0; i < 6; ++i)
+            for (int i = 0; i < ps2x::set2::kRowCount; ++i)
             {
                 const int hit = ps2x::set2::panelHit(g, true, g.rowX + g.rowW * 0.5f, g.rowY[i] + g.rowH * 0.5f);
                 t.IsTrue(hit == i, "row centre hits");
             }
-            t.IsTrue(ps2x::set2::panelHit(g, true, g.dotX, g.dotY) == 6, "dot hits while open");
-            t.IsTrue(ps2x::set2::panelHit(g, false, g.dotX, g.dotY) == 6, "dot hits while closed");
+            t.IsTrue(ps2x::set2::panelHit(g, true, g.dotX, g.dotY) == ps2x::set2::kRowCount,
+                     "dot hits while open");
+            t.IsTrue(ps2x::set2::panelHit(g, false, g.dotX, g.dotY) == ps2x::set2::kRowCount,
+                     "dot hits while closed");
             t.IsTrue(ps2x::set2::panelHit(g, true, g.px * 0.25f, g.py * 0.25f) == -1, "outside misses");
             // The dot clears the panel rect (taps can't be ambiguous).
             const bool dotInPanel =
                 g.dotX >= g.px && g.dotX <= g.px + g.pw && g.dotY >= g.py && g.dotY <= g.py + g.ph;
-            t.IsTrue(!dotInPanel, "dot outside the panel"); }); });
+            t.IsTrue(!dotInPanel, "dot outside the panel"); });
+
+        tc.Run("row labels are short and complete (panel-polish-1, no truncation)", [](TestCase &t)
+               {
+            using ps2x::set2::Row;
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Mode)) == "Mode", "mode");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Res)) == "Resolution", "resolution");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Perf)) == "Perf", "perf");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Upscale)) == "Upscale", "upscale");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Touch)) == "Touch", "touch");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Restart)) == "Restart", "restart");
+            for (int i = 0; i < ps2x::set2::kRowCount; ++i)
+            {
+                const std::string label(
+                    ps2x::set2::rowLabel(static_cast<Row>(i)));
+                t.IsTrue(!label.empty() && label.size() <= 10, "short non-empty label");
+            } });
+
+        tc.Run("render heights round to the nearest common label", [](TestCase &t)
+               {
+            using ps2x::set2::resHeightLabel;
+            t.IsTrue(resHeightLabel(0).empty(), "0 -> empty (caller falls back)");
+            t.IsTrue(resHeightLabel(448) == "480p", "native 448 -> 480p");
+            t.IsTrue(resHeightLabel(480) == "480p", "480 -> 480p");
+            t.IsTrue(resHeightLabel(640) == "720p", "640 -> 720p");
+            t.IsTrue(resHeightLabel(896) == "960p", "2x 896 -> 960p");
+            t.IsTrue(resHeightLabel(960) == "960p", "960 -> 960p");
+            t.IsTrue(resHeightLabel(1080) == "1080p", "1080 -> 1080p");
+            t.IsTrue(resHeightLabel(1328) == "1440p", "iPad game rect -> 1440p");
+            t.IsTrue(resHeightLabel(1440) == "1440p", "1440 -> 1440p");
+            t.IsTrue(resHeightLabel(2160) == "2160p", "2160 -> 2160p");
+            t.IsTrue(resHeightLabel(3840) == "2160p", "clamps at 2160p"); });
+
+        tc.Run("pending options project from the measured height", [](TestCase &t)
+               {
+            using ps2x::set2::Res;
+            using ps2x::set2::resProjectedH;
+            t.Equals(resProjectedH(Res::Native, "2", 896), 448u, "native of measured 2x");
+            t.Equals(resProjectedH(Res::R2x, "2", 896), 896u, "2x keeps measured");
+            t.Equals(resProjectedH(Res::RDefault, "2", 896), 896u, "default shows measured");
+            t.Equals(resProjectedH(Res::Native, "native", 1080), 1080u, "native effective: base is measured");
+            t.Equals(resProjectedH(Res::R2x, "native", 1080), 2160u, "2x of native display height");
+            t.Equals(resProjectedH(Res::Native, "1x", 480), 480u, "1x base");
+            t.Equals(resProjectedH(Res::Native, "2.5", 1200), 480u, "fractional scale");
+            t.Equals(resProjectedH(Res::Native, "junk", 900), 900u, "junk scale falls back to measured");
+            t.Equals(resProjectedH(Res::R2x, "2", 0), 0u, "no frame yet -> 0"); }); });
 
     MiniTest::Case("Set2Settings", [](TestCase &tc)
                    {

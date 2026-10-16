@@ -108,4 +108,9 @@ void appendStats(char *out, unsigned size);
 // prints them on [perf-present] as latched=/latch_short=). Needs the ledger
 // header for the return type; implemented in ps2_present_vk_android.cpp.
 Ledger::SfLatchWindow takeSfLatchWindow();
+// panel-polish-1: size of the last shown AHB (the actual GE1 render target;
+// the runtime loop's CPU frame is a 640x480 placeholder on this path).
+// False before the first shown buffer. Thread-safe (GS worker writes, main
+// thread reads).
+bool lastShownSize(uint32_t &w, uint32_t &h);
 } // namespace ps2x_present_vk
