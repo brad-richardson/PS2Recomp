@@ -1,6 +1,6 @@
 # SSX 3 build prerequisites and current gaps
 
-New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
+New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build hosts: macOS Apple silicon, and Linux x86_64/arm64 for Android (Windows users run the Linux path in WSL2 Ubuntu); play targets: Android arm64 / iOS. Windows/x86 is unsupported.
 
 This is the maintainer build dependency inventory (**maintainer only**).
 The maintainer-only `ps2xRuntime/third_party/armsx2/build.sh` recipe below
