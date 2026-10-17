@@ -9,8 +9,10 @@
 // own rider's pos/quat/vel on the HLE side channel (ps2_net::stateSend,
 // never seen by the guest) and writes the peer's interpolated stream into
 // the peer rider every tick (teleports within reason are accepted).
-// Roster: own rider slot 0, peer slot 1 (PS2X_NET_STOCK120_GHOST / _OWN
-// override); the first received sample logs its distance to every slot.
+// Roster: own rider = the slot of the input queue that carries the local
+// pad (ps2_fh1::g_s120LocalQueue), peer = the other of two (fallback 0/1;
+// PS2X_NET_STOCK120_OWN / _GHOST override); the first received sample logs
+// its distance to every slot.
 #include "ps2_fh1_full120.h"
 #include "ps2_net_dirtysock.h"
 #include "ps2_netsync.h"
@@ -34,7 +36,7 @@ constexpr uint64_t kTimeoutUs = 3000000u;
 
 struct Knobs
 {
-    int own = 0, ghost = 1;
+    int own = -1, ghost = -1; // -1 = from the input queues
     uint64_t every = 6u, idelay = 12u;
 };
 
@@ -49,8 +51,8 @@ inline const Knobs &knobs()
             const long v = std::strtol(e, nullptr, 10);
             return v >= lo && v <= hi ? v : dflt;
         };
-        o.own = (int)num("PS2X_NET_STOCK120_OWN", 0, 5, 0);
-        o.ghost = (int)num("PS2X_NET_STOCK120_GHOST", 0, 5, 1);
+        o.own = (int)num("PS2X_NET_STOCK120_OWN", 0, 5, -1);
+        o.ghost = (int)num("PS2X_NET_STOCK120_GHOST", 0, 5, -1);
         o.every = (uint64_t)num("PS2X_NET_STOCK120_EVERY", 1, 60, 6);
         o.idelay = (uint64_t)num("PS2X_NET_STOCK120_IDELAY", 0, 120, 12);
         return o;
@@ -239,8 +241,11 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
         return;
     const Knobs &k = knobs();
     const uint64_t raceTick = tick - s.t0;
+    const int lq = ps2_fh1::g_s120LocalQueue;
+    const int ownSlot = k.own >= 0 ? k.own : (lq == 1 ? 1 : 0);
+    const int ghostSlot = k.ghost >= 0 ? k.ghost : (ownSlot == 0 ? 1 : 0);
     uint32_t own = 0u, ghost = 0u;
-    const bool haveOwn = rider(r, k.own, own), haveGhost = rider(r, k.ghost, ghost) && ghost != own;
+    const bool haveOwn = rider(r, ownSlot, own), haveGhost = rider(r, ghostSlot, ghost) && ghost != own;
     if (haveOwn && (raceTick % k.every) == 0u && (int64_t)raceTick != s.lastSend)
     {
         Sample smp;
@@ -271,8 +276,8 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
         s.mapped = true;
         const Sample &f = s.ring.back();
         char line[256];
-        int n = std::snprintf(line, sizeof(line), "[stock120] map own=%d ghost=%d peer_tick=%llu race=%llu", k.own,
-                              k.ghost, (unsigned long long)f.tick, (unsigned long long)raceTick);
+        int n = std::snprintf(line, sizeof(line), "[stock120] map own=%d ghost=%d localq=%d peer_tick=%llu race=%llu",
+                              ownSlot, ghostSlot, lq, (unsigned long long)f.tick, (unsigned long long)raceTick);
         for (int slot = 0; slot < 4 && n < (int)sizeof(line) - 24; ++slot)
         {
             uint32_t rr = 0u;
@@ -315,6 +320,17 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     {
         s.lastLog = tick;
         logLine("race", tick);
+        // Diagnostic: both roster riders and the peer's newest sample.
+        F32Trip p0, p1;
+        uint32_t r0 = 0u, r1 = 0u;
+        const bool g0 = rider(r, 0, r0) && ps2_netsync::readTrip(r, r0 + ps2_netsync::kPosOff, p0);
+        const bool g1 = rider(r, 1, r1) && ps2_netsync::readTrip(r, r1 + ps2_netsync::kPosOff, p1);
+        const Sample *nw = s.ring.empty() ? nullptr : &s.ring.back();
+        std::fprintf(stderr,
+                     "[stock120] pos race=%llu own=%d s0=%.0f,%.0f,%.0f s1=%.0f,%.0f,%.0f peer@%llu=%.0f,%.0f,%.0f\n",
+                     (unsigned long long)raceTick, ownSlot, g0 ? p0.x : 0.f, g0 ? p0.y : 0.f, g0 ? p0.z : 0.f,
+                     g1 ? p1.x : 0.f, g1 ? p1.y : 0.f, g1 ? p1.z : 0.f, nw ? (unsigned long long)nw->tick : 0ull,
+                     nw ? nw->pos.x : 0.f, nw ? nw->pos.y : 0.f, nw ? nw->pos.z : 0.f);
     }
 }
 } // namespace ps2_net_stock120

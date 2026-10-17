@@ -1027,6 +1027,7 @@ inline uint64_t g_lsStallFrom = 0u;
 inline uint32_t g_lsStallWhy = 0u, g_lsStallN = 0u;
 inline uint64_t g_s120Fed = 0u, g_s120Trim = 0u, g_s120Ck = 0u, g_s120CkFixed = 0u;
 inline int32_t g_s120State = -1;
+inline int32_t g_s120LocalQueue = -1, g_s120Players = 0; // from the input object at the gate
 
 // The gate's answer from RAM, as 0x237950 computes it (0 = open, else the
 // first closed reason: 1 state, 2 hold 0x3f8, 3 hold 0x3fc, 4+i queue i).
@@ -3782,6 +3783,22 @@ inline void lsGateHook(uint8_t *ram, R5900Context *ctx)
                          static_cast<unsigned long long>(g_s120Fed), static_cast<unsigned long long>(g_s120Trim),
                          static_cast<unsigned long long>(g_s120Ck), static_cast<unsigned long long>(g_s120CkFixed));
             g_s120State = st;
+        }
+        uint32_t n = 0u;
+        if (rd32(ram, in + 0x10u, n) && n > 0u && n <= 8u)
+        {
+            int32_t localQ = -1;
+            for (uint32_t i = 0u; i < n && localQ < 0; ++i)
+            {
+                uint32_t pad = 0u;
+                if (rd32(ram, in + 0x14u + 0x18u * i + 0xcu, pad) && pad != 0u)
+                    localQ = static_cast<int32_t>(i);
+            }
+            if (localQ != g_s120LocalQueue || static_cast<int32_t>(n) != g_s120Players)
+                std::fprintf(stderr, "[stock120] input queues players=%u local=%d t=%llu\n", n, localQ,
+                             static_cast<unsigned long long>(g_lastTick));
+            g_s120LocalQueue = localQ;
+            g_s120Players = static_cast<int32_t>(n);
         }
         if (st >= 5 && st < 32)
             stock120GateFeed(ram, in);
