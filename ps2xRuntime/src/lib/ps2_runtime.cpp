@@ -9319,7 +9319,6 @@ void PS2Runtime::run()
                                    static_cast<int>(tkg.paneW), static_cast<int>(tkg.paneH), Color{154, 62, 2, 255});
                 {
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
-                    const tkl::CourseOption &goal = tkl::listGoal(tkList);
                     // Step 0 names every mode the course has (data-driven);
                     // step 1 the highlighted one.
                     std::string tkModeList;
@@ -9351,14 +9350,9 @@ void PS2Runtime::run()
                     tkPy += tkEh;
                     const float tkCh = static_cast<float>(tkTitle) * 0.8f;
                     tkDraw(c.name, tkg.paneX + 10, tkPy + 2, tkCh, RAYWHITE, false);
-                    tkPy += tkCh + 2;
-                    char sub[128];
-                    std::snprintf(sub, sizeof(sub), "Peak %u - event %d%s", goal.peak + 1, c.event,
-                                  c.tp ? "" : " - text card (no preview on disc)");
-                    tkDraw(sub, tkg.paneX + 10, tkPy + 4, static_cast<float>(tkSmall),
-                           Color{200, 210, 225, 255}, false);
-                    // No driving/debug line in the default render (tk-menu-2
-                    // step 4; the lane diag knobs are gone with tk-menu-1).
+                    // No Peak/event line (Brad 10-16: not needed) and no
+                    // driving/debug line in the default render (the lane
+                    // diag knobs are gone with tk-menu-1).
                 }
                 // Help bar (font module; was baked legend sprites).
                 tkDraw(tkList.step == 1 ? "X Ride   Triangle Courses   Up/Down pick mode"

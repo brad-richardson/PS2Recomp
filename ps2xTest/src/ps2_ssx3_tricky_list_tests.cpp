@@ -161,10 +161,10 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(listGoal(s).row, 1, "Elysium step 0 is the Race row");
             s.step = 1;
             s.mode = 1;
-            t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Backcountry row");
+            t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Slopestyle row");
             s.mode = 0;
             t.Equals(listGoal(s).row, 1, "step 1 mode 0 is Race");
-            t.Equals(std::strcmp(kCourses[2].modeName[1], "Backcountry"), 0, "Jam mode name");
+            t.Equals(std::strcmp(kCourses[2].modeName[1], "Slopestyle"), 0, "Jam mode name");
             t.Equals(kCourses[6].nOpts, 1, "Pipedream single-mode"); });
 
         tc.Run("list nav wraps per step; single-mode cursor stays put", [](TestCase &t)
@@ -177,7 +177,7 @@ void register_ps2_ssx3_tricky_list_tests()
             s.sel = 2;
             s.step = 1;
             listMove(s, false);
-            t.Equals(s.mode, 1, "Elysium mode down to Backcountry");
+            t.Equals(s.mode, 1, "Elysium mode down to Slopestyle");
             listMove(s, false);
             t.Equals(s.mode, 0, "mode wraps over the course's own modes");
             s.sel = 0;

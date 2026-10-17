@@ -42,11 +42,12 @@ inline bool knob()
 // (Elysium, Aloha, Megaplex) offer the race-list row and the freestyle-list
 // row, picked on a second step (Part 2 amendment: no in-row toggle).
 // Mode labels are SSX 3's own event-type names: the singles' labels match
-// the stock pane headers, and the Jam rows' "Backcountry" is the game's own
-// discipline for their donor events (event table 23x8B at ISO 0x435820 =
-// RAM 0x442820: events 14/15/16 read discipline 6; enum 2 race, 3
-// slopestyle, 4 big air, 5 halfpipe, 6 backcountry per
-// ps2_ssx3_course_manifest.h; cross-checks: event 11 reads 5 and its label
+// the stock pane headers. The Jam rows' donor events read discipline 6
+// (event table 23x8B at ISO 0x435820 = RAM 0x442820: events 14/15/16;
+// enum 2 race, 3 slopestyle, 4 big air, 5 halfpipe, 6 backcountry per
+// ps2_ssx3_course_manifest.h), but Brad 10-16: they play as trick events,
+// so the picker labels them "Slopestyle" (display only; drive targets keep
+// the stock event ids). Cross-checks: event 11 reads 5 and its label
 // is the stock "Super Pipe" word, event 8 reads 4 and the stock hover pane
 // says "Big Air", events 6/7 read 3 "Slopestyle"). `tp` is the TP*.SSH
 // preview code, or null when the overlay ships none (Megaplex: text card,
@@ -71,13 +72,13 @@ struct Course
 inline constexpr Course kCourses[10] = {
     {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
     {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 0, 0}}, 1, {"Race", nullptr}},
-    {"Elysium Alps", "ELYS", 16, {{2, 0, 1}, {2, 1, 3}}, 2, {"Race", "Backcountry"}},
+    {"Elysium Alps", "ELYS", 16, {{2, 0, 1}, {2, 1, 3}}, 2, {"Race", "Slopestyle"}},
     {"Mesablanca", "MESA", 2, {{1, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
     {"Merqury City", "MERQ", 4, {{2, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
-    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Backcountry"}},
+    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Slopestyle"}},
     {"Pipedream", "PIPE", 11, {{0, 1, 2}, {0, 0, 0}}, 1, {"Super Pipe", nullptr}},
     {"Untracked", "UNTRACK", 7, {{2, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
-    {"Tokyo Megaplex", nullptr, 15, {{1, 0, 2}, {1, 1, 3}}, 2, {"Race", "Backcountry"}},
+    {"Tokyo Megaplex", nullptr, 15, {{1, 0, 2}, {1, 1, 3}}, 2, {"Race", "Slopestyle"}},
     {"Alaska", "ALASKA", 6, {{1, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
 };
 
