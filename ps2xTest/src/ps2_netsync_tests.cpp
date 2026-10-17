@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -202,6 +203,46 @@ namespace
             t.IsFalse(ps2_net_stock120::decode(p, sizeof(p) - 1u, b), "short payload refused");
             p[0] = 9u;
             t.IsFalse(ps2_net_stock120::decode(p, sizeof(p), b), "wrong version refused");
+        });
+
+        tc.Run("online-stock-2: R2 every STATE field is validated on decode and after interpolation",
+               [](TestCase &t)
+        {
+            ps2_netsync::Sample good;
+            good.pos = {1000.0f, -2000.0f, 3000.0f};
+            good.qw = 1.0f;
+            good.vel = {100.0f, 0.0f, -50.0f};
+            auto roundTrip = [&](const ps2_netsync::Sample &in) {
+                uint8_t p[ps2_net_stock120::kPayloadLen];
+                ps2_net_stock120::encode(p, 7u, in);
+                ps2_netsync::Sample out;
+                return ps2_net_stock120::decode(p, sizeof(p), out);
+            };
+            t.IsTrue(roundTrip(good), "valid sample accepted");
+            ps2_netsync::Sample bad = good;
+            bad.vel.x = std::numeric_limits<float>::quiet_NaN();
+            t.IsFalse(roundTrip(bad), "NaN velocity refused");
+            bad = good;
+            bad.qx = std::numeric_limits<float>::infinity();
+            t.IsFalse(roundTrip(bad), "infinite qx refused");
+            bad = good;
+            bad.pos.x = std::numeric_limits<float>::max();
+            t.IsFalse(roundTrip(bad), "FLT_MAX position refused");
+            bad = good;
+            bad.vel.y = 1.0e6f;
+            t.IsFalse(roundTrip(bad), "absurd velocity refused");
+            bad = good;
+            bad.qw = 3.0f;
+            t.IsFalse(roundTrip(bad), "non-unit quaternion refused");
+            bad = good;
+            bad.ftime = std::numeric_limits<float>::quiet_NaN();
+            t.IsFalse(roundTrip(bad), "NaN finish time refused");
+            // After interpolation: a show sample that drifted out of bounds
+            // (e.g. dead reckoning from a huge but finite velocity) is refused.
+            ps2_netsync::Sample show = good;
+            show.pos.z = 5.0e6f;
+            t.IsFalse(ps2_net_stock120::saneSample(show), "out-of-course show sample refused");
+            t.IsTrue(ps2_net_stock120::saneSample(good), "in-course show sample written");
         });
 
         tc.Run("online-stock-2: stock120 show tick uses the peer's observed rate", [](TestCase &t)

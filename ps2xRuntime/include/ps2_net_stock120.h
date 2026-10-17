@@ -94,6 +94,28 @@ inline void encode(uint8_t *o, uint32_t tick, const Sample &s)
     putF(o + 46, s.ftime);
 }
 
+// Pure (unit-tested): a sample is written into guest physics only if every
+// field is finite, the quaternion is near unit length, and position and
+// velocity are within course scale (worlds span ~±7e5 units; riders move
+// ~2e3 units/s, a few times that at most). Checked on decode and again
+// after interpolation/extrapolation (astra-online-review-1 R2).
+constexpr float kPosLimit = 4.0e6f, kVelLimit = 6.0e4f, kTimeLimit = 3.6e4f;
+inline bool saneSample(const Sample &s)
+{
+    const float f[] = {s.pos.x, s.pos.y, s.pos.z, s.qx, s.qy, s.qz, s.qw, s.vel.x, s.vel.y, s.vel.z, s.ftime};
+    for (float v : f)
+        if (!std::isfinite(v))
+            return false;
+    if (std::fabs(s.pos.x) > kPosLimit || std::fabs(s.pos.y) > kPosLimit || std::fabs(s.pos.z) > kPosLimit)
+        return false;
+    if (std::fabs(s.vel.x) > kVelLimit || std::fabs(s.vel.y) > kVelLimit || std::fabs(s.vel.z) > kVelLimit)
+        return false;
+    const float n2 = s.qx * s.qx + s.qy * s.qy + s.qz * s.qz + s.qw * s.qw;
+    if (n2 < 0.81f || n2 > 1.21f)
+        return false;
+    return s.ftime >= -2.0f && s.ftime <= kTimeLimit;
+}
+
 inline bool decode(const uint8_t *p, size_t n, Sample &s)
 {
     if (n != kPayloadLen || p[0] != kVersion)
@@ -110,7 +132,7 @@ inline bool decode(const uint8_t *p, size_t n, Sample &s)
     s.vel = {getF(p + 33), getF(p + 37), getF(p + 41)};
     s.fin = p[45];
     s.ftime = getF(p + 46);
-    return std::isfinite(s.pos.x) && std::isfinite(s.pos.y) && std::isfinite(s.pos.z) && std::isfinite(s.qw);
+    return saneSample(s);
 }
 
 // Pure (unit-tested): the peer tick to show at `now`: the newest sample's
@@ -308,7 +330,8 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     }
     uint64_t show = 0u;
     Sample smp;
-    if (s.alive && haveGhost && showTick(s.ring, now, k.idelay, show) && ps2_netsync::showSample(s.ring, show, smp))
+    if (s.alive && haveGhost && showTick(s.ring, now, k.idelay, show) && ps2_netsync::showSample(s.ring, show, smp) &&
+        saneSample(smp))
     {
         F32Trip was;
         if (ps2_netsync::readTrip(r, ghost + ps2_netsync::kPosOff, was))
