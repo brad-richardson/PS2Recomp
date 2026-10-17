@@ -16,8 +16,10 @@
 //   In the race the remote rider occupies the rival's AI slot (roster slot
 //   1, solid, its own identity kept): its inputs are replaced at 0x111728
 //   and pos/quat/vel are snapped from the interpolated stream each tick.
-//   STATE ticks count from the local race start (the race clock's first
-//   tick), so the two streams align without a join offset. No STATE for
+//   STATE ticks count from each side's race start (the race clock's first
+//   tick); the show point is the remote's current tick estimated from
+//   arrival times minus IDELAY (showTickFor), so a slower or hitching
+//   device still shows the remote where it is now. No STATE for
 //   TIMEOUT_MS, a lobby DROP_TO_AI or a QUIT puts the slot back to AI.
 //   The lobby orders finishes from the owners' reports; RESULT shows as a
 //   host notice (output-only).
@@ -52,6 +54,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
 #include <cstring>
 #include <ctime>
 #include <mutex>
@@ -149,6 +152,7 @@ struct Sample
     uint32_t peerMs = 0u;
     uint32_t de4 = 99u, w0 = 0u, w1 = 0u; // the rider's input at that tick
     bool hasInput = false;
+    uint64_t rxUs = 0u; // local arrival (monotonic us; show-point estimate)
 };
 
 enum class Phase : uint8_t
@@ -493,6 +497,28 @@ inline bool showSample(const std::vector<Sample> &ring, uint64_t showTick, Sampl
     out.pos.x += lo->vel.x * dt;
     out.pos.y += lo->vel.y * dt;
     out.pos.z += lo->vel.z * dt;
+    return true;
+}
+
+// The remote race tick to show now: the remote's current tick estimated
+// from arrival times (each sample's rx - tick/120 s; the least-delayed one
+// is the reference), minus `idelay`. Wall-clock based, so a device running
+// slower or faster than 120 (or one that hitched) still shows the remote
+// where it is now, not where the local race tick says. Equal to local race
+// tick - idelay when both run at 120. False when the ring is empty.
+inline bool showTickFor(const std::vector<Sample> &ring, uint64_t nowUs, uint64_t idelay, uint64_t &out)
+{
+    if (ring.empty())
+        return false;
+    int64_t minOff = INT64_MAX;
+    for (const Sample &s : ring)
+    {
+        const int64_t off = (int64_t)s.rxUs - (int64_t)(s.tick * 1000000u / 120u);
+        if (off < minOff)
+            minOff = off;
+    }
+    const int64_t est = ((int64_t)nowUs - minOff) * 120 / 1000000;
+    out = est > (int64_t)idelay ? (uint64_t)(est - (int64_t)idelay) : 0u;
     return true;
 }
 
@@ -969,6 +995,7 @@ inline void onPeerState(const Msg &m)
         ++s.stale;
         return;
     }
+    smp.rxUs = m.rxUs;
     s.ring.push_back(smp);
     if (s.ring.size() > 64u)
         s.ring.erase(s.ring.begin());
@@ -1416,11 +1443,12 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
                      (unsigned long long)raceTick);
         ps2x::ui::toast("Rider disconnected - the AI takes over", 4.0f);
     }
-    if (s.peerAlive && !s.ring.empty() && (int64_t)raceTick != s.lastShowTick &&
-        raceTick >= knobs().idelay)
+    uint64_t showTick = 0u;
+    if (s.peerAlive && (int64_t)raceTick != s.lastShowTick &&
+        showTickFor(s.ring, wallUs(), knobs().idelay, showTick))
     {
         Sample show;
-        if (showSample(s.ring, raceTick - knobs().idelay, show) && writeGhost(r, show))
+        if (showSample(s.ring, showTick, show) && writeGhost(r, show))
         {
             ++s.showWrites;
             s.showHasInput = show.hasInput;

@@ -131,6 +131,25 @@ namespace
             t.IsTrue(ps2_netsync::showSample(ring, 1000u, out), "far past");
             t.Equals(out.pos.x, 36.0f, "capped at 30 ticks");
         });
+        tc.Run("show point follows the remote clock, not the local tick", [](TestCase &t)
+        {
+            std::vector<ps2_netsync::Sample> ring(3);
+            // Remote at 120/s: ticks 600/606/612 arrive 30 ms after they ran
+            // (tick T ran at T/120 s; arrival jitter only adds delay).
+            const uint64_t base = 1000000000u;
+            const uint64_t ticks[3] = {600u, 606u, 612u};
+            const uint64_t extra[3] = {10000u, 0u, 25000u};
+            for (int i = 0; i < 3; ++i)
+            {
+                ring[i].tick = ticks[i];
+                ring[i].rxUs = base + ticks[i] * 1000000u / 120u + 30000u + extra[i];
+            }
+            uint64_t show = 0u;
+            const uint64_t now = base + 612u * 1000000u / 120u + 30000u + 50000u; // 50 ms after 612 would arrive
+            t.IsTrue(ps2_netsync::showTickFor(ring, now, 12u, show), "estimates");
+            t.Equals(show, (uint64_t)606u, "remote tick at now-30ms (618) minus idelay 12");
+            t.IsFalse(ps2_netsync::showTickFor({}, now, 12u, show), "empty ring");
+        });
         tc.Run("result notice names you and the rival in canonical order", [](TestCase &t)
         {
             std::vector<uint8_t> p(146u + 50u, 0u);
