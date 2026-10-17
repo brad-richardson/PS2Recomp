@@ -676,14 +676,9 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
         else
         {
             Sample s;
-            // own slot's rider (slot0 base r0 doubles as slot0's actor)
+            // Local rider is always game-slot 0 (single-player engine);
+            // the net slot only labels the frame, never the actor.
             uint32_t actor = r0;
-            if (cfg.slot != 0)
-            {
-                uint32_t rs = 0u;
-                if (resolveSlot(r, b, cfg.slot, rs))
-                    actor = rs;
-            }
             if (!readSample(r, actor, s, tick))
                 ++cfg.sampleFail;
             else
@@ -785,7 +780,8 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
                     }
                 }
                 // dead-reckon cap: hold + project at most 30 ticks past newest
-                if (writeGhost(r, cfg.peer, s))
+                // Rival is always game-slot 1, never the peer's net slot.
+                if (writeGhost(r, 1, s))
                 {
                     ++cfg.showWrites;
                     cfg.show = s;
@@ -832,7 +828,13 @@ inline bool onInput(uint64_t tick, uint32_t ctl, uint32_t rec, const uint8_t *rd
         if (sv >= 0 && sv <= 5)
             s = sv;
     }
-    if (s == cfg.slot)
+    // Game-slot view (2-rider net race): the single-player engine always
+    // writes the local pad to game-slot 0, and the net peer's rider is the
+    // rival at game-slot 1. Net slots identify devices on the wire only and
+    // must never select the actor: on net slot != 0, s == cfg.slot never
+    // fires for the local pad while s == cfg.peer collides with it, so both
+    // pads ended up driving rider0. (Part 5: iPad drove the phone's rider.)
+    if (s == 0)
     {
         cfg.ownDe4 = de4;
         cfg.ownW0 = w0;
@@ -842,7 +844,7 @@ inline bool onInput(uint64_t tick, uint32_t ctl, uint32_t rec, const uint8_t *rd
         why = "own-cached";
         return false;
     }
-    if (s != cfg.peer || !cfg.peerAlive)
+    if (s != 1 || !cfg.peerAlive)
     {
         why = "not-peer";
         return false;
