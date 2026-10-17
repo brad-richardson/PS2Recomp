@@ -1,10 +1,12 @@
 #include "MiniTest.h"
+#include "Ssx3LodScale.h"
 #include "Ssx3StockMeter.h"
 #include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
 #include "ps2_ssx3_anim_pick_guard.h"
+#include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_module.h"
 #include "runtime/ps2_savestate.h"
@@ -67,7 +69,7 @@ void register_ps2_ssx3_module_tests()
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
             const char *kExpected[] = {"ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload",
                                        "ssx3-sif-handshake", "ssx3-tricky-menu",
-                                       "ssx3-tricky-stock-meter"};
+                                       "ssx3-tricky-stock-meter", "ssx3-lod-scale"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {
@@ -80,6 +82,21 @@ void register_ps2_ssx3_module_tests()
             }
             t.IsTrue(m.overrides[4].apply == &ps2_tricky_menu::applyTrickyMenu, "tricky-menu apply");
             t.IsTrue(m.overrides[5].apply == &ps2_stock_meter::applyTrickyStockMeter, "stock-meter apply");
+            t.IsTrue(m.overrides[6].apply == &ps2_lod_scale::applyLodScale, "lod-scale apply");
+        });
+        tc.Run("lod-scale apply wraps nothing with the knobs off", [](TestCase &t)
+               {
+            // snd-seam-1 Part 5 slice 3: both scales default 0 (det keys)
+            // installs no bindings — the keys cannot move.
+            unsetenv("PS2X_SSX3_LOD_SCALE");
+            unsetenv("PS2X_SSX3_TRICKY_LOD_SCALE");
+            PS2Runtime runtime;
+            reset_ps2_test_function_table();
+            runtime.replaceFunction(ps2_ssx3_lod::kSetPerspective, &sentinelPick);
+            ps2_game_overrides::applyMatching(runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+            t.IsTrue(runtime.lookupFunction(ps2_ssx3_lod::kSetPerspective) == &sentinelPick,
+                     "perspective setter unwrapped");
+            reset_ps2_test_function_table();
         });
         tc.Run("stock-meter apply wraps nothing with the knob off", [](TestCase &t)
                {

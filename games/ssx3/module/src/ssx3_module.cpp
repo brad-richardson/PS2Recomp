@@ -4,6 +4,7 @@
 #include "ps2_ssx3_module.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
+#include "Ssx3LodScale.h"
 #include "Ssx3StockMeter.h"
 #include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
@@ -25,6 +26,7 @@ namespace
         {"ssx3-sif-handshake", "SLUS_207.72", kSsx3Entry, 0u, &ps2_syscalls::applySsx3SifHandshake},
         {"ssx3-tricky-menu", "SLUS_207.72", kSsx3Entry, 0u, &ps2_tricky_menu::applyTrickyMenu},
         {"ssx3-tricky-stock-meter", "SLUS_207.72", kSsx3Entry, 0u, &ps2_stock_meter::applyTrickyStockMeter},
+        {"ssx3-lod-scale", "SLUS_207.72", kSsx3Entry, 0u, &ps2_lod_scale::applyLodScale},
     };
 
     // K1: the copied GetEntryAddress/TLB payload (Ssx3CopiedPayload.h). Both
