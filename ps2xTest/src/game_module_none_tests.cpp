@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "game_overrides.h"
+#include "ps2_fh1_fix.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
@@ -95,6 +96,19 @@ void register_game_module_none_tests()
                {
             const auto &sections = ps2_savestate::registeredSections();
             t.IsTrue(sections.find("trickygems") == sections.end(), "no trickygems section with no module");
+        });
+        // full120 slice 1: the FIX-policy content belongs to the module.
+        // Without one, no group parses ("all" is empty, names refuse) and
+        // every compat predicate is false.
+        tc.Run("no FIX-policy content without the module", [](TestCase &t)
+               {
+            const ps2_fh1::FixMasks all = ps2_fh1::parseFix("all");
+            t.IsTrue(all.ok, "all is a known keyword");
+            t.Equals(all.main, 0u, "all main is empty with no module");
+            t.Equals(all.fh12, 0u, "all fh12 is empty with no module");
+            t.IsFalse(ps2_fh1::parseFix("rider").ok, "names refuse with no module");
+            t.IsFalse(ps2_fh1::asymkMaskOk(~0ull), "compat false with no module");
+            t.IsFalse(ps2_fh1::normcapMaskOk(~0ull), "compat false with no module");
         });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass

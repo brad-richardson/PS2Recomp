@@ -51,7 +51,26 @@ namespace ps2_game_module
     // 5 (snd-seam-1 family #4): the Tricky song mix hooks below.
     // 6 (snd-seam-1 family #8): the TK34 patch-grow field providers below.
     // 7 (snd-seam-1 Part 5 slice 4): the Tricky-layer VBlank hook below.
-    inline constexpr uint32_t kAbiVersion = 7u;
+    // 8 (full120 slice 1): the FIX-policy content below.
+    inline constexpr uint32_t kAbiVersion = 8u;
+
+    // FIX-policy content (full120 slice 1). The module owns the group
+    // name/bit tables, the "all" composition and the mask-compat predicates;
+    // env parsing stays generic. Null (or no module) is empty content: no
+    // group parses, "all" is empty, every compat predicate is false.
+    struct Fh1FixPolicy
+    {
+        uint64_t allMain = 0u;
+        uint32_t all12 = 0u;
+        uint64_t (*itemMain)(const char *item) = nullptr; // 0 = not a main-mask name
+        uint32_t (*item12)(const char *item) = nullptr;   // 0 = not an fh12 name
+        const char *(*bitNameMain)(unsigned bit) = nullptr; // nullptr = unnamed
+        const char *(*bitName12)(unsigned bit) = nullptr;   // nullptr = unnamed
+        bool (*asymkOk)(uint64_t mask) = nullptr;
+        bool (*normcapRequested)(uint64_t mask) = nullptr;
+        bool (*normcapOk)(uint64_t mask) = nullptr;
+        bool (*normcapSuppressed)(uint64_t mask) = nullptr;
+    };
 
     // Song-side snapshot for the TK47 probe line (plain scalars: the song
     // player type stays with the game). `path` points at a static label
@@ -144,6 +163,8 @@ namespace ps2_game_module
         // the module forwards to the same reducer today and owns the
         // reduction once the layer moves. One cached-config check when off.
         void (*trickyLayerTick)(uint8_t *rdram, size_t ramSize, uint64_t tick) = nullptr;
+        // FIX-policy content (full120 slice 1): see Fh1FixPolicy above.
+        const Fh1FixPolicy *fh1FixPolicy = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

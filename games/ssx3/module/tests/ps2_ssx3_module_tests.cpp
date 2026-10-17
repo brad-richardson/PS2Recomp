@@ -2,6 +2,8 @@
 #include "Ssx3LodScale.h"
 #include "Ssx3TrickyLayer.h"
 #include "Ssx3StockMeter.h"
+#include "Ssx3Fh1FixContent.h"
+#include "ps2_fh1_fix.h"
 #include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
@@ -140,7 +142,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 7u, "abi");
+            t.Equals(m.abiVersion, 8u, "abi"); // full120 slice 1 (rebase: ABI 8)
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -160,7 +162,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 7u, "abi");
+            t.Equals(m.abiVersion, 8u, "abi"); // full120 slice 1 (rebase: ABI 8)
             t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
             t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
             t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
@@ -168,7 +170,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the TK34 patch-grow providers point at the module (ABI 6)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 7u, "abi");
+            t.Equals(m.abiVersion, 8u, "abi"); // full120 slice 1 (rebase: ABI 8)
             t.IsTrue(m.patchGrowSave == &ps2_tricky_state::patchGrowSave, "save");
             t.IsTrue(m.patchGrowValidate == &ps2_tricky_state::patchGrowValidate, "validate");
             t.IsTrue(m.patchGrowLoad == &ps2_tricky_state::patchGrowLoad, "load");
@@ -179,6 +181,23 @@ void register_ps2_ssx3_module_tests()
             t.IsTrue(gems->second.save == &ps2_tricky_state::trickyGemsSave, "gems save hook");
             t.IsTrue(gems->second.load == &ps2_tricky_state::trickyGemsLoad, "gems load hook");
             t.IsTrue(gems->second.validate == &ps2_tricky_state::trickyGemsLoad, "gems validate hook");
+        });
+        tc.Run("the FIX-policy content is published by the module (ABI 7)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 7u, "abi");
+            t.IsTrue(m.fh1FixPolicy != nullptr, "policy published");
+            t.IsTrue(m.fh1FixPolicy == &ps2_ssx3_fh1::fixPolicy(), "policy is the moved table");
+            const ps2_game_module::Fh1FixPolicy &p = *m.fh1FixPolicy;
+            t.Equals(p.itemMain("rider"), static_cast<uint64_t>(ps2_fh1::kFixRider), "rider bit");
+            t.Equals(p.itemMain("asymk"), static_cast<uint64_t>(ps2_fh1::kFixAsymK), "asymk bit");
+            t.Equals(p.item12("flare"), static_cast<uint32_t>(ps2_fh1::kFix12Flare), "flare bit");
+            t.Equals(p.itemMain("nope"), 0u, "unknown main refuses");
+            t.Equals(p.item12("nope"), 0u, "unknown fh12 refuses");
+            t.IsTrue(p.allMain != 0u && p.all12 != 0u, "all is non-empty");
+            t.IsTrue((p.allMain & ps2_fh1::kFixRider) != 0u, "rider in all");
+            t.IsTrue((p.allMain & ps2_fh1::kFixLife2) == 0u, "life2 out of all");
+            t.IsTrue(p.asymkOk != nullptr && p.normcapOk != nullptr, "compat published");
         });
         tc.Run("the override pass wraps both anim entries and chains to the originals", [](TestCase &t)
                {

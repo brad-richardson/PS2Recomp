@@ -28,6 +28,11 @@ void register_ps2_ssx3_sif_handshake_tests();
 void register_ps2_snd_tests();
 void register_ps2_ssx3_tricky_song_provider_tests();
 void register_ps2_ssx3_movie_stub_tests();
+void register_ps2_fh1_fix_tests();
+void register_ps2_fh1_fh28_tests();
+void register_ps2_fh1_life2_tests();
+void register_ps2_fh1_savestate_tests();
+void register_ps2_fh1_hooktable_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
 void register_game_module_none_tests();
@@ -84,13 +89,8 @@ void register_ps2_ee_count_tests();
 void register_ps2_vsync_pacer_tests();
 void register_ps2_vsync_lock_tests();
 void register_ps2_fh1_restamp_tests();
-void register_ps2_fh1_life2_tests();
 void register_ps2_fh1_replay_rate_tests();
-void register_ps2_fh1_fix_tests();
-void register_ps2_fh1_savestate_tests();
-void register_ps2_fh1_hooktable_tests();
 void register_ps2_fh1_stuntchg_tests();
-void register_ps2_fh1_fh28_tests();
 void register_ps2_fh1_jcam2_scratch_tests();
 int ps2_fh1_jcam2_protection_probe();
 void register_ps2_savestate_tests();
@@ -132,6 +132,11 @@ int main(int argc, char **argv)
     register_ps2_snd_tests();
     register_ps2_ssx3_tricky_song_provider_tests();
     register_ps2_ssx3_movie_stub_tests();
+    register_ps2_fh1_fix_tests();
+    register_ps2_fh1_fh28_tests();
+    register_ps2_fh1_life2_tests();
+    register_ps2_fh1_savestate_tests();
+    register_ps2_fh1_hooktable_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
     register_game_module_none_tests();
@@ -188,13 +193,8 @@ int main(int argc, char **argv)
     register_ps2_vsync_pacer_tests();
     register_ps2_vsync_lock_tests();
     register_ps2_fh1_restamp_tests();
-    register_ps2_fh1_life2_tests();
     register_ps2_fh1_replay_rate_tests();
-    register_ps2_fh1_fix_tests();
-    register_ps2_fh1_savestate_tests();
-    register_ps2_fh1_hooktable_tests();
     register_ps2_fh1_stuntchg_tests();
-    register_ps2_fh1_fh28_tests();
     register_ps2_fh1_jcam2_scratch_tests();
     register_ps2_savestate_tests();
     register_ps2_tc1_vf0_tests();

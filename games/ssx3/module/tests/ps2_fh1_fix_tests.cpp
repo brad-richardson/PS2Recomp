@@ -478,16 +478,17 @@ void register_ps2_fh1_fix_tests()
                 t.IsTrue(seen.insert(name).second, "fh12 bit names are unique");
             }
             t.IsTrue(fix12BitName(16u) == nullptr, "fh12 names stop at bit 15");
-            // Reverse direction, from the parser bodies in the source: every
-            // name fixItem/fh12Item accepts must render under some bit.
-            std::ifstream file("ps2xRuntime/include/ps2_fh1_fix.h");
+            // Reverse direction, from the parser bodies in the source (full120
+            // slice 1: games/ssx3/module/src/fh1_fix_content.cpp): every name
+            // fixItem/fh12Item accepts must render under some bit.
+            std::ifstream file("games/ssx3/module/src/fh1_fix_content.cpp");
             t.IsTrue(file.is_open(), "run the suite from the fork worktree root");
             if (!file.is_open())
                 return;
             std::ostringstream buffer;
             buffer << file.rdbuf();
             const std::string source = buffer.str();
-            const std::regex itemRe(R"(item == \"([a-z0-9]+)\"\) return (kFix))");
+            const std::regex itemRe(R"((?:item == \"|streq\(item, \")([a-z0-9]+)\"))");
             size_t parsed = 0;
             for (auto it = std::sregex_iterator(source.begin(), source.end(), itemRe);
                  it != std::sregex_iterator(); ++it)

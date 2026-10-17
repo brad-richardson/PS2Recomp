@@ -10,8 +10,22 @@
 #include <cstdlib>
 #include <string>
 
+#include "runtime/game_module.h"
+
 namespace ps2_fh1
 {
+// Full120 slice 1: the group name/bit tables, the "all" composition and the
+// mask-compat predicates live in the game module (games/ssx3/module/src/
+// fh1_fix_content.cpp), published as one Fh1FixPolicy. The parser shape,
+// the bit enum (consumers move in later slices) and the delta machinery stay
+// here and read through the policy below. Null policy (or no module) is
+// empty content: no group parses, "all" is empty, every predicate is false.
+inline const ps2_game_module::Fh1FixPolicy &fixPolicy() noexcept
+{
+    static const ps2_game_module::Fh1FixPolicy kEmpty{};
+    const ps2_game_module::Module *m = ps2_game_module::linkedModule();
+    return (m && m->fh1FixPolicy) ? *m->fh1FixPolicy : kEmpty;
+}
 enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
 {
     kFixRider = 1u << 0,     // K1-K4: rider integrators' private dt (class h)
@@ -107,106 +121,23 @@ enum : uint32_t
 
 inline uint32_t fh12Item(const std::string &item) noexcept
 {
-    if (item == "spin") return kFix12Spin;
-    if (item == "texanim") return kFix12Texanim;
-    if (item == "loops") return kFix12Loops;
-    if (item == "recover") return kFix12Recover;
-    if (item == "pulse") return kFix12Pulse;
-    if (item == "crash") return kFix12Crash;
-    if (item == "fxtimer") return kFix12FxTimer;
-    if (item == "bounce") return kFix12Bounce;
-    if (item == "particles") return kFix12Particles;
-    if (item == "crashbody") return kFix12CrashBody;
-    if (item == "uber") return kFix12Uber;
-    if (item == "popups") return kFix12Popups;
-    if (item == "snddt") return kFix12SndDt;
-    if (item == "hudprog") return kFix12HudProg;
-    if (item == "loops2") return kFix12Loops2;
-    if (item == "flare") return kFix12Flare;
-    return 0u;
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.item12 ? p.item12(item.c_str()) : 0u;
 }
 
-// Main-mask group by name (0 = not a main-mask name).
+// Main-mask group by name (0 = not a main-mask name; empty policy parses nothing).
 inline uint64_t fixItem(const std::string &item) noexcept
 {
-    if (item == "life2") return kFixLife2;
-    if (item == "rider") return kFixRider;
-    if (item == "countdown") return kFixCountdown;
-    if (item == "drag") return kFixDrag;
-    if (item == "event") return kFixEvent;
-    if (item == "slew") return kFixSlew;
-    if (item == "clock") return kFixClock;
-    if (item == "raceclock") return kFixRaceClock;
-    if (item == "session") return kFixSession;
-    if (item == "timers") return kFixTimers;
-    if (item == "camera") return kFixCamera;
-    if (item == "launch") return kFixLaunch;
-    if (item == "stick") return kFixStick;
-    if (item == "speedcap") return kFixSpeedcap;
-    if (item == "rng") return kFixRng;
-    if (item == "trick") return kFixTrick;
-    if (item == "anim") return kFixAnim;
-    if (item == "bonus") return kFixBonus;
-    if (item == "lift") return kFixLift;
-    if (item == "aigate") return kFixAiGate;
-    if (item == "takeoff") return kFixTakeoff;
-    if (item == "flags") return kFixFlags;
-    if (item == "steer") return kFixSteer;
-    if (item == "rail") return kFixRail;
-    if (item == "reset") return kFixReset;
-    if (item == "meter") return kFixMeter;
-    if (item == "boost") return kFixBoost;
-    if (item == "ground") return kFixGround;
-    if (item == "inputchain") return kFixInputChain;
-    if (item == "input2") return kFixInput2;
-    if (item == "ground2") return kFixGround2;
-    if (item == "entry") return kFixEntry;
-    if (item == "rclock") return kFixRclock;
-    if (item == "emitter") return kFixEmitter;
-    if (item == "fx") return kFixFx;
-    if (item == "clock2") return kFixClock2;
-    if (item == "hudfill") return kFixHudfill;
-    if (item == "stick2") return kFixStick2;
-    if (item == "clocksign") return kFixClockSign;
-    if (item == "bonusflip") return kFixBonusFlip;
-    if (item == "jcam2") return kFixJcam2;
-    if (item == "jcam") return kFixJcam;
-    if (item == "pose") return kFixPose;
-    if (item == "pid") return kFixPid;
-    if (item == "c2cap") return kFixC2Cap;
-    if (item == "spawn") return kFixSpawn;
-    if (item == "envfilt") return kFixEnvFilt;
-    if (item == "trails") return kFixTrails;
-    if (item == "chase2") return kFixChase2;
-    if (item == "query") return kFixQuery;
-    if (item == "vnret") return kFixVnRet;
-    if (item == "groundstep") return kFixGroundStep;
-    if (item == "trailring") return kFixTrailRing;
-    if (item == "normcap") return kFixNormcap;
-    if (item == "shadowpub") return kFixShadowPub;
-    if (item == "sel5") return kFixSel5;
-    if (item == "sel5b") return kFixSel5b;
-    if (item == "boostfill") return kFixBoostFill;
-    if (item == "stuntchg") return kFixStuntChg;
-    if (item == "asymk") return kFixAsymK;
-    return 0u;
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.itemMain ? p.itemMain(item.c_str()) : 0u;
 }
 
-// "all": every group except kFixLift (FH8: no window where it binds),
-// kFixGround (GRD1: its force is already scaled by converted dt), and the
-// internal kFixRamp. FH26 adds stick2 + clocksign (Brad 10-02); DEF1 adds
-// bonusflip + loops2 (Brad 10-03). PRM1 adds pose,c2cap,spawn,envfilt,input2,chase2 (Brad 10-11);
-// life2 stays opt-in (lifecycle gates blocked: no finished race at clean tips).
-inline constexpr uint64_t kFixAll =
-    kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers |
-    kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim | kFixBonus | kFixAiGate |
-    kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset | kFixMeter | kFixBoost | kFixEntry |
-    kFixRclock | kFixEmitter | kFixFx | kFixClock2 | kFixHudfill | kFixStick2 | kFixClockSign | kFixBonusFlip |
-    kFixPose | kFixC2Cap | kFixSpawn | kFixEnvFilt | kFixInput2 | kFixChase2;
-inline constexpr uint32_t kFix12All = kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse |
-                                      kFix12Crash | kFix12FxTimer | kFix12Bounce | kFix12Particles |
-                                      kFix12CrashBody | kFix12Uber | kFix12Popups | kFix12SndDt | kFix12HudProg |
-                                      kFix12Loops2;
+// "all": the module's composition (see fh1_fix_content.cpp for the member
+// list and its history). Same names, now read through the policy: identical
+// with the module linked, empty without one. Not constexpr anymore — the
+// composition is game content, and no caller needs it at compile time.
+inline const uint64_t kFixAll = fixPolicy().allMain;
+inline const uint32_t kFix12All = fixPolicy().all12;
 
 struct FixMasks
 {
@@ -231,6 +162,8 @@ inline FixMasks parseFix(const std::string &s)
         uint32_t m12 = 0u;
         if (item == "all")
         {
+            // "all" is always known (empty under an empty policy, so a
+            // no-module binary parses to empty masks instead of refusing).
             m = kFixAll;
             m12 = kFix12All;
         }
@@ -238,12 +171,12 @@ inline FixMasks parseFix(const std::string &s)
         {
             m = fixItem(item);
             m12 = fh12Item(item);
-        }
-        if (!item.empty() && m == 0u && m12 == 0u)
-        {
-            r.ok = false;
-            r.bad = item;
-            return r;
+            if (!item.empty() && m == 0u && m12 == 0u)
+            {
+                r.ok = false;
+                r.bad = item;
+                return r;
+            }
         }
         if (minus)
         {
@@ -272,26 +205,28 @@ inline FixMasks parseFix(const std::string &s)
 // the suite can pin the accepted mask sets (asymkFix adds enabled()).
 inline bool asymkMaskOk(uint64_t mask) noexcept
 {
-    return (mask & (kFixAsymK | kFixQuery | kFixVnRet)) ==
-           (static_cast<uint64_t>(kFixAsymK) | kFixQuery | kFixVnRet);
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.asymkOk ? p.asymkOk(mask) : false;
 }
 
 // NRM1 normcap's complete requested bit set. normcap is effective only when
 // asymk is not (asymk suppresses it: its pair math assumes sqrt/sqrt halves).
 inline bool normcapMaskRequested(uint64_t mask) noexcept
 {
-    return (mask & (kFixNormcap | kFixVnRet | kFixQuery)) ==
-           (static_cast<uint64_t>(kFixNormcap) | kFixVnRet | kFixQuery);
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.normcapRequested ? p.normcapRequested(mask) : false;
 }
 inline bool normcapMaskOk(uint64_t mask) noexcept
 {
-    return normcapMaskRequested(mask) && !asymkMaskOk(mask);
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.normcapOk ? p.normcapOk(mask) : false;
 }
 // Requested in full but inert because asymk is on (RV32 F9: the play strings
 // carry both bits, so this is the shipped configuration, not an edge case).
 inline bool normcapMaskSuppressed(uint64_t mask) noexcept
 {
-    return normcapMaskRequested(mask) && asymkMaskOk(mask);
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.normcapSuppressed ? p.normcapSuppressed(mask) : false;
 }
 
 // SVL1 2a: same-mode sanctioned FIX-delta support
@@ -312,25 +247,13 @@ inline bool fixDeltaKnobOn() noexcept
 // after removal of the JMP5 effect and its retired name.
 inline const char *fixMainBitName(unsigned bit) noexcept
 {
-    static constexpr const char *kNames[62] = {
-        "rider", "countdown", "drag", "event", "slew", "clock", "raceclock", "session", // 0-7
-        "timers", "camera", "launch", "stick", "speedcap", "rng", nullptr, "trick", // 8-15 (14 = ramp)
-        "anim", "bonus", "lift", "aigate", "takeoff", "flags", "steer", "rail", // 16-23
-        "reset", "meter", "boost", "ground", "entry", "rclock", "emitter", "fx", // 24-31
-        "clock2", "hudfill", "stick2", "clocksign", "bonusflip", "jcam", "pose", "pid", // 32-39
-        "c2cap", "spawn", "envfilt", "ground2", "jcam2", "life2", "input2", "inputchain", // 40-47
-        "trails", "chase2", "query", nullptr, "vnret", "shadowpub", "groundstep", "trailring", // 48-55
-        "normcap", "sel5", "sel5b", "boostfill", "stuntchg", "asymk", // 56-61
-    };
-    return bit < 62u ? kNames[bit] : nullptr;
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.bitNameMain ? p.bitNameMain(bit) : nullptr;
 }
 inline const char *fix12BitName(unsigned bit) noexcept
 {
-    static constexpr const char *kNames[16] = {
-        "spin", "texanim", "loops", "recover", "pulse", "crash", "fxtimer", "bounce", // 0-7
-        "particles", "crashbody", "uber", "popups", "snddt", "hudprog", "loops2", "flare", // 8-15
-    };
-    return bit < 16u ? kNames[bit] : nullptr;
+    const ps2_game_module::Fh1FixPolicy &p = fixPolicy();
+    return p.bitName12 ? p.bitName12(bit) : nullptr;
 }
 
 inline std::string fixBitHex(uint64_t v)

@@ -22,3 +22,5 @@ void applySsx3CopiedPayload(PS2Runtime &runtime);
 // "ssx3-sif-handshake" (P1ac); its SendCmd hook is in Ssx3SifHandshake.h.
 void applySsx3SifHandshake(PS2Runtime &runtime);
 }
+
+

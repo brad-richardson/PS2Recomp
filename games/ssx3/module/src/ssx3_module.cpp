@@ -2,6 +2,7 @@
 // one at a time (docs: games/ssx3/module/README.md); each keeps its override
 // name, ELF match and apply function. Table order is application order.
 #include "ps2_ssx3_module.h"
+#include "Ssx3Fh1FixContent.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
 #include "Ssx3LodScale.h"
@@ -66,7 +67,8 @@ namespace
                                           &ps2_tricky_state::patchGrowSave,
                                           &ps2_tricky_state::patchGrowValidate,
                                           &ps2_tricky_state::patchGrowLoad,
-                                          &ps2_tricky_layer::tickHook};
+                                          &ps2_tricky_layer::tickHook,
+                                          &ps2_ssx3_fh1::fixPolicy()};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept
