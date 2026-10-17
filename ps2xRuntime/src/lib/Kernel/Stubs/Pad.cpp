@@ -1040,8 +1040,12 @@ namespace ps2_stubs
         constexpr uint32_t kQpLabelSlot = 0x5AB2B4u;
         constexpr uint32_t kQpLabelStockPtr = 0x540510u;
         constexpr uint32_t kQpLabelStockLen = 7u;
-        constexpr uint32_t kQpLabelNewLen = 11u; // "Quick Play" + NUL
-        constexpr uint32_t kQpLabelBytes = 22u;
+        // online-stock-2 (Brad 10-17): "Quick Play (Alpha)". The handle
+        // slots sit 0x100 apart, so the +8 slack spans 248 bytes; the 38
+        // used here are verified zero before every write (as before) and
+        // stayed zero across the menu in the lane's survey boot.
+        constexpr uint32_t kQpLabelNewLen = 19u; // "Quick Play (Alpha)" + NUL
+        constexpr uint32_t kQpLabelBytes = 38u;
         struct QpLabelHandle
         {
             uint32_t slot;
@@ -1093,9 +1097,9 @@ namespace ps2_stubs
         {
             static const uint8_t kStockText[14] = {'O', 0, 'n', 0, 'l', 0, 'i', 0,
                                                   'n', 0, 'e', 0, 0,   0};
-            static const uint8_t kNewText[22] = {'Q', 0, 'u', 0, 'i', 0, 'c', 0,
-                                                'k', 0, ' ', 0, 'P', 0, 'l', 0,
-                                                'a', 0, 'y', 0, 0,   0};
+            static const uint8_t kNewText[kQpLabelBytes] = {
+                'Q', 0, 'u', 0, 'i', 0, 'c', 0, 'k', 0, ' ', 0, 'P', 0, 'l', 0, 'a', 0, 'y', 0,
+                ' ', 0, '(', 0, 'A', 0, 'l', 0, 'p', 0, 'h', 0, 'a', 0, ')', 0, 0,   0};
             const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSlot);
             const uint32_t len = qpNavReadMenu(rdram, kQpLabelSlot + 4u);
             if (ptr == kQpLabelSlot + 8u && len == kQpLabelNewLen)
@@ -1143,7 +1147,7 @@ namespace ps2_stubs
             {
                 return;
             }
-            std::fprintf(stderr, "[qpnav] label: main-menu Online -> Quick Play at tick=%llu\n",
+            std::fprintf(stderr, "[qpnav] label: main-menu Online -> Quick Play (Alpha) at tick=%llu\n",
                          static_cast<unsigned long long>(tick));
         }
         // f3 lesson: restore stock + zero the text when the menu is left
