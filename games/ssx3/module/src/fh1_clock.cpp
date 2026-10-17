@@ -66,8 +66,9 @@ uint32_t stockHalfStepNext() noexcept
     return (exactStockClock() ? g_divNext : g_divThis) == 2u ? 1u : 2u;
 }
 
-namespace
-{
+// Word table shared by the flip/step writers and the fh28 override below.
+// (No anonymous namespace: inputChainPoolFlip/Step are Module fields, so
+// their definitions must match Ssx3Fh1Clock.h in ps2_ssx3_fh1.)
 struct Word
 {
     uint64_t fix; // 0 = always (manager)
@@ -101,8 +102,6 @@ void inputChainPoolStep(uint8_t *ram, bool odd) noexcept
         wr32(ram, w.address, odd ? 0u : w.expected);
 }
 
-} // namespace
-
 bool fh28PoolOverride(uint32_t address, uint64_t mainMask) noexcept
 {
     if ((mainMask & kFixSpawn) != 0u && address == 0x49f628u)
@@ -115,6 +114,10 @@ bool fh28PoolOverride(uint32_t address, uint64_t mainMask) noexcept
                 return true;
     return false;
 }
+
+// patchAtManagerInit's 3-arg call (defaults evaluated here, as before).
+// Declared before its user; defined after the 6-arg body below.
+bool applyWords(uint8_t *ram, uint32_t a, bool toActive);
 
 void patchAtManagerInit(uint8_t *ram)
 {
@@ -135,8 +138,7 @@ void patchAtManagerInit(uint8_t *ram)
 }
 
 
-// patchAtManagerInit's 3-arg call (defaults evaluated here, as before).
-inline bool applyWords(uint8_t *ram, uint32_t a, bool toActive)
+bool applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
     const FixMasks m = ps2_fh1::fixMasks();
     return applyWords(ram, a, toActive, m.main, m.fh12, ps2_fh1::kFull120PlayBuild);
