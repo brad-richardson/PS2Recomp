@@ -7887,12 +7887,13 @@ void PS2Runtime::run()
     bool set2Eff120 = false;   // effective values, sampled at open
     std::string set2EffUpscale; // effective GE1_UPSCALE (or the platform default)
     unsigned set2MeasuredH = 0;  // panel-polish-1: last real game-frame height px
-    ps2x::set2::Res set2ResAtOpen = ps2x::set2::Res::RDefault;
+    ps2x::set2::Res set2DefRes = ps2x::set2::Res::Screen; // (default) marker + preselect (correction 4)
     uint64_t set2HostFrame = 0;
     uint16_t set2PrevUnion = 0; // nav edge detect
     ps2x::set2::SwallowState set2Swallow; // close-press overhang, stripped until release
     std::vector<int64_t> set2Down; // touch ids currently on the panel/dot
     std::vector<int64_t> set2HeldTouches; // touches still down at close, masked until release
+    std::vector<int64_t> set2MenuIds; // touch ids seen while closed (a held finger never re-opens)
     int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
     bool set2Perf = false;         // live perf-overlay flag (env default at boot)
     bool set2Upscale = false;      // live on-device-upscale flag (env default at boot)
@@ -7905,6 +7906,8 @@ void PS2Runtime::run()
         set2Upscale = upscale && std::string(upscale) == "1";
         set2Nav.upscale = set2Upscale;
         set2Nav.touch = vpadTouchMode;
+        const char *menubtn = std::getenv("PS2X_MENU_BUTTON");
+        set2Nav.menubtn = ps2x::set2::menuBtnFromSetting(menubtn ? menubtn : "");
     }
     // tk-menu-1 Part 2: the Tricky course list. Knob off: one cached-bool
     // check per host frame in the block below; the guest is untouched.
@@ -8315,7 +8318,13 @@ void PS2Runtime::run()
         // enabled, independent of the panel — so Perf on also holds the
         // underlay (same composition as the open panel, no dim). Perf
         // defaults off, so the play fast path is unchanged until enabled.
+        // settings-res-1: the "..." menu button shows by default on every
+        // device (Odin included), so Menu=Shown also holds the underlay —
+        // the Odin default path now composites instead of taking the fast
+        // path (host-side only; det-identical). Hiding the button via the
+        // Menu button row restores the fast path.
         ps2x_present_vk::setUnderlay(set2Open || (set2On && set2Perf) ||
+                                     (set2On && ps2x::set2::menuButtonShown(set2Nav.menubtn)) ||
                                      (vpadWanted ? !vpadPadConnected : set2On));
 #endif
         // First frame always evaluates (Odin starts hidden on the fast
@@ -8392,18 +8401,35 @@ void PS2Runtime::run()
                 set2EffUpscale = "1x";
             set2Nav.sel = ps2x::set2::Row::Mode;
             set2Nav.mode = set2Eff120 ? ps2x::set2::Mode::M120 : ps2x::set2::Mode::M60;
-            set2Nav.res = ps2x::set2::Res::RDefault;
+            set2Nav.runMode = set2Nav.mode;
+            // Correction 4: the (default) marker and the preselect come from
+            // the device rules — the public tier rule on public builds, the
+            // play env rules (Android Screen, iOS 2x) otherwise.
+            {
+                const char *pub = std::getenv("PS2X_PUBLIC_APP");
+                const bool publicApp = pub && std::string(pub) == "1";
+                std::uint64_t ram = 0;
+                if (const char *rt = std::getenv("PS2X_PUBLIC_RAM_BYTES"); rt && rt[0] != '\0')
+                    ram = std::strtoull(rt, nullptr, 10);
+#if defined(PS2X_IOS)
+                constexpr bool isiOS = true;
+#else
+                constexpr bool isiOS = false;
+#endif
+                set2DefRes = ps2x::set2::resDefaultRow(publicApp, isiOS, ram,
+                                                       static_cast<int>(screenWidth),
+                                                       static_cast<int>(screenHeight));
+            }
+            set2Nav.res = set2DefRes;
             for (const auto &kv : set2ReadSettings())
             {
                 if (kv.first == "GE1_UPSCALE")
-                {
-                    if (kv.second == "native")
-                        set2Nav.res = ps2x::set2::Res::Native;
-                    else if (kv.second == "2")
-                        set2Nav.res = ps2x::set2::Res::R2x;
-                }
+                    set2Nav.res = ps2x::set2::resFromSetting(kv.second, set2DefRes);
+                else if (kv.first == "PS2X_MENU_BUTTON")
+                    set2Nav.menubtn = ps2x::set2::menuBtnFromSetting(kv.second);
             }
-            set2ResAtOpen = set2Nav.res;
+            set2Nav.runRes = set2Nav.res;
+            set2Nav.nativeH = set2MeasuredH;
             set2Nav.perf = set2Perf;
             set2Nav.upscale = set2Upscale;
             set2Nav.touch = vpadTouchMode;
@@ -8629,12 +8655,22 @@ void PS2Runtime::run()
                                                        ps2x::set2::touchToSetting(vpadTouchMode));
                     set2WriteSettings(pairs); // false on the Mac (live-only there)
                 }
+                if (navOut.action == ps2x::set2::Action::Changed &&
+                    set2Nav.sel == ps2x::set2::Row::MenuBtn)
+                {
+                    // settings-res-1: the "..." button is live like Perf
+                    // (no restart; the next frame's draw + underlay read it).
+                    auto pairs = set2ReadSettings();
+                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_MENU_BUTTON",
+                                                       ps2x::set2::menuBtnToSetting(set2Nav.menubtn));
+                    set2WriteSettings(pairs); // false on the Mac (live-only there)
+                }
                 if (navOut.action != ps2x::set2::Action::None)
-                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d\n",
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d menubtn=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
                                  static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
                                  set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0,
-                                 static_cast<int>(set2Nav.touch));
+                                 static_cast<int>(set2Nav.touch), static_cast<int>(set2Nav.menubtn));
                 if (navOut.action == ps2x::set2::Action::Close)
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
@@ -8876,6 +8912,24 @@ void PS2Runtime::run()
             const int set2n = set2SampleTouches(set2ts);
             if (set2n >= 2)
                 set2DoOpen();
+            else if (ps2x::set2::menuButtonShown(set2Nav.menubtn))
+            {
+                // settings-res-1: a fresh tap on the "..." button (top
+                // middle) opens the panel. Touches here never reach the
+                // guest; held ids are tracked below so a finger down
+                // across close never re-opens.
+                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight);
+                for (int i = 0; i < set2n && !set2Open; ++i)
+                {
+                    if (ps2x::set2::menuButtonHit(set2mb, set2ts[i].x, set2ts[i].y) &&
+                        std::find(set2MenuIds.begin(), set2MenuIds.end(), set2ts[i].id) ==
+                            set2MenuIds.end())
+                        set2DoOpen();
+                }
+            }
+            set2MenuIds.clear();
+            for (int i = 0; i < set2n; ++i)
+                set2MenuIds.push_back(set2ts[i].id);
         }
         if (tkPublishOwn)
         {
@@ -9378,10 +9432,14 @@ void PS2Runtime::run()
                 const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
                 if (hit >= 0 && hit < ps2x::set2::kRowCount)
                 {
-                    set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
-                    set2Nav.restartArmed =
-                        (hit == static_cast<int>(ps2x::set2::Row::Restart)) ? set2Nav.restartArmed
-                                                                           : false;
+                    // settings-res-1: tapping a different row selects it and
+                    // disarms (like pad Up/Down); tapping the armed dirty row
+                    // again is the restart confirm (navStep decides).
+                    if (hit != static_cast<int>(set2Nav.sel))
+                    {
+                        set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
+                        set2Nav.restartArmed = false;
+                    }
                     const ps2x::set2::NavOut tapOut =
                         ps2x::set2::navStep(set2Nav, false, false, true, false, false);
                     if (tapOut.action == ps2x::set2::Action::Changed &&
@@ -9413,6 +9471,15 @@ void PS2Runtime::run()
                         auto pairs = set2ReadSettings();
                         pairs = ps2x::set2::upsertSettings(pairs, "PS2X_VIRTUAL_PAD",
                                                            ps2x::set2::touchToSetting(vpadTouchMode));
+                        set2WriteSettings(pairs);
+                    }
+                    if (tapOut.action == ps2x::set2::Action::Changed &&
+                        set2Nav.sel == ps2x::set2::Row::MenuBtn)
+                    {
+                        // settings-res-1: touch tap, same live persist as the pad path.
+                        auto pairs = set2ReadSettings();
+                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_MENU_BUTTON",
+                                                           ps2x::set2::menuBtnToSetting(set2Nav.menubtn));
                         set2WriteSettings(pairs);
                     }
                     std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
@@ -9461,6 +9528,34 @@ void PS2Runtime::run()
                 }
                 touches = kept;
                 set2HeldTouches = stillHeld;
+            }
+            // settings-res-1: the "..." menu button (top middle) opens the
+            // panel. Fresh taps on it never reach the pad (no stick anchor,
+            // no press); held ids are tracked so a finger down across close
+            // never re-opens.
+            if (set2On && !set2Open)
+            {
+                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight);
+                const bool menuShown = ps2x::set2::menuButtonShown(set2Nav.menubtn);
+                std::vector<int64_t> menuIds;
+                int kept = 0;
+                for (int i = 0; i < touches; ++i)
+                {
+                    menuIds.push_back(vpadTouches[i].id);
+                    if (menuShown &&
+                        ps2x::set2::menuButtonHit(set2mb, vpadTouches[i].x, vpadTouches[i].y))
+                    {
+                        if (std::find(set2MenuIds.begin(), set2MenuIds.end(), vpadTouches[i].id) ==
+                            set2MenuIds.end())
+                            set2DoOpen();
+                        if (set2Open)
+                            break;
+                        continue;
+                    }
+                    vpadTouches[kept++] = vpadTouches[i];
+                }
+                touches = kept;
+                set2MenuIds = menuIds;
             }
             ps2x::vpad::PadFrame vpadFrame =
                 ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches, vpadShoulderBand);
@@ -9697,36 +9792,29 @@ void PS2Runtime::run()
                 // pauses while the panel is open.
                 DrawText("Settings", static_cast<int>(set2dg.px) + 14,
                          static_cast<int>(set2dg.py) + 10, titleFont, Color{255, 170, 80, 255});
-                const bool modeDirty =
-                    (set2Nav.mode == ps2x::set2::Mode::M120) != set2Eff120;
-                const bool resDirty = set2Nav.res != set2ResAtOpen;
-                // panel-polish-1: the real render height (measured pixels),
-                // never the scale factor. Pending options project from the
-                // measured height; default shows the measured height itself.
-                std::string resVal;
-                if (set2Nav.res == ps2x::set2::Res::RDefault)
-                {
-                    const std::string measured = ps2x::set2::resHeightLabel(set2MeasuredH);
-                    resVal = measured.empty() ? "default (" + set2EffUpscale + ")"
-                                              : measured + " (default)";
-                }
-                else
-                {
-                    const unsigned proj = ps2x::set2::resProjectedH(set2Nav.res, set2EffUpscale,
-                                                                    set2MeasuredH);
-                    const std::string label = ps2x::set2::resHeightLabel(proj);
-                    resVal = label.empty() ? ps2x::set2::resToUpscale(set2Nav.res) : label;
-                }
-                if (resDirty)
+                // settings-res-1: Mode/Resolution stay pending-until-restart
+                // with no Restart row. A dirty row shows "(restart)"; while
+                // armed it shows the confirm hint instead (a second X on
+                // that row restarts). ASCII "-" (the em dash is not in the
+                // panel font).
+                const bool isModeDirty = ps2x::set2::modeDirty(set2Nav);
+                const bool isResDirty = ps2x::set2::resDirty(set2Nav);
+                const char *restartHint = "Restart to apply - press X again";
+                std::string resVal =
+                    ps2x::set2::resOptionLabel(set2Nav.res, set2Nav.nativeH, set2DefRes);
+                if (set2Nav.restartArmed && isResDirty)
+                    resVal = restartHint;
+                else if (isResDirty)
                     resVal += "  (restart)";
-                const std::string modeVal =
-                    std::string(set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60") +
-                    (modeDirty ? "  (restart)" : "");
+                std::string modeVal(set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60");
+                if (set2Nav.restartArmed && isModeDirty)
+                    modeVal = restartHint;
+                else if (isModeDirty)
+                    modeVal += "  (restart)";
                 const std::string perfVal(set2Nav.perf ? "on" : "off");
                 const std::string upscaleVal(set2Nav.upscale ? "on" : "off");
                 const std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
-                const std::string restartVal =
-                    set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now";
+                const std::string menubtnVal(ps2x::set2::menuBtnName(set2Nav.menubtn));
                 for (int i = 0; i < ps2x::set2::kRowCount; ++i)
                 {
                     if (static_cast<int>(set2Nav.sel) == i)
@@ -9739,12 +9827,6 @@ void PS2Runtime::run()
                     const int rowY = static_cast<int>(set2dg.rowY[i]) +
                                      (static_cast<int>(set2dg.rowH) - rowFont) / 2;
                     const ps2x::set2::Row row = static_cast<ps2x::set2::Row>(i);
-                    if (row == ps2x::set2::Row::Restart)
-                    {
-                        DrawText(restartVal.c_str(), static_cast<int>(set2dg.rowX), rowY, rowFont,
-                                 rowCol);
-                        continue;
-                    }
                     // Two columns: short label left, value right-aligned, so
                     // every label shows in full on Odin, iPad and iPhone.
                     const char *label = ps2x::set2::rowLabel(row);
@@ -9757,16 +9839,34 @@ void PS2Runtime::run()
                         value = &upscaleVal;
                     else if (row == ps2x::set2::Row::Touch)
                         value = &touchVal;
+                    else if (row == ps2x::set2::Row::MenuBtn)
+                        value = &menubtnVal;
                     DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
                     const int valW = MeasureText(value->c_str(), rowFont);
                     DrawText(value->c_str(),
                              static_cast<int>(set2dg.rowX + set2dg.rowW) - valW, rowY, rowFont,
                              rowCol);
                 }
-                const char *hint = "Up/Down move - X change - Triangle/chord close";
+                // settings-res-1: the Menu button row explains the chord, so
+                // hiding the button never strands the user.
+                const char *hint = (set2Nav.sel == ps2x::set2::Row::MenuBtn)
+                                       ? "Select + Start opens settings"
+                                       : "Up/Down move - X change - Triangle/chord close";
                 DrawText(hint, static_cast<int>(set2dg.px) + 14,
                          static_cast<int>(set2dg.py + set2dg.ph) - rowFont - 8, rowFont,
                          Color{150, 160, 175, 255});
+            }
+            if (!set2Open && ps2x::set2::menuButtonShown(set2Nav.menubtn))
+            {
+                // settings-res-1: the "..." menu button, top middle, drawn
+                // dim like the pad. ASCII dots: the ellipsis glyph (U+2026)
+                // is not in raylib's default font (U+0000..U+00FF only).
+                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight);
+                const int mbFont = std::max(12, static_cast<int>(screenHeight / 40.0f));
+                const int mbTw = MeasureText("...", mbFont);
+                DrawText("...", static_cast<int>(set2mb.x + (set2mb.w - static_cast<float>(mbTw)) * 0.5f),
+                         static_cast<int>(set2mb.y + (set2mb.h - static_cast<float>(mbFont)) * 0.5f),
+                         mbFont, Color{255, 255, 255, 70});
             }
             if (set2Perf)
             {

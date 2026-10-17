@@ -9,12 +9,15 @@
 // loop in ps2_runtime.cpp owns pause/draw/restart, and the platform shells
 // own the settings file layer + relaunch.
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "ps2_public_tier.h" // resTierDefault runs the public device-tier rule
 
 namespace ps2x::set2
 {
@@ -114,12 +117,15 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf, Upscale, Touch, Restart. X changes
-// the pending value (Mode/Resolution apply on restart; Perf, Upscale
-// and Touch are live). Restart arms on the first X ("one-line confirm") and
-// fires on the second. Triangle or the chord closes. Row::Count drives the
-// geometry, hit test and draw loops, so appending a row needs no layout
-// change.
+// Rows: Mode, Resolution, Perf, Upscale, Touch, Menu button. X changes
+// the pending value (Mode/Resolution apply on restart; Perf, Upscale,
+// Touch and Menu button are live). There is no Restart row: X on a clean
+// Mode/Resolution row applies the change and arms the restart; a second X
+// on that row while it still differs from the running value restarts
+// (ArmRestart/DoRestart, reusing the old one-line confirm). X anywhere
+// else, or moving off the row, disarms. Triangle or the chord closes.
+// Row::Count drives the geometry, hit test and draw loops, so appending
+// a row needs no layout change.
 enum class Row : uint8_t
 {
     Mode = 0,
@@ -127,7 +133,7 @@ enum class Row : uint8_t
     Perf = 2,
     Upscale = 3,
     Touch = 4,
-    Restart = 5,
+    MenuBtn = 5,
     Count = 6
 };
 static constexpr int kRowCount = static_cast<int>(Row::Count);
@@ -148,8 +154,8 @@ inline const char *rowLabel(Row r)
         return "Upscale";
     case Row::Touch:
         return "Touch";
-    case Row::Restart:
-        return "Restart";
+    case Row::MenuBtn:
+        return "Menu button";
     default:
         return "";
     }
@@ -186,12 +192,107 @@ enum class Mode : uint8_t
     M120 = 0,
     M60 = 1
 };
+// Resolution choices (settings-res-1, Brad 10-17): 1x, 2x, Screen, 3x, 4x,
+// ordered by resulting height (Screen sits where the device height falls).
+// Screen is the device's display resolution (GE1_UPSCALE=native), never the
+// PS2's. 1x is never a default. The platform default is preselected and
+// marked (Odin/Android = Screen, iOS = 2x); below-native stays bench-only
+// (there is no below-native choice).
 enum class Res : uint8_t
 {
-    Native = 0,  // GE1_UPSCALE=native
-    R2x = 1,     // GE1_UPSCALE=2
-    RDefault = 2 // no override: the platform default
+    R1x = 0,   // GE1_UPSCALE=1
+    R2x = 1,   // GE1_UPSCALE=2
+    Screen = 2, // GE1_UPSCALE=native (device display resolution)
+    R3x = 3,   // GE1_UPSCALE=3
+    R4x = 4    // GE1_UPSCALE=4
 };
+static constexpr int kResCount = 5;
+
+// PS2 base height (lines) x scale: the fixed multiplier heights.
+constexpr unsigned kResBaseH = 448u;
+
+inline unsigned resScale(Res r)
+{
+    switch (r)
+    {
+    case Res::R1x:
+        return 1u;
+    case Res::R2x:
+        return 2u;
+    case Res::R3x:
+        return 3u;
+    case Res::R4x:
+        return 4u;
+    default:
+        return 0u; // Screen: see resHeight
+    }
+}
+
+// Resulting height in lines for a choice. Multipliers are fixed
+// (448 x scale); Screen is the measured device height in pixels.
+inline unsigned resHeight(Res r, unsigned nativeH)
+{
+    if (r == Res::Screen)
+        return nativeH;
+    return kResBaseH * resScale(r);
+}
+
+// Within ~5% of a multiplier's height: |a-b| <= 5% of b.
+inline bool resNearHeight(unsigned a, unsigned b)
+{
+    if (b == 0)
+        return false;
+    const unsigned d = (a > b) ? a - b : b - a;
+    return d * 20u <= b;
+}
+
+// Resolution choices ordered by resulting height, ascending. Screen sits
+// where the device height falls; when it lands within ~5% of a
+// multiplier both show, Screen after the multiplier.
+inline std::array<Res, 5> resOrder(unsigned nativeH)
+{
+    const Res mults[4] = {Res::R1x, Res::R2x, Res::R3x, Res::R4x};
+    std::array<Res, 5> out{};
+    int n = 0;
+    bool placed = false;
+    for (int i = 0; i < 4; ++i)
+    {
+        const unsigned mh = resHeight(mults[i], nativeH);
+        if (!placed && resNearHeight(nativeH, mh))
+        {
+            // Within ~5%: both show, Screen after the multiplier.
+            out[static_cast<size_t>(n++)] = mults[i];
+            out[static_cast<size_t>(n++)] = Res::Screen;
+            placed = true;
+            continue;
+        }
+        if (!placed && nativeH < mh)
+        {
+            out[static_cast<size_t>(n++)] = Res::Screen;
+            placed = true;
+        }
+        out[static_cast<size_t>(n++)] = mults[i];
+    }
+    if (!placed)
+        out[static_cast<size_t>(n++)] = Res::Screen;
+    return out;
+}
+
+// Next choice in height order (wraps). X on the Resolution row steps this.
+inline Res resNext(Res cur, unsigned nativeH)
+{
+    const auto order = resOrder(nativeH);
+    for (size_t i = 0; i < order.size(); ++i)
+    {
+        if (order[i] == cur)
+            return order[(i + 1) % order.size()];
+    }
+    return cur;
+}
+
+// (resTierDefault/resDefaultRow are defined below resFromSetting: they map
+// the tier rule's render string onto the rows.)
+
 // Touch controls (android-touch-1): Auto shows the overlay only when no
 // physical gamepad is present (Odin hides by default); On/Off force it.
 // Persisted as PS2X_VIRTUAL_PAD (On="1", Off="0", Auto=key absent).
@@ -201,6 +302,54 @@ enum class Touch : uint8_t
     On = 1,
     Off = 2
 };
+
+// Menu "..." button (settings-res-1 addendum, Brad 10-17): a small dim
+// button at the top middle of the screen; tapping it opens the panel. Shown
+// by default on every device (even with a physical controller); only this
+// row hides it. Persisted as PS2X_MENU_BUTTON (Hidden="0", Shown=key
+// absent, so deleting the line restores the default).
+enum class MenuBtn : uint8_t
+{
+    Shown = 0,
+    Hidden = 1
+};
+
+inline MenuBtn menuBtnFromSetting(const std::string &val)
+{
+    if (val == "0")
+        return MenuBtn::Hidden;
+    return MenuBtn::Shown;
+}
+
+inline const char *menuBtnToSetting(MenuBtn b)
+{
+    switch (b)
+    {
+    case MenuBtn::Hidden:
+        return "0";
+    default:
+        return ""; // Shown: no override line
+    }
+}
+
+inline const char *menuBtnName(MenuBtn b)
+{
+    switch (b)
+    {
+    case MenuBtn::Hidden:
+        return "hidden";
+    default:
+        return "shown";
+    }
+}
+
+// The button shows whenever the row says Shown. It does NOT follow the
+// Touch row (correction, Brad 10-17): with a physical pad and Touch=Auto
+// the pad hides but the button still shows.
+inline bool menuButtonShown(MenuBtn b)
+{
+    return b == MenuBtn::Shown;
+}
 enum class Action : uint8_t
 {
     None = 0,
@@ -213,13 +362,27 @@ enum class Action : uint8_t
 struct NavState
 {
     Row sel = Row::Mode;
-    Mode mode = Mode::M120; // pending (applied on restart)
-    Res res = Res::RDefault; // pending (applied on restart)
-    bool perf = false;       // live
-    bool upscale = false;    // live (REM3 P11 Phase 2)
+    Mode mode = Mode::M120;   // pending (applied on restart)
+    Res res = Res::Screen;    // pending (applied on restart)
+    bool perf = false;        // live
+    bool upscale = false;     // live (REM3 P11 Phase 2)
     Touch touch = Touch::Auto; // live (android-touch-1)
+    MenuBtn menubtn = MenuBtn::Shown; // live (settings-res-1)
+    Mode runMode = Mode::M120; // running values, sampled at open (dirty detect)
+    Res runRes = Res::Screen;
+    unsigned nativeH = 0; // measured device height px, sampled at open (order + Screen label)
     bool restartArmed = false;
 };
+
+inline bool modeDirty(const NavState &st)
+{
+    return st.mode != st.runMode;
+}
+
+inline bool resDirty(const NavState &st)
+{
+    return st.res != st.runRes;
+}
 
 struct NavOut
 {
@@ -264,33 +427,46 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
     switch (st.sel)
     {
     case Row::Mode:
+        // A second X while still dirty restarts; otherwise toggle (toggling
+        // back to the running value disarms when nothing else is dirty).
+        if (st.restartArmed && modeDirty(st))
+        {
+            out.action = Action::DoRestart;
+            break;
+        }
         st.mode = (st.mode == Mode::M120) ? Mode::M60 : Mode::M120;
         out.action = Action::Changed;
+        st.restartArmed = modeDirty(st) || resDirty(st);
         break;
     case Row::Res:
-        st.res = (st.res == Res::Native) ? Res::R2x : (st.res == Res::R2x ? Res::RDefault : Res::Native);
+        if (st.restartArmed && resDirty(st))
+        {
+            out.action = Action::DoRestart;
+            break;
+        }
+        st.res = resNext(st.res, st.nativeH);
         out.action = Action::Changed;
+        st.restartArmed = modeDirty(st) || resDirty(st);
         break;
     case Row::Perf:
         st.perf = !st.perf;
         out.action = Action::Changed;
+        st.restartArmed = false;
         break;
     case Row::Upscale:
         st.upscale = !st.upscale;
         out.action = Action::Changed;
+        st.restartArmed = false;
         break;
     case Row::Touch:
         st.touch = (st.touch == Touch::Auto) ? Touch::On : (st.touch == Touch::On ? Touch::Off : Touch::Auto);
         out.action = Action::Changed;
+        st.restartArmed = false;
         break;
-    case Row::Restart:
-        if (st.restartArmed)
-            out.action = Action::DoRestart;
-        else
-        {
-            st.restartArmed = true;
-            out.action = Action::ArmRestart;
-        }
+    case Row::MenuBtn:
+        st.menubtn = (st.menubtn == MenuBtn::Shown) ? MenuBtn::Hidden : MenuBtn::Shown;
+        out.action = Action::Changed;
+        st.restartArmed = false;
         break;
     default:
         break;
@@ -330,8 +506,9 @@ inline PanelGeom panelLayout(float w, float h)
 
 inline int panelHit(const PanelGeom &g, bool open, float x, float y)
 {
-    // set2-polish-1 (Brad 10-16): no gear dot — a closed panel has no tap
-    // target, so any closed-panel tap misses.
+    // set2-polish-1 (Brad 10-16): no gear dot — a closed panel has no row
+    // tap target (the "..." menu button is hit-tested separately), so any
+    // closed-panel row tap misses.
     if (!open)
         return -1;
     if (x < g.rowX || x > g.rowX + g.rowW)
@@ -356,6 +533,7 @@ inline bool settingsKeyAllowed(const char *key)
     const std::string k(key);
     return k == "GE1_UPSCALE" || k == "PS2X_SETTINGS_PERF" ||
            k == "PS2X_VIRTUAL_PAD" || // android-touch-1: Touch row persists under its env name
+           k == "PS2X_MENU_BUTTON" || // settings-res-1: Menu button row persists under its env name
            k == "GE1_ONDEVICE_UPSCALE"; // REM3 P11 Phase 2: the live toggle persists under its env name
 }
 
@@ -403,7 +581,7 @@ inline SettingsPairs parseSettingsEnv(const std::string &content)
 
 inline std::string formatSettingsEnv(const SettingsPairs &pairs)
 {
-    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch).\n"
+    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Menu button).\n"
                     "# Delete lines (or this file) to return to the platform defaults.\n";
     for (const auto &kv : pairs)
         s += kv.first + "=" + kv.second + "\n";
@@ -434,40 +612,95 @@ inline SettingsPairs upsertSettings(SettingsPairs cur, const std::string &key, c
     return out;
 }
 
+// Resolution row <-> GE1_UPSCALE. Every choice writes an explicit line
+// (there is no default-clearing choice any more); a stored legacy value
+// ("2"/"native"/unset) loads via resFromSetting, unset -> platform default.
 inline const char *resToUpscale(Res r)
 {
     switch (r)
     {
-    case Res::Native:
+    case Res::Screen:
         return "native";
+    case Res::R1x:
+        return "1";
     case Res::R2x:
         return "2";
+    case Res::R3x:
+        return "3";
+    case Res::R4x:
+        return "4";
     default:
-        return ""; // RDefault: no override line
+        return "native";
     }
 }
 
-// Projected render height for a pending Res option, from the measured frame
-// height and the effective upscale string (set2EffUpscale: "2", "2.5",
-// "native", "1x", ...). RDefault shows the measured height itself; Native
-// and R2x scale from the implied 1x base (measured / effective, or measured
-// when the effective value is "native", which already renders at display
-// size). Unparseable scales fall back to measured (neutral). Approximate by
-// construction on display-export paths (the output size is setting-blind);
-// the RDefault case is always exact.
-inline unsigned resProjectedH(Res pending, const std::string &eff, unsigned measuredH)
+inline Res resFromSetting(const std::string &val, Res platformDefault)
 {
-    if (pending == Res::RDefault || measuredH == 0)
-        return measuredH;
-    float base = static_cast<float>(measuredH);
-    if (eff != "native" && eff != "halfnative")
+    if (val == "native")
+        return Res::Screen;
+    if (val == "1")
+        return Res::R1x;
+    if (val == "2")
+        return Res::R2x;
+    if (val == "3")
+        return Res::R3x;
+    if (val == "4")
+        return Res::R4x;
+    return platformDefault; // unset or junk: the platform default
+}
+
+// Default Resolution row: the '(default)' marker and the preselect come
+// from the existing device rules, never a panel-side hardcode
+// (settings-res-1 correction 4, Brad 10-17). Public builds follow the
+// public device-tier rule (ps2_public_tier.h, decision 'Public-build
+// defaults by device' 10-13): capable (iOS, or Android with >= 5 GiB
+// reported RAM) gets Screen on a 1080p panel, otherwise 2x; every other
+// device gets 1x. The tier logic itself is untouched: resTierDefault runs
+// the rule's choose() and maps its render string onto the rows. Play
+// builds keep their env rules (Android/Odin = Screen, iOS = 2x); anything
+// else (Mac/dev) shows Screen.
+inline Res resTierDefault(bool isiOS, std::uint64_t ramBytes, int panelW, int panelH)
+{
+    ps2x::public_tier::Input in{};
+    in.ios = isiOS;
+    in.ramBytes = ramBytes;
+    in.panelW = panelW;
+    in.panelH = panelH;
+    const ps2x::public_tier::Choice c = ps2x::public_tier::choose(in);
+    return resFromSetting(c.render, Res::Screen);
+}
+
+inline Res resDefaultRow(bool publicApp, bool isiOS, std::uint64_t ramBytes, int panelW, int panelH)
+{
+    if (publicApp)
+        return resTierDefault(isiOS, ramBytes, panelW, panelH);
+    return isiOS ? Res::R2x : Res::Screen;
+}
+
+// Row value text: the multiplier first, then the resulting height
+// (PS2 base 448 lines x scale); Screen shows the measured device height
+// rounded the same way resHeightLabel rounds. The platform default option
+// is marked. The panel font is raylib's default (U+0000..U+00FF), so the
+// multiply sign (xD7) and middle dot (xB7) render; "..." and the em dash do
+// not (the menu button and restart hint use ASCII).
+inline std::string resOptionLabel(Res r, unsigned nativeH, Res platformDefault)
+{
+    std::string s;
+    if (r == Res::Screen)
     {
-        const float s = std::strtof(eff.c_str(), nullptr);
-        if (s > 0.0f)
-            base = static_cast<float>(measuredH) / s;
+        const std::string h = resHeightLabel(nativeH);
+        s = h.empty() ? "Screen" : "Screen \xb7 " + h;
     }
-    const float h = (pending == Res::Native) ? base : base * 2.0f;
-    return static_cast<unsigned>(h + 0.5f);
+    else
+    {
+        const unsigned mult = resScale(r);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%u\xc3\x97 \xb7 %up", mult, kResBaseH * mult);
+        s = buf;
+    }
+    if (r == platformDefault)
+        s += " (default)";
+    return s;
 }
 
 // android-touch-1: Touch row <-> PS2X_VIRTUAL_PAD. On="1", Off="0",
@@ -506,6 +739,29 @@ inline const char *touchName(Touch t)
     default:
         return "auto";
     }
+}
+
+struct MenuButtonGeom
+{
+    float x = 0, y = 0, w = 0, h = 0; // hit rect, window points
+};
+
+// Small dim "..." at the top middle. The hit rect is thumb-sized; the
+// drawn glyph is smaller and centred (the render loop draws the text).
+inline MenuButtonGeom menuButtonLayout(float sw, float sh)
+{
+    MenuButtonGeom g;
+    const float hit = sh * 0.075f; // ~81 px on a 1080p panel
+    g.w = hit * 1.6f;
+    g.h = hit;
+    g.x = (sw - g.w) * 0.5f;
+    g.y = sh * 0.02f;
+    return g;
+}
+
+inline bool menuButtonHit(const MenuButtonGeom &g, float x, float y)
+{
+    return x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h;
 }
 
 #if defined(__APPLE__) && !defined(PS2X_IOS)
