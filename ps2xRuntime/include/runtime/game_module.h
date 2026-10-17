@@ -50,7 +50,8 @@ namespace ps2_game_module
     // 4 (snd-seam-1 family A): the SND progress hooks below.
     // 5 (snd-seam-1 family #4): the Tricky song mix hooks below.
     // 6 (snd-seam-1 family #8): the TK34 patch-grow field providers below.
-    inline constexpr uint32_t kAbiVersion = 6u;
+    // 7 (snd-seam-1 Part 5 slice 4): the Tricky-layer VBlank hook below.
+    inline constexpr uint32_t kAbiVersion = 7u;
 
     // Song-side snapshot for the TK47 probe line (plain scalars: the song
     // player type stays with the game). `path` points at a static label
@@ -136,6 +137,13 @@ namespace ps2_game_module
         void (*patchGrowSave)(ps2_savestate::Writer &w) = nullptr;
         bool (*patchGrowValidate)(ps2_savestate::Reader &r) = nullptr;
         bool (*patchGrowLoad)(ps2_savestate::Reader &r) = nullptr;
+        // Tricky-layer VBlank hook (snd-seam-1 Part 5 slice 4). The
+        // scheduler calls this at the exact site the layer reducer ran,
+        // with the same arguments and in the same order. Null (or no
+        // module) runs the reducer inline (the generic behavior below);
+        // the module forwards to the same reducer today and owns the
+        // reduction once the layer moves. One cached-config check when off.
+        void (*trickyLayerTick)(uint8_t *rdram, size_t ramSize, uint64_t tick) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

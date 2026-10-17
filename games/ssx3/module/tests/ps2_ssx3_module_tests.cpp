@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "Ssx3LodScale.h"
+#include "Ssx3TrickyLayer.h"
 #include "Ssx3StockMeter.h"
 #include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
@@ -84,6 +85,16 @@ void register_ps2_ssx3_module_tests()
             t.IsTrue(m.overrides[5].apply == &ps2_stock_meter::applyTrickyStockMeter, "stock-meter apply");
             t.IsTrue(m.overrides[6].apply == &ps2_lod_scale::applyLodScale, "lod-scale apply");
         });
+        tc.Run("the Tricky-layer tick hook points at the module (ABI 7)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 7u, "abi");
+            t.IsTrue(m.trickyLayerTick == &ps2_tricky_layer::tickHook, "tick hook");
+            // The forward matches the inline reducer on the early-out path
+            // (layer off / null / empty): no state, no crash.
+            ps2_tricky_layer::tickHook(nullptr, 0u, 41u);
+            t.IsTrue(true, "forward early-outs");
+        });
         tc.Run("lod-scale apply wraps nothing with the knobs off", [](TestCase &t)
                {
             // snd-seam-1 Part 5 slice 3: both scales default 0 (det keys)
@@ -129,7 +140,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 6u, "abi");
+            t.Equals(m.abiVersion, 7u, "abi");
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -149,7 +160,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 6u, "abi");
+            t.Equals(m.abiVersion, 7u, "abi");
             t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
             t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
             t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
@@ -157,7 +168,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the TK34 patch-grow providers point at the module (ABI 6)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 6u, "abi");
+            t.Equals(m.abiVersion, 7u, "abi");
             t.IsTrue(m.patchGrowSave == &ps2_tricky_state::patchGrowSave, "save");
             t.IsTrue(m.patchGrowValidate == &ps2_tricky_state::patchGrowValidate, "validate");
             t.IsTrue(m.patchGrowLoad == &ps2_tricky_state::patchGrowLoad, "load");

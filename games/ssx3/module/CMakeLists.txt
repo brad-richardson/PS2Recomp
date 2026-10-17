@@ -13,6 +13,7 @@ add_library(ssx3_game_module STATIC
     src/tricky_menu.cpp
     src/stock_meter.cpp
     src/lod_scale.cpp
+    src/tricky_layer_tick.cpp
 )
 target_include_directories(ssx3_game_module
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

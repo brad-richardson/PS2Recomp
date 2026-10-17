@@ -3154,7 +3154,14 @@ void EeScheduler::processEvent(const EeEvent &event)
         // wrt guest; one cached-config check when the layer is off). After
         // the tick increment, like every sibling hook: the sample belongs
         // to the interval that just completed.
-        ps2_ssx3_tricky_layer::onVBlankTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
+        // snd-seam-1 Part 5 slice 4: the reducer runs in the game module
+        // at this same site and order; null (or no module) runs it inline
+        // (the generic behavior, byte-identical).
+        if (const ps2_game_module::Module *trickyModule = ps2_game_module::installed();
+            trickyModule && trickyModule->trickyLayerTick)
+            trickyModule->trickyLayerTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
+        else
+            ps2_ssx3_tricky_layer::onVBlankTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
         // BTS1: boot turbo yield poll + host audio ring drain (one bool
         // check when the knob is off). After the tick increment, like every
         // sibling hook.

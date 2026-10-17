@@ -6,6 +6,7 @@
 #include "Ssx3SifHandshake.h"
 #include "Ssx3LodScale.h"
 #include "Ssx3StockMeter.h"
+#include "Ssx3TrickyLayer.h"
 #include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
@@ -64,7 +65,8 @@ namespace
                                           &ps2_snd_tricky_song::probeSnapshot,
                                           &ps2_tricky_state::patchGrowSave,
                                           &ps2_tricky_state::patchGrowValidate,
-                                          &ps2_tricky_state::patchGrowLoad};
+                                          &ps2_tricky_state::patchGrowLoad,
+                                          &ps2_tricky_layer::tickHook};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept
