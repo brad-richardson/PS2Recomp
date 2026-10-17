@@ -2,6 +2,7 @@
 #include "ps2_net_protocol.h"
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace
@@ -155,6 +156,83 @@ namespace
             t.IsFalse(ps2_net_protocol::dnsGiveUp(1000, 60000, true), "resolved never gives up");
             t.IsFalse(ps2_net_protocol::dnsGiveUp(5000, 1000, false), "clock ran back");
         });
+
+        tc.Run("netsec-fix-1 F1: invalid TCP frame sizes reject, valid hold or deliver",
+               [](TestCase &t)
+               {
+                   using ps2_net_protocol::classifyTcpFrame;
+                   using ps2_net_protocol::TcpFrameAction;
+                   t.IsTrue(classifyTcpFrame(0u, 100u) == TcpFrameAction::Reject, "zero rejects");
+                   t.IsTrue(classifyTcpFrame(11u, 100u) == TcpFrameAction::Reject, "short rejects");
+                   t.IsTrue(classifyTcpFrame(65537u, 70000u) == TcpFrameAction::Reject,
+                            "oversize rejects");
+                   t.IsTrue(classifyTcpFrame(0xFFFFFFFFu, 100u) == TcpFrameAction::Reject,
+                            "hostile u32 rejects");
+                   t.IsTrue(classifyTcpFrame(12u, 11u) == TcpFrameAction::Wait, "partial waits");
+                   t.IsTrue(classifyTcpFrame(100u, 50u) == TcpFrameAction::Wait, "half waits");
+                   t.IsTrue(classifyTcpFrame(12u, 12u) == TcpFrameAction::Deliver, "min delivers");
+                   t.IsTrue(classifyTcpFrame(100u, 100u) == TcpFrameAction::Deliver, "exact delivers");
+                   t.IsTrue(classifyTcpFrame(65536u, 70000u) == TcpFrameAction::Deliver,
+                            "max delivers with trailing");
+               });
+
+        tc.Run("netsec-fix-1 F2: O5PK bodies need length == datagram, deliveries must tile",
+               [](TestCase &t)
+               {
+                   uint8_t good[44];
+                   std::memset(good, 0, sizeof(good));
+                   good[0] = 44u;
+                   good[1] = 0u;
+                   t.IsTrue(ps2_net_protocol::udpGameBodyValid(good, sizeof(good)), "44-byte record");
+                   uint8_t bad[44];
+                   std::memcpy(bad, good, sizeof(bad));
+                   bad[0] = 43u;
+                   t.IsFalse(ps2_net_protocol::udpGameBodyValid(bad, sizeof(bad)), "short declare");
+                   bad[0] = 45u;
+                   t.IsFalse(ps2_net_protocol::udpGameBodyValid(bad, sizeof(bad)), "long declare");
+                   bad[0] = 0xFFu;
+                   bad[1] = 0xFFu;
+                   t.IsFalse(ps2_net_protocol::udpGameBodyValid(bad, sizeof(bad)), "huge declare");
+                   t.IsFalse(ps2_net_protocol::udpGameBodyValid(good, 1u), "under 2 bytes");
+                   t.IsFalse(ps2_net_protocol::udpGameBodyValid(nullptr, 44u), "null body");
+                   t.IsTrue(ps2_net_protocol::udpConcatBodyValid(good, sizeof(good)), "single tiles");
+                   uint8_t two[88];
+                   std::memcpy(two, good, 44u);
+                   std::memcpy(two + 44, good, 44u);
+                   t.IsTrue(ps2_net_protocol::udpConcatBodyValid(two, sizeof(two)), "pair tiles");
+                   two[44] = 43u;
+                   t.IsFalse(ps2_net_protocol::udpConcatBodyValid(two, sizeof(two)),
+                             "second short breaks tiling");
+                   uint8_t trunc[80];
+                   std::memcpy(trunc, two, sizeof(trunc));
+                   t.IsFalse(ps2_net_protocol::udpConcatBodyValid(trunc, sizeof(trunc)),
+                             "truncated tail fails");
+               });
+
+        tc.Run("netsec-fix-1 F6: relay pin needs exact endpoint plus current token",
+               [](TestCase &t)
+               {
+                   const std::string tok(32u, 'a');
+                   const std::string other(32u, 'b');
+                   t.IsTrue(ps2_net_protocol::relaySourceAllowed(0x0100007Fu, 3658u, tok, tok,
+                                                                 0x0100007Fu, 3658u),
+                            "pinned endpoint passes");
+                   t.IsFalse(ps2_net_protocol::relaySourceAllowed(0x0100007Fu, 3658u, tok, tok,
+                                                                  0x0100007Fu, 3659u),
+                             "wrong port drops");
+                   t.IsFalse(ps2_net_protocol::relaySourceAllowed(0x0100007Fu, 3658u, tok, tok,
+                                                                  0x0200007Fu, 3658u),
+                             "wrong IP drops");
+                   t.IsFalse(ps2_net_protocol::relaySourceAllowed(0x0100007Fu, 3658u, tok, other,
+                                                                  0x0100007Fu, 3658u),
+                             "rotated token drops");
+                   t.IsFalse(ps2_net_protocol::relaySourceAllowed(0x0100007Fu, 3658u, tok, "",
+                                                                  0x0100007Fu, 3658u),
+                             "cleared token drops");
+                   t.IsFalse(ps2_net_protocol::relaySourceAllowed(0x0100007Fu, 3658u, "", "",
+                                                                  0x0100007Fu, 3658u),
+                             "unpinned drops");
+               });
     }
 }
 

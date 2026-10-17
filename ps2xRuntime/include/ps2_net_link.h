@@ -7,12 +7,56 @@
 // local ordered relay. Knob off: enabled() is false after one cached getenv
 // and no other function has any effect (no thread, socket, file or guest
 // change).
+#include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ps2x
 {
 namespace nplink
 {
+
+// netsec-fix-1 F10: a relay/protocol failure ends the link session (the sim
+// thread keeps running on local inputs; waitCommit reports false) instead of
+// exiting the process.
+struct SessionError : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+// netsec-fix-1 F9: COMMIT admission window (pure, unit-tested). A COMMIT
+// tick must lie in [firstTick, sendUpTo + kCommitWindow] and past the last
+// applied tick; anything else is ignored, never queued, so a malicious
+// relay cannot accumulate unconsumed future commits. kCommitWindow covers
+// the in-flight INPUT lead (delay) with margin; the relay only echoes ticks
+// the client already queued.
+constexpr uint64_t kCommitWindow = 256u;
+// Backstop on queued (accepted, unconsumed) commits; the window above bounds
+// the map far below this in legitimate use.
+constexpr size_t kMaxPendingCommits = 4096u;
+
+inline bool commitAcceptable(uint64_t firstTick, uint64_t sendUpTo, bool haveLast,
+                             uint64_t lastWaited, uint64_t tick)
+{
+    if (tick < firstTick)
+        return false;
+    if (tick > sendUpTo + kCommitWindow)
+        return false;
+    if (haveLast && tick <= lastWaited)
+        return false;
+    return true;
+}
+
+// netsec-fix-1 F10: SSXNP/2 frame-size gate (pure, unit-tested): throws
+// SessionError instead of exiting on a corrupt declared size.
+constexpr uint32_t kLinkFrameMin = 44u;
+constexpr uint32_t kLinkFrameMax = 16384u;
+
+inline void checkLinkFrameSize(uint32_t frameBytes)
+{
+    if (frameBytes < kLinkFrameMin || frameBytes > kLinkFrameMax)
+        throw SessionError("bad frame_bytes");
+}
 
 struct Commit
 {
@@ -41,10 +85,12 @@ int riderSlot();
 void onTick(uint64_t tick);
 
 // Block until COMMIT(tick) is in the map, then copy it to out. Returns false
-// only when disabled. No timeout while the relay is healthy: the sim thread
-// stalls while the network thread keeps receiving. A dead relay (write/select
-// failure, closed or malformed COMMIT) exits the process, as does a tick past
-// the input queue cap, so a lost relay reads as a link failure, not a hang.
+// when disabled or after the link session ended (netsec-fix-1 F10): the sim
+// thread keeps running on local inputs. No timeout while the relay is
+// healthy: the sim thread stalls while the network thread keeps receiving.
+// A dead relay (write/select failure, closed or malformed COMMIT) or a tick
+// past the input queue cap ends the session, so a lost relay reads as a
+// link failure, not a hang and not a process exit.
 bool waitCommit(uint64_t tick, Commit &out);
 
 } // namespace nplink

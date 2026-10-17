@@ -413,6 +413,47 @@ inline void encodeState(uint8_t *o, uint16_t slot, uint64_t tick, const Sample &
     putU64(o + 103, fnv64(o, 103u));
 }
 
+// netsec-fix-1 F8: numeric validation for one decoded STATE sample. False
+// on any non-finite float, a degenerate or wild quaternion, an out-of-range
+// position/velocity, or a finish time that is negative, unrepresentable, or
+// unsafe for the float-to-milliseconds conversion. Bounds are generous (far
+// outside any course); only garbage fails.
+inline bool stateSampleValid(const Sample &s)
+{
+    const float fs[] = {s.pos.x, s.pos.y, s.pos.z, s.qx, s.qy, s.qz, s.qw,
+                        s.vel.x, s.vel.y, s.vel.z, s.boost, s.dist, s.ftime};
+    for (float f : fs)
+    {
+        if (!std::isfinite(f))
+            return false;
+    }
+    const double qn = (double)s.qx * s.qx + (double)s.qy * s.qy + (double)s.qz * s.qz +
+                      (double)s.qw * s.qw;
+    if (!(qn >= 0.09) || !(qn <= 4.0))
+        return false;
+    const float ps[] = {s.pos.x, s.pos.y, s.pos.z};
+    for (float f : ps)
+    {
+        if (f < -4000000.0f || f > 4000000.0f)
+            return false;
+    }
+    const float vs[] = {s.vel.x, s.vel.y, s.vel.z};
+    for (float f : vs)
+    {
+        if (f < -1000000.0f || f > 1000000.0f)
+            return false;
+    }
+    if (s.boost < -1000000.0f || s.boost > 1000000.0f)
+        return false;
+    if (s.dist < -10000000.0f || s.dist > 10000000.0f)
+        return false;
+    if (!(s.ftime >= 0.0f) || !(s.ftime <= 86400.0f))
+        return false;
+    if (s.fin > 1u)
+        return false;
+    return true;
+}
+
 // Decode one STATE payload. False on any shape/digest violation.
 inline bool decodeState(const uint8_t *p, size_t n, Sample &s, uint32_t &de4, uint32_t &w0, uint32_t &w1,
                         uint64_t &inTick, uint16_t &slot)
@@ -449,6 +490,8 @@ inline bool decodeState(const uint8_t *p, size_t n, Sample &s, uint32_t &de4, ui
     s.de4 = de4;
     s.w0 = w0;
     s.w1 = w1;
+    if (!stateSampleValid(s))
+        return false;
     s.hasInput = true;
     return true;
 }

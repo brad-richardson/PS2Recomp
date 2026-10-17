@@ -35,7 +35,7 @@ namespace
 constexpr uint16_t kVersion = 2u;
 constexpr uint8_t kMagic[4] = {'S', 'N', 'P', '2'};
 constexpr size_t kHeader = 48u;
-constexpr uint32_t kMaxFrame = 16384u;
+// Frame-size bound lives in ps2_net_link.h as kLinkFrameMax (unit-tested).
 constexpr uint8_t kJoin = 0x01u, kConfig = 0x02u, kReady = 0x03u, kStart = 0x04u;
 constexpr uint8_t kInput = 0x10u, kCommit = 0x11u;
 constexpr uint16_t kRelaySender = 0xfffeu;
@@ -97,7 +97,12 @@ struct State
     };
     std::map<uint64_t, StoredCommit> commits;
     uint8_t lastChain[32] = {0};
-    uint64_t sendUpTo = 0u;
+    std::atomic<uint64_t> sendUpTo{0u};
+    // netsec-fix-1 F10: set once when the link session ends (relay/protocol
+    // failure). The sim thread keeps running on local inputs; waitCommit
+    // reports false. linkError is guarded by commitMutex.
+    std::atomic<bool> linkDown{false};
+    std::string linkError;
     uint64_t lastWaited = 0u;
     Commit lastCommit;
     bool haveLast = false;
@@ -137,6 +142,31 @@ std::atomic<bool> &enabledCache()
     std::fprintf(stderr, "[np-link] FATAL: %s\n", what);
     std::fflush(stderr);
     std::exit(3);
+}
+
+// netsec-fix-1 F10: end the link session without exiting the process. The
+// network thread calls endSession (which also closes its socket); the sim
+// thread calls noteLinkDown (which never throws). waitCommit wakes and
+// reports false; the sim keeps running on local inputs.
+void noteLinkDown(State &s, const char *why)
+{
+    bool expected = false;
+    if (!s.linkDown.compare_exchange_strong(expected, true))
+        return;
+    {
+        std::lock_guard<std::mutex> lock(s.commitMutex);
+        s.linkError = why;
+    }
+    s.commitCv.notify_all();
+    std::fprintf(stderr, "[np-link] link down: %s (session ended, sim continues locally)\n", why);
+    std::fflush(stderr);
+}
+
+void endSession(State &s, int fd, const SessionError &e)
+{
+    if (fd >= 0)
+        ::close(fd);
+    noteLinkDown(s, e.what());
 }
 
 bool readAll(int fd, uint8_t *buf, size_t n)
@@ -208,42 +238,44 @@ std::vector<uint8_t> frame(uint8_t kind, uint16_t sender, uint64_t seq,
     return f;
 }
 
-// Strict v2 header validation; returns payload or null (loud + FATAL upstream).
+// Strict v2 header validation; throws SessionError on relay-driven
+// violations (netsec-fix-1 F10: the session ends, the process survives).
 const uint8_t *parseHeader(const std::vector<uint8_t> &bytes, uint8_t wantKind, uint16_t wantSender,
                            size_t wantPayload, const char *what, uint64_t &seqOut)
 {
     if (bytes.size() < kHeader)
-        fatal("short frame");
+        throw SessionError("short frame");
     uint32_t frameBytes = static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8) |
                           (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
-    if (frameBytes < 44u || frameBytes > kMaxFrame || bytes.size() != kHeader + frameBytes - 44u)
-        fatal("bad frame_bytes/trailing");
+    if (frameBytes < kLinkFrameMin || frameBytes > kLinkFrameMax ||
+        bytes.size() != kHeader + frameBytes - 44u)
+        throw SessionError("bad frame_bytes/trailing");
     if (std::memcmp(bytes.data() + 4, kMagic, 4) != 0)
-        fatal("bad magic");
+        throw SessionError("bad magic");
     if (bytes[8] != 2u || bytes[9] != 0u)
-        fatal("bad version");
+        throw SessionError("bad version");
     if (bytes[10] != wantKind)
-        fatal("unexpected kind");
+        throw SessionError("unexpected kind");
     if (bytes[11] != 0u)
-        fatal("nonzero flags");
+        throw SessionError("nonzero flags");
     for (int i = 0; i < 16; ++i)
         if (bytes[12 + i] != 0u)
-            fatal("session mismatch");
+            throw SessionError("session mismatch");
     for (int i = 0; i < 8; ++i)
         if (bytes[28 + i] != 0u)
-            fatal("epoch mismatch");
+            throw SessionError("epoch mismatch");
     uint16_t sender = static_cast<uint16_t>(bytes[36] | (bytes[37] << 8));
     if (sender != wantSender)
-        fatal("sender mismatch");
+        throw SessionError("sender mismatch");
     if (bytes[38] != 0u || bytes[39] != 0u)
-        fatal("nonzero reserved");
+        throw SessionError("nonzero reserved");
     uint64_t seq = 0u;
     for (int i = 0; i < 8; ++i)
         seq |= static_cast<uint64_t>(bytes[40 + i]) << (8 * i);
     if (seq == 0u)
-        fatal("seq starts at 1");
+        throw SessionError("seq starts at 1");
     if (bytes.size() != kHeader + wantPayload)
-        fatal("bad payload length");
+        throw SessionError("bad payload length");
     (void)what;
     seqOut = seq;
     return bytes.data() + kHeader;
@@ -257,8 +289,7 @@ bool readFrame(int fd, uint8_t wantKind, uint16_t wantSender, size_t wantPayload
         return false;
     uint32_t frameBytes = static_cast<uint32_t>(hdr[0]) | (static_cast<uint32_t>(hdr[1]) << 8) |
                           (static_cast<uint32_t>(hdr[2]) << 16) | (static_cast<uint32_t>(hdr[3]) << 24);
-    if (frameBytes < 44u || frameBytes > kMaxFrame)
-        fatal("bad frame_bytes");
+    checkLinkFrameSize(frameBytes);
     std::vector<uint8_t> full = hdr;
     full.resize(kHeader + frameBytes - 44u);
     if (!readAll(fd, full.data() + kHeader, frameBytes - 44u))
@@ -417,44 +448,51 @@ void hexToBytes(const std::string &hex, uint8_t out[32])
 void netThreadMain()
 {
     State &s = state();
-    int fd = connectRelay(s.relayHost, s.relayPort);
-    if (fd < 0)
-        fatal("relay unreachable after ~150 s");
+    // netsec-fix-1 F10: every relay/protocol failure below throws
+    // SessionError and ends here: the socket closes, waitCommit wakes with
+    // false, the sim keeps running locally. Local operator misconfiguration
+    // still exits via fatal() in configure()/loadScripts().
+    int fd = -1;
+    try
+    {
+        fd = connectRelay(s.relayHost, s.relayPort);
+        if (fd < 0)
+            throw SessionError("relay unreachable after ~150 s");
     // ---- JOIN (seq 1) ----
     {
         std::vector<uint8_t> payload(32 + 32 + 32, 0u); // credential/compat/build: P1a zeros
         payload.push_back(kProfile);
         std::vector<uint8_t> f = frame(kJoin, s.slot, s.nextMsgSeq++, payload);
         if (!writeAll(fd, f.data(), f.size()))
-            fatal("JOIN write failed");
+            throw SessionError("JOIN write failed");
     }
     // ---- CONFIG (validate the frozen manifest/timing before READY) ----
     {
         std::vector<uint8_t> payload;
         uint64_t seq = 0u;
         if (!readFrame(fd, kConfig, kRelaySender, 67u, "CONFIG", payload, seq))
-            fatal("CONFIG read failed (setup refused)");
+            throw SessionError("CONFIG read failed (setup refused)");
         const uint8_t *p = payload.data();
         if (p[32] != kProfile)
-            fatal("CONFIG profile mismatch");
+            throw SessionError("CONFIG profile mismatch");
         uint64_t first = getU64(p + 33);
         // delay u16 @41, hash_every @43, lag_limit @45, schema u32 @47
         uint16_t delay = getU16(p + 41);
         uint16_t hashEvery = getU16(p + 43);
         uint32_t schema = static_cast<uint32_t>(p[47] | (p[48] << 8) | (p[49] << 16) | (p[50] << 24));
         if (first != s.firstTick || delay != s.delay)
-            fatal("CONFIG first_tick/delay mismatch (setup mismatch: abort, no in-race blame)");
+            throw SessionError("CONFIG first_tick/delay mismatch (setup mismatch: abort, no in-race blame)");
         if (hashEvery != kHashEvery || schema != kSchema || p[51] != kStateAlg)
-            fatal("CONFIG schema/state mismatch");
+            throw SessionError("CONFIG schema/state mismatch");
         uint32_t rosterRev =
             static_cast<uint32_t>(p[52] | (p[53] << 8) | (p[54] << 16) | (p[55] << 24));
         if (rosterRev != kRosterRev || p[56] != 2u)
-            fatal("CONFIG roster mismatch");
+            throw SessionError("CONFIG roster mismatch");
         // Slots: (0, actor 0, Pad6, fb 1), (1, actor 1, RiderCmd12, fb 1).
         if (p[57] != 0u || p[58] != 0u || p[59] != 0u || p[60] != kPad6 || p[61] != 1u)
-            fatal("CONFIG slot 0 mismatch");
+            throw SessionError("CONFIG slot 0 mismatch");
         if (p[62] != 1u || p[63] != 0u || p[64] != 1u || p[65] != kRider12 || p[66] != 1u)
-            fatal("CONFIG slot 1 mismatch");
+            throw SessionError("CONFIG slot 1 mismatch");
         s.relaySeq = seq;
         std::fprintf(stderr, "[np-link] CONFIG ok first=%llu delay=%u\n", (unsigned long long)first,
                      delay);
@@ -476,24 +514,24 @@ void netThreadMain()
         payload.push_back(0u);
         std::vector<uint8_t> f = frame(kReady, s.slot, s.nextMsgSeq++, payload);
         if (!writeAll(fd, f.data(), f.size()))
-            fatal("READY write failed");
+            throw SessionError("READY write failed");
     }
     // ---- START ----
     {
         std::vector<uint8_t> payload;
         uint64_t seq = 0u;
         if (!readFrame(fd, kStart, kRelaySender, 54u, "START", payload, seq))
-            fatal("START read failed");
+            throw SessionError("START read failed");
         if (seq != s.relaySeq + 1u)
-            fatal("relay seq gap at START");
+            throw SessionError("relay seq gap at START");
         s.relaySeq = seq;
         const uint8_t *p = payload.data();
         if (getU64(p) != s.firstTick || getU64(p + 8) != 1u)
-            fatal("START first_tick/first_commit_seq mismatch");
+            throw SessionError("START first_tick/first_commit_seq mismatch");
         uint32_t rr =
             static_cast<uint32_t>(p[16] | (p[17] << 8) | (p[18] << 16) | (p[19] << 24));
         if (rr != kRosterRev)
-            fatal("START roster_rev mismatch");
+            throw SessionError("START roster_rev mismatch");
     }
     s.sock = fd;
     s.started = true;
@@ -517,10 +555,7 @@ void netThreadMain()
                 out = frame(kInput, s.slot, s.nextMsgSeq++, body);
             }
             if (!writeAll(fd, out.data(), out.size()))
-            {
-                fatal("relay write failed (no advance)");
-                return;
-            }
+                throw SessionError("relay write failed (no advance)");
         }
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -530,10 +565,7 @@ void netThreadMain()
         tv.tv_usec = 100 * 1000;
         int r = ::select(fd + 1, &rfds, nullptr, nullptr, &tv);
         if (r < 0)
-        {
-            fatal("relay select failed (no advance)");
-            return;
-        }
+            throw SessionError("relay select failed (no advance)");
         if (r == 0)
             continue;
         uint64_t seq = 0u;
@@ -541,12 +573,9 @@ void netThreadMain()
         // COMMIT payload: 8 seq + 8 tick + 4 roster + 1 events + 1 count +
         // (2+1+6) + (2+1+12) + 32 chain = 78.
         if (!readFrame(fd, kCommit, kRelaySender, 78u, "COMMIT", payload, seq))
-        {
-            fatal("relay closed/bad COMMIT");
-            return;
-        }
+            throw SessionError("relay closed/bad COMMIT");
         if (seq != s.relaySeq + 1u)
-            fatal("relay seq gap (lost commit: never predict)");
+            throw SessionError("relay seq gap (lost commit: never predict)");
         s.relaySeq = seq;
         const uint8_t *p = payload.data();
         uint64_t commitSeq = getU64(p);
@@ -554,11 +583,11 @@ void netThreadMain()
         uint32_t rr =
             static_cast<uint32_t>(p[16] | (p[17] << 8) | (p[18] << 16) | (p[19] << 24));
         if (commitSeq != s.nextCommitSeq || rr != kRosterRev || p[20] != 0u || p[21] != 2u)
-            fatal("COMMIT seq/roster/events/count violation");
+            throw SessionError("COMMIT seq/roster/events/count violation");
         if (p[22] != 0u || p[23] != 0u || p[24] != kPad6)
-            fatal("COMMIT slot 0 shape violation");
+            throw SessionError("COMMIT slot 0 shape violation");
         if (p[31] != 1u || p[32] != 0u || p[33] != kRider12)
-            fatal("COMMIT slot 1 shape violation");
+            throw SessionError("COMMIT slot 1 shape violation");
         Commit c;
         c.buttons = static_cast<uint16_t>(p[25] | (p[26] << 8));
         c.rx = p[27];
@@ -588,12 +617,23 @@ void netThreadMain()
             uint8_t want[32];
             hexToBytes(hex, want);
             if (std::memcmp(want, p + 46, 32) != 0)
-                fatal("COMMIT chain mismatch");
+                throw SessionError("COMMIT chain mismatch");
         }
         {
             std::lock_guard<std::mutex> lock(s.commitMutex);
-            if (s.commits.find(tick) == s.commits.end())
+            // netsec-fix-1 F9: bound the receive window and the pending map.
+            // Out-of-window ticks are ignored, never queued; the map cap
+            // backstop ends the session instead of growing without bound.
+            const uint64_t upTo = s.sendUpTo.load(std::memory_order_relaxed);
+            if (!commitAcceptable(s.firstTick, upTo, s.haveLast, s.lastWaited, tick))
             {
+                std::fprintf(stderr, "[np-link] WARNING: out-of-window COMMIT tick=%llu ignored\n",
+                             (unsigned long long)tick);
+            }
+            else if (s.commits.find(tick) == s.commits.end())
+            {
+                if (s.commits.size() >= kMaxPendingCommits)
+                    throw SessionError("commit map over cap (relay not draining)");
                 State::StoredCommit sc;
                 sc.commit = c;
                 std::memcpy(sc.chain, p + 46, 32);
@@ -609,6 +649,11 @@ void netThreadMain()
                              (unsigned long long)tick);
         }
         s.commitCv.notify_all();
+    }
+    }
+    catch (const SessionError &e)
+    {
+        endSession(s, fd, e);
     }
 }
 
@@ -722,7 +767,12 @@ void queueInput(State &s, uint64_t tick)
     {
         std::lock_guard<std::mutex> lock(s.netMutex);
         if (s.sendQueue.size() > 4096u)
-            fatal("send queue over 4096 (relay not draining)");
+        {
+            // netsec-fix-1 F10: sim thread never throws: end the session and
+            // drop instead of exiting.
+            noteLinkDown(s, "send queue over 4096 (relay not draining)");
+            return;
+        }
         s.sendQueue.push_back(std::move(body));
     }
 }
@@ -752,19 +802,25 @@ void onTick(uint64_t tick)
         return;
     std::call_once(configOnce(), configure);
     State &s = state();
-    if (!s.ok)
+    if (!s.ok || s.linkDown.load(std::memory_order_relaxed))
         return;
     // About 2.3 h at 120 Hz: inputs past this are never queued, so waiting
-    // on them would hang until the harness kills the run. Fail loudly.
+    // on them would hang until the harness kills the run. End the session
+    // instead of exiting (netsec-fix-1 F10).
     const uint64_t cap = s.firstTick + kMaxQueueTicks;
     if (tick + s.delay >= cap)
-        fatal("tick beyond the input queue cap (relay or runaway clock?)");
-    const uint64_t due = tick + s.delay;
-    while (s.sendUpTo <= due && s.sendUpTo < cap)
     {
-        queueInput(s, s.sendUpTo);
-        ++s.sendUpTo;
+        noteLinkDown(s, "tick beyond the input queue cap (relay or runaway clock?)");
+        return;
     }
+    const uint64_t due = tick + s.delay;
+    uint64_t upTo = s.sendUpTo.load(std::memory_order_relaxed);
+    while (upTo <= due && upTo < cap)
+    {
+        queueInput(s, upTo);
+        ++upTo;
+    }
+    s.sendUpTo.store(upTo, std::memory_order_relaxed);
 }
 
 bool waitCommit(uint64_t tick, Commit &out)
@@ -773,7 +829,7 @@ bool waitCommit(uint64_t tick, Commit &out)
         return false;
     std::call_once(configOnce(), configure);
     State &s = state();
-    if (!s.ok)
+    if (!s.ok || s.linkDown.load(std::memory_order_relaxed))
         return false;
     std::unique_lock<std::mutex> lock(s.commitMutex);
     if (s.haveLast && tick <= s.lastWaited)
@@ -785,6 +841,10 @@ bool waitCommit(uint64_t tick, Commit &out)
     auto lastLog = std::chrono::steady_clock::now();
     while (s.commits.find(tick) == s.commits.end())
     {
+        // netsec-fix-1 F10: the session ended while stalled: stop waiting
+        // and let the sim continue on local inputs.
+        if (s.linkDown.load(std::memory_order_relaxed))
+            return false;
         if (!stalled)
         {
             stalled = true;

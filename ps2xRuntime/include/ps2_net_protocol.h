@@ -161,4 +161,78 @@ namespace ps2_net_protocol
             return false;
         return nowMs - resolveStartMs >= kDnsGiveUpMs;
     }
+
+    // netsec-fix-1 F1: DirtySock TCP frame admission. The 12-byte header
+    // carries a big-endian total size (header included). Valid sizes are
+    // 12..65536; anything else is a corrupt frame: Reject (drop the frame
+    // and close the session), never whole-buffer delivery. A valid size
+    // with fewer bytes held waits for the rest.
+    constexpr uint32_t kTcpFrameMin = 12u;
+    constexpr uint32_t kTcpFrameMax = 65536u;
+
+    enum class TcpFrameAction
+    {
+        Deliver,
+        Wait,
+        Reject,
+    };
+
+    inline TcpFrameAction classifyTcpFrame(uint32_t declaredSize, size_t heldBytes)
+    {
+        if (declaredSize < kTcpFrameMin || declaredSize > kTcpFrameMax)
+            return TcpFrameAction::Reject;
+        if (heldBytes < declaredSize)
+            return TcpFrameAction::Wait;
+        return TcpFrameAction::Deliver;
+    }
+
+    // netsec-fix-1 F2: one O5PK game body (tag stripped) is a single
+    // length-prefixed record: a little-endian u16 total length at offset 0
+    // equal to the datagram body length. Anything else is dropped before
+    // queueing or concatenating. Exact equality also pins the signed
+    // interpretation the guest parser uses (bodies are datagram-sized, far
+    // below 0x8000). Proven against 150,729/150,729 wire bodies in the
+    // online-stock-2 captures: every legit body is exactly one record.
+    inline bool udpGameBodyValid(const uint8_t *body, size_t n)
+    {
+        if (!body || n < 2u)
+            return false;
+        const uint32_t declared = static_cast<uint32_t>(body[0]) |
+                                  (static_cast<uint32_t>(body[1]) << 8);
+        return declared == n;
+    }
+
+    // netsec-fix-1 F2: a delivery concatenation must tile exactly into
+    // single records (each record's declared length consumes its slice).
+    // Proven against 142,518/142,518 delivery bodies in the same captures.
+    inline bool udpConcatBodyValid(const uint8_t *body, size_t n)
+    {
+        if (!body || n < 2u)
+            return false;
+        size_t off = 0u;
+        while (off < n)
+        {
+            if (off + 2u > n)
+                return false;
+            const size_t declared = static_cast<size_t>(body[off]) |
+                                    (static_cast<size_t>(body[off + 1]) << 8);
+            if (declared < 2u || off + declared > n)
+                return false;
+            off += declared;
+        }
+        return off == n;
+    }
+
+    // netsec-fix-1 F6: relay-pinned peer source check. With a lobby-issued
+    // relay route the util pins the relay endpoint (IP + port) and the
+    // session token at conn time; afterwards only datagrams from that exact
+    // endpoint under the still-current token are accepted.
+    inline bool relaySourceAllowed(uint32_t pinnedIp, uint16_t pinnedPort,
+                                   const std::string &pinnedToken, const std::string &curToken,
+                                   uint32_t fromIp, uint16_t fromPort)
+    {
+        if (pinnedToken.empty() || pinnedToken != curToken)
+            return false;
+        return fromIp == pinnedIp && fromPort == pinnedPort;
+    }
 }

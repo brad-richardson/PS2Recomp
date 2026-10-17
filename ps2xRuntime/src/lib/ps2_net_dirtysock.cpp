@@ -1409,6 +1409,12 @@ namespace ps2_net
         uint64_t lastRegMs = 0u;  // LOB1: wall clock of last relay registration
         bool regLogged = false;  // LOB1: first-registration log already emitted
         uint32_t lastRxMs = 0u;  // stat +0x20 (last receive, ms)
+        // netsec-fix-1 F6: relay pin. Set at gmut/conn when a lobby-issued
+        // relay route is active: the relay endpoint (u.peer) plus the session
+        // token it was pinned under. Afterwards only that exact source under
+        // the still-current token is accepted.
+        bool relayPinned = false;
+        std::string relayToken;
         // Packets that arrive after gmut/conn but before gmlk/crea (the
         // peer's first NetGame packet can beat our link): CommUDP buffers
         // once connected and the link picks them up; dropping them lost the
@@ -1514,6 +1520,15 @@ namespace ps2_net
         l.rxq.erase(l.rxq.begin(), l.rxq.begin() + static_cast<long>(taken));
         const uint32_t ee = l.recvAddr & 0x1FFFFFFFu;
         const uint32_t len = static_cast<uint32_t>(body.size());
+        // netsec-fix-1 F2: the concatenation must tile exactly into whole
+        // records before guest delivery; drop on mismatch.
+        if (!ps2_net_protocol::udpConcatBodyValid(body.data(), body.size()))
+        {
+            std::cerr << "[net] p2p: drop mistiled delivery link=" << linkH << " len=" << len
+                      << " tick=" << tick << std::endl;
+            l.recvAddr = 0u;
+            return;
+        }
         const uint32_t padded = (len + 15u) & ~15u;
         uint8_t *dst = getMemPtr(rdram, ee);
         uint8_t *end = getMemPtr(rdram, ee + 0x10u + padded + 0x0Fu);
@@ -1600,6 +1615,16 @@ namespace ps2_net
                 if (r < 4)
                 {
                     break;
+                }
+                // netsec-fix-1 F6: a relay-pinned util accepts only the pinned
+                // endpoint (IP + port, network order on both sides) under the
+                // still-current session token; everything else is ignored.
+                if (u.relayPinned &&
+                    !ps2_net_protocol::relaySourceAllowed(
+                        u.peer.sin_addr.s_addr, u.peer.sin_port, u.relayToken, g_relayToken,
+                        from.sin_addr.s_addr, from.sin_port))
+                {
+                    continue;
                 }
                 if (g_relayToken.size() == 32u && r == 17 &&
                     std::memcmp(buf, "SSX3CHL1", 8) == 0 &&
@@ -1688,6 +1713,14 @@ namespace ps2_net
                 }
                 else if (std::memcmp(buf, "O5PK", 4) == 0 && r > 4)
                 {
+                    // netsec-fix-1 F2: the embedded length must equal the
+                    // datagram body; drop on mismatch before queueing.
+                    if (!ps2_net_protocol::udpGameBodyValid(buf + 4, static_cast<size_t>(r) - 4u))
+                    {
+                        std::cerr << "[net] p2p: drop O5PK len-mismatch r=" << r << " tick=" << tick
+                                  << std::endl;
+                        continue;
+                    }
                     u.connected = true;
                     bool queued = false;
                     for (auto &lk : g_p2pLink)
@@ -1946,6 +1979,15 @@ namespace ps2_net
                     u.peer.sin_port = htons(peerPort);
                     u.peer.sin_addr.s_addr = htonl(ip);
                     u.peerKnown = (w5 & 2u) != 0u;
+                    // netsec-fix-1 F6: with a lobby-issued relay route, pin
+                    // the relay endpoint for both roles (no learn-from-first-
+                    // hello) and bind it to the session token.
+                    if (relayRegister() && g_relayToken.size() == 32u && g_relayPort != 0u)
+                    {
+                        u.peerKnown = true;
+                        u.relayPinned = true;
+                        u.relayToken = g_relayToken;
+                    }
                     u.connMs = hostMillis();
                     std::cerr << " [net] p2p: util=" << w4 << " mode=0x" << std::hex << w5
                               << std::dec << " bind=" << bindPort << (bound ? "" : "(FAILED)")
@@ -2580,7 +2622,7 @@ namespace ps2_net
                     // message (12 B header + BE size) per call and
                     // hold the remainder for later polls. Partial
                     // messages wait for more bytes; a corrupt size
-                    // falls back to whole-blob delivery (old shape).
+                    // drops the frame and closes the session (F1).
                     const uint32_t eeBuf = w2 & 0x1FFFFFFFu;
                     status = 0u;
                     outlen = 0u;
@@ -2622,15 +2664,25 @@ namespace ps2_net
                                               (static_cast<uint32_t>(hd[9]) << 16) |
                                               (static_cast<uint32_t>(hd[10]) << 8) |
                                               static_cast<uint32_t>(hd[11]);
+                        // netsec-fix-1 F1: an invalid declared size is
+                        // rejected (drop the frame and close the session),
+                        // never delivered as the whole buffer. The delivered
+                        // header always matches the delivered length.
                         uint32_t n = 0u;
-                        if (size >= 12u && size <= 65536u &&
-                            hi->second.size() >= size)
+                        const auto frameAction = ps2_net_protocol::classifyTcpFrame(
+                            size, hi->second.size());
+                        if (frameAction == ps2_net_protocol::TcpFrameAction::Reject)
+                        {
+                            std::cerr << " h=" << w4 << " BAD-FRAME size=" << size << " held="
+                                      << hi->second.size() << " closing";
+                            closeSocket(w4);
+                            hi->second.clear();
+                            status = 0u;
+                            outlen = 0u;
+                        }
+                        else if (frameAction == ps2_net_protocol::TcpFrameAction::Deliver)
                         {
                             n = size;
-                        }
-                        else if (size < 12u || size > 65536u)
-                        {
-                            n = static_cast<uint32_t>(hi->second.size());
                         }
                         if (n > 0u)
                         {

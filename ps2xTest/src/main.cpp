@@ -80,6 +80,7 @@ void register_ps2_sif_dma_tests();
 void register_ps2_net_nolink_tests();
 void register_ps2_net_protocol_tests();
 void register_ps2_netsync_tests();
+void register_ps2_net_link_tests();
 void register_np_fix_tests();
 void register_ps2_recompiler_tests();
 void register_ps2_runtime_expansion_tests();
@@ -189,6 +190,7 @@ int main(int argc, char **argv)
     register_ps2_net_nolink_tests();
     register_ps2_net_protocol_tests();
     register_ps2_netsync_tests();
+    register_ps2_net_link_tests();
     register_np_fix_tests();
     register_ps2_recompiler_tests();
     register_ps2_runtime_expansion_tests();

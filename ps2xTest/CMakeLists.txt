@@ -93,6 +93,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_net_nolink_tests.cpp
     src/ps2_net_protocol_tests.cpp
     src/ps2_netsync_tests.cpp
+    src/ps2_net_link_tests.cpp
     src/ps2_np_fix_tests.cpp
 )
 

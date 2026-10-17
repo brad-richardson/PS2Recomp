@@ -75,6 +75,55 @@ namespace
             t.IsFalse(ps2_netsync::decodeState(pay, sizeof(pay) - 1, back, de4, w0, w1, inTick,
                                                slot),
                       "short refuses");
+            // netsec-fix-1 F8: hostile numerics with a valid digest refuse.
+            auto retampered = [&](const uint8_t *base, size_t n) {
+                std::memcpy(bad, base, n);
+                ps2_netsync::putU64(bad + 103, ps2_netsync::fnv64(bad, 103u));
+            };
+            std::memcpy(bad, pay, sizeof(pay));
+            bad[10] = 0xFFu;
+            bad[11] = 0xFFu;
+            bad[12] = 0xFFu;
+            bad[13] = 0x7Fu; // pos.x = NaN
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "NaN position refuses");
+            std::memcpy(bad, pay, sizeof(pay));
+            bad[42] = 0x00u;
+            bad[43] = 0x00u;
+            bad[44] = 0x80u;
+            bad[45] = 0x7Fu; // vel.y = +inf
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "inf velocity refuses");
+            std::memcpy(bad, pay, sizeof(pay));
+            std::memset(bad + 22, 0, 16u); // zero quaternion
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "degenerate quaternion refuses");
+            std::memcpy(bad, pay, sizeof(pay));
+            bad[67] = 0x00u;
+            bad[68] = 0x00u;
+            bad[69] = 0x80u;
+            bad[70] = 0xBFu; // ftime = -1.0
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "negative ftime refuses");
+            std::memcpy(bad, pay, sizeof(pay));
+            ps2_netsync::putF32(bad + 67, 1.0e10f); // ftime overflows the ms conversion
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "huge ftime refuses");
+            std::memcpy(bad, pay, sizeof(pay));
+            bad[66] = 2u; // fin outside {0, 1}
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "wild fin refuses");
+            std::memcpy(bad, pay, sizeof(pay));
+            ps2_netsync::putF32(bad + 10, 5.0e6f); // pos.x past the bound
+            retampered(bad, sizeof(bad));
+            t.IsFalse(ps2_netsync::decodeState(bad, sizeof(bad), back, de4, w0, w1, inTick, slot),
+                      "wild position refuses");
         });
         tc.Run("quick play join/start/go bytes match the lobby codec", [](TestCase &t)
         {
