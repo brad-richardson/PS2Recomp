@@ -1484,6 +1484,10 @@ namespace ps2_net
 
     // online-stock-2: state side channel ("O5KA" + "ST" + payload; see stateSend).
     std::atomic<bool> g_stEnabled{false}; // set by the STOCK120 consumer (stateEnable)
+    // online-stock-2 R3: STOCK120's STATE liveness gave out; gmlk/stat
+    // reports the link closed (isconn/isopen 0) until the next gmlk/crea,
+    // so the guest takes its stock peer-loss path (0x256aa8).
+    std::atomic<bool> g_linkForcedDown{false};
     std::mutex g_stMu;
     std::vector<std::vector<uint8_t>> g_stInbox;
     std::vector<uint64_t> g_stRxUs;
@@ -1994,6 +1998,7 @@ namespace ps2_net
                         }
                     }
                     g_lockstepLink.store(true);
+                    g_linkForcedDown.store(false);
                     std::cerr << " [net] p2p: link=" << status << " util=" << l.util
                               << " buf=0x" << std::hex << l.bufSize << " status=0x"
                               << l.statusAddr << std::dec;
@@ -2009,7 +2014,8 @@ namespace ps2_net
                         const uint32_t now = static_cast<uint32_t>(hostMillis());
                         std::memcpy(dst, &now, 4u);
                         const P2pLink &l = g_p2pLink[w4];
-                        const bool conn = g_p2pUtil.count(l.util) && g_p2pUtil[l.util].connected;
+                        const bool conn = g_p2pUtil.count(l.util) && g_p2pUtil[l.util].connected &&
+                                          !g_linkForcedDown.load();
                         if (conn)
                         {
                             const uint32_t rx = g_p2pUtil[l.util].lastRxMs;
@@ -2065,6 +2071,8 @@ namespace ps2_net
                     {
                         g_p2pLink.erase(w4);
                         g_lockstepLink.store(!g_p2pLink.empty());
+                        if (g_p2pLink.empty())
+                            g_linkForcedDown.store(false);
                     }
                     else
                     {
@@ -2996,6 +3004,13 @@ namespace ps2_net
         (void)n;
 #endif
         return false;
+    }
+
+    void forceLinkDown()
+    {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+        g_linkForcedDown.store(true);
+#endif
     }
 
     void stateEnable()

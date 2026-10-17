@@ -195,6 +195,16 @@ inline bool showTick(const std::vector<Sample> &ring, uint64_t now, uint64_t ide
     return true;
 }
 
+// Pure (unit-tested): STATE liveness while racing (R3). Stale when no
+// valid sample arrived for longer than `timeout` since the later of the
+// local race start and the last valid sample, so a link that never
+// delivered one counts too.
+inline bool stateStale(uint64_t now, uint64_t raceStartUs, uint64_t lastValidUs, uint64_t timeoutUs)
+{
+    const uint64_t base = lastValidUs > raceStartUs ? lastValidUs : raceStartUs;
+    return now > base && now - base > timeoutUs;
+}
+
 struct State
 {
     bool racing = false;
@@ -210,6 +220,8 @@ struct State
     bool peerFinLogged = false;
     uint8_t localEpoch = 0u;
     RingEpoch peerEpoch;
+    uint64_t raceStartUs = 0u, lastValidUs = 0u;
+    bool raceOver = false, forcedDown = false;
 };
 
 inline State &state()
@@ -273,6 +285,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
             logLine("link down", tick);
             s = State{};
             s.lastTick = tick;
+            ps2_fh1::g_s120LocalQueue = -1; // the next link's gate sets it again
         }
         return;
     }
@@ -293,6 +306,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
         }
         ++s.recvd;
         s.lastRxUs = smp.rxUs;
+        s.lastValidUs = smp.rxUs;
         s.alive = true;
         if (smp.fin && !s.peerFinLogged)
         {
@@ -318,11 +332,14 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
                 s.peerEpoch.needNewer = s.localEpoch > 1u;
             s.ring.clear();
             s.alive = false;
+            s.raceStartUs = nowUs();
         }
         logLine(racing ? "race start" : "race end", tick);
     }
     if (!racing)
         return;
+    if (st == 6)
+        s.raceOver = true; // results/replay: liveness no longer decides anything
     const Knobs &k = knobs();
     const uint64_t raceTick = tick - s.t0;
     const int lq = ps2_fh1::g_s120LocalQueue;
@@ -354,6 +371,16 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     {
         s.alive = false;
         logLine("peer state timeout", tick);
+    }
+    // R3: STATE health decides the link while the race runs. No valid
+    // STATE for kTimeoutUs (or none at all since the race start) -> report
+    // the P2P link closed so the guest takes its stock peer-loss path,
+    // instead of racing on held input with the checksum neutralized.
+    if (!s.raceOver && !s.forcedDown && stateStale(now, s.raceStartUs, s.lastValidUs, kTimeoutUs))
+    {
+        s.forcedDown = true;
+        ps2_net::forceLinkDown();
+        logLine("STATE lost: stock disconnect", tick);
     }
     if (!s.mapped && !s.ring.empty())
     {

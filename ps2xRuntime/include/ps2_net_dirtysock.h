@@ -104,6 +104,11 @@ namespace ps2_net
     // stateEnable: called by the STOCK120 consumer; until then (knob off) a
     // received "ST" keep-alive is an ordinary keep-alive.
     void stateEnable();
+    // online-stock-2 R3: report the P2P link closed (gmlk/stat isconn and
+    // isopen 0) until the next gmlk/crea; the guest then takes its stock
+    // peer-loss path (the "connection to your opponent has been lost"
+    // dialog).
+    void forceLinkDown();
     bool stateSend(const uint8_t *data, size_t n);
     void stateDrain(std::vector<std::vector<uint8_t>> &payloads, std::vector<uint64_t> &rxUs);
 } // namespace ps2_net
