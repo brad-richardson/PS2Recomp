@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // full120 slices 3+4: dispatch cold side (hook-interest table content)
 // and hot side (branch-chain body) moved from ps2_fh1_full120.h to
 // games/ssx3/module/src/fh1_dispatch.cpp. The runtime reads them through
