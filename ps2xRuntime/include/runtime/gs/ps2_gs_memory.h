@@ -164,21 +164,6 @@ namespace GSMem
 		return !IsDepth(psm);
 	}
 
-	constexpr bool IsPaletted(PixelStorageMode psm)
-	{
-		switch (psm)
-		{
-		case P8:
-		case P8H:
-		case P4:
-		case P4HL:
-		case P4HH:
-			return true;
-		}
-
-		return false;
-	}
-
 	template<usz BitCount>
 	struct BitStorageHelper;
 
