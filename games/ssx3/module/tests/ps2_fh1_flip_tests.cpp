@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_fh1_full120.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -86,37 +87,58 @@ void register_ps2_fh1_flip_tests()
             t.Equals(lsGateWhy(ram.data(), in), 0u, "no players: open");
         });
 
-        tc.Run("online-stock-2: input-delay trim", [](TestCase &t)
+        tc.Run("online-stock-2: R5 local backlog trim keeps the stock sampling cadence", [](TestCase &t)
         {
-            std::vector<uint8_t> ram(PS2_RAM_SIZE);
-            constexpr uint32_t in = 0x3000u, base0 = 0x4000u, base1 = 0x8000u;
-            wr32(ram.data(), in, 12u);       // [in+0] delay target
-            wr32(ram.data(), in + 4u, 16u);  // ring size
-            wr32(ram.data(), in + 8u, 4u);   // N
-            wr32(ram.data(), in + 0x10u, 2u);
-            const uint32_t recs[2] = {in + 0x14u, in + 0x2cu};
-            wr32(ram.data(), recs[0], base0);
-            wr32(ram.data(), recs[0] + 4u, 3u);
-            wr32(ram.data(), recs[0] + 8u, 5u);
-            wr32(ram.data(), recs[0] + 0xcu, 0x1234u); // local pad
-            wr32(ram.data(), recs[1], base1);
-            wr32(ram.data(), recs[1] + 4u, 3u);
-            wr32(ram.data(), recs[1] + 8u, 5u);
-            wr32(ram.data(), recs[1] + 0xcu, 0u);      // remote
-            for (uint32_t k = 3u; k < 5u; ++k)
+            // Queue model from the guest conditions (0x237720..0x2378c4:
+            // room test, then the every-N counter, then N copies pushed),
+            // with the host trim + feed at the gate and one consume per
+            // update. Starts with the pre-race backlog at the stock target.
+            for (uint32_t target : {6u, 36u})
             {
-                wr32(ram.data(), base0 + k * 100u, 24u);
-                wr32(ram.data(), base0 + k * 100u + 8u, 0x3f800000u);
-                wr32(ram.data(), base1 + k * 100u + 8u, 0x3f800000u);
+                std::vector<uint8_t> ram(PS2_RAM_SIZE);
+                constexpr uint32_t in = 0x3000u, base = 0x4000u, N = 3u, size = 60u;
+                wr32(ram.data(), in, target);
+                wr32(ram.data(), in + 4u, size);
+                wr32(ram.data(), in + 8u, N);
+                wr32(ram.data(), in + 0x10u, 1u);
+                const uint32_t rec = in + 0x14u;
+                wr32(ram.data(), rec, base);
+                wr32(ram.data(), rec + 4u, 0u);
+                wr32(ram.data(), rec + 8u, target); // backlog of stale entries (tick 0)
+                wr32(ram.data(), rec + 0xcu, 0x1234u);
+                uint32_t counter = 0u, lastSample = 0u, intervalsOk = 0u, intervals = 0u, maxAge = 0u;
+                for (uint32_t tick = 1u; tick <= 120u; ++tick)
+                {
+                    uint32_t r = 0u, w = 0u;
+                    rd32(ram.data(), rec + 4u, r);
+                    rd32(ram.data(), rec + 8u, w);
+                    if (w - r < target + 1u - N && ++counter % N == 0u)
+                    {
+                        for (uint32_t k = 0u; k < N; ++k)
+                            wr32(ram.data(), base + ((w + k) % size) * 100u + 4u, tick);
+                        wr32(ram.data(), rec + 8u, w + N);
+                        if (lastSample != 0u && tick > 30u)
+                        {
+                            ++intervals;
+                            intervalsOk += (tick - lastSample == N) ? 1u : 0u;
+                        }
+                        lastSample = tick;
+                    }
+                    stock120TrimBacklog(ram.data(), in);
+                    stock120GateFeed(ram.data(), in);
+                    rd32(ram.data(), rec + 4u, r);
+                    uint32_t sampledAt = 0u;
+                    rd32(ram.data(), base + (r % size) * 100u + 4u, sampledAt);
+                    if (tick > 30u)
+                        maxAge = std::max(maxAge, tick - sampledAt);
+                    wr32(ram.data(), rec + 4u, r + 1u); // the open gate consumes one
+                }
+                uint32_t v = 0u;
+                rd32(ram.data(), in, v);
+                t.Equals(v, target, "delay target left stock");
+                t.IsTrue(intervals > 20u && intervalsOk == intervals, "sampled every N updates");
+                t.IsTrue(maxAge < N, "consumed input is at most N-1 updates old");
             }
-            stock120TrimDelay(ram.data(), in);
-            uint32_t v = 0u;
-            rd32(ram.data(), in, v);
-            t.Equals(v, 4u, "delay trimmed to N");
-            wr32(ram.data(), in, 2u);
-            stock120TrimDelay(ram.data(), in);
-            rd32(ram.data(), in, v);
-            t.Equals(v, 2u, "a target already below N is left alone");
         });
     });
 }

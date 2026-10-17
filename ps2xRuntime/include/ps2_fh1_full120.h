@@ -1100,26 +1100,37 @@ inline uint32_t stock120GateFeed(uint8_t *ram, uint32_t in) noexcept
     return fed;
 }
 
-// Local input delay (Brad 10-17: trim to the minimum). 0x2373b8 samples
-// the local pad only while the local queue holds fewer than [in+0]+1-N
-// unread entries ([in+0] = max(2, latency/frame) * N, recomputed at every
-// sample, 0x2378d0..0x237908); lockstep needed that delay, the never-wait
-// gate does not. Racing: [in+0] = N, so a new local input is sampled as
-// soon as the queue runs dry (delay ~N frames instead of [in+0]).
-inline uint32_t g_s120DelayBefore = 0u, g_s120DelayAfter = 0u;
-inline void stock120TrimDelay(uint8_t *ram, uint32_t in) noexcept
+// Local input latency (Brad 10-17: trim it). 0x2373b8 samples the local
+// pad only while the local queue holds fewer than [in+0]+1-N unread
+// entries, and only then advances its every-N sampling counter ([in+0] =
+// max(2, latency/frame) * N, recomputed per sample). While the gate held
+// (pre-race lockstep), the local queue filled to that target, and in a
+// never-wait race it stays that deep: the latency is the backlog (2N on a
+// LAN, dozens of frames on a high-latency link), not [in+0] itself.
+// Lowering [in+0] to N (638a1b28) also stalled the sampling counter and
+// sampled every 2N-1 updates (astra-online-review-1 R5). Racing: the
+// target stays stock (sampling every N, as stock) and the local queue's
+// unread backlog is trimmed to the newest N entries (one sample).
+inline uint32_t g_s120BacklogLogged = 0u;
+inline void stock120TrimBacklog(uint8_t *ram, uint32_t in) noexcept
 {
-    uint32_t target = 0u, per = 0u, size = 0u;
-    if (!rd32(ram, in, target) || !rd32(ram, in + 8u, per) || !rd32(ram, in + 4u, size) || per == 0u || per > size)
+    uint32_t n = 0u, size = 0u, per = 0u;
+    if (!rd32(ram, in + 0x10u, n) || !rd32(ram, in + 4u, size) || !rd32(ram, in + 8u, per) || n == 0u || n > 8u ||
+        size == 0u || size > 4096u || per == 0u || per > size)
         return;
-    if (target > per)
+    for (uint32_t i = 0u; i < n; ++i)
     {
-        if (g_s120DelayBefore != target)
-            std::fprintf(stderr, "[stock120] input delay %u -> %u frames (N=%u, ring %u) t=%llu\n", target, per, per,
-                         size, static_cast<unsigned long long>(g_lastTick));
-        g_s120DelayBefore = target;
-        g_s120DelayAfter = per;
-        wr32(ram, in, per);
+        const uint32_t rec = in + 0x14u + 0x18u * i;
+        uint32_t r = 0u, w = 0u, local = 0u;
+        if (!rd32(ram, rec + 4u, r) || !rd32(ram, rec + 8u, w) || !rd32(ram, rec + 0xcu, local) || local == 0u)
+            continue;
+        if (w - r > per && w - r <= size)
+        {
+            if (g_s120BacklogLogged++ < 4u)
+                std::fprintf(stderr, "[stock120] local input backlog %u -> %u frames (N=%u) t=%llu\n", w - r, per, per,
+                             static_cast<unsigned long long>(g_lastTick));
+            wr32(ram, rec + 4u, w - per);
+        }
     }
 }
 
@@ -3857,7 +3868,7 @@ inline void lsGateHook(uint8_t *ram, R5900Context *ctx)
         }
         if (st >= 5 && st < 32)
         {
-            stock120TrimDelay(ram, in);
+            stock120TrimBacklog(ram, in);
             stock120GateFeed(ram, in);
         }
     }
