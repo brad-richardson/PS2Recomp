@@ -38,6 +38,7 @@ struct Knobs
 {
     int own = -1, ghost = -1; // -1 = from the input queues
     uint64_t every = 6u, idelay = 12u;
+    uint64_t dropStAt = 0u; // diag: stop sending STATE from this race tick (0 = never)
 };
 
 inline const Knobs &knobs()
@@ -55,6 +56,7 @@ inline const Knobs &knobs()
         o.ghost = (int)num("PS2X_NET_STOCK120_GHOST", 0, 5, -1);
         o.every = (uint64_t)num("PS2X_NET_STOCK120_EVERY", 1, 60, 6);
         o.idelay = (uint64_t)num("PS2X_NET_STOCK120_IDELAY", 0, 120, 12);
+        o.dropStAt = (uint64_t)num("PS2X_NET_STOCK120_DROP_ST_AT", 0, 10000000, 0);
         return o;
     }();
     return k;
@@ -395,7 +397,17 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
             }
             uint8_t pay[kPayloadLen];
             encode(pay, s.localEpoch, (uint32_t)raceTick, smp);
-            if (ps2_net::stateSend(pay, sizeof(pay)))
+            if (k.dropStAt != 0u && raceTick >= k.dropStAt)
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    std::fprintf(stderr, "[stock120] diag: STATE sends dropped from race=%llu (stock traffic kept)\n",
+                                 (unsigned long long)raceTick);
+                }
+            }
+            else if (ps2_net::stateSend(pay, sizeof(pay)))
                 ++s.sent;
         }
         s.lastSend = (int64_t)raceTick;
