@@ -47,6 +47,7 @@
 #include "ps2_ui_toast.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -671,17 +672,18 @@ inline void ioLoop()
     std::snprintf(port, sizeof(port), "%u", k.port);
     if (::getaddrinfo(k.host.c_str(), port, &hints, &res) != 0 || !res)
     {
-        std::fprintf(stderr, "[netsync] server lookup failed\n");
+        std::fprintf(stderr, "[netsync] server lookup failed (%s)\n", std::strerror(errno));
         x.failed = true;
         return;
     }
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0 || ::connect(fd, res->ai_addr, res->ai_addrlen) != 0)
     {
+        const int err = errno;
         ::freeaddrinfo(res);
         if (fd >= 0)
             ::close(fd);
-        std::fprintf(stderr, "[netsync] socket/connect failed\n");
+        std::fprintf(stderr, "[netsync] %s failed: %s\n", fd < 0 ? "socket" : "connect", std::strerror(err));
         x.failed = true;
         return;
     }
