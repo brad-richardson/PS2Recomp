@@ -1078,6 +1078,39 @@ inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std:
     return fired && confirm;
 }
 
+// tk-banner-1: boot-scoped race-banner data. The guest parses
+// DATA/CONFIG/MUSIC.INF once at boot (before the first menu, so before any
+// mode-scoped alias installs) and caches TITLE/ARTIST per song for the
+// race-start banner; the banner's brand line is the rodata string
+// "EA RADIO BIG" (SLUS_207.72 file offset 3603176 = EE 0x46EAE8, the only
+// EA RADIO string on the disc). When PS2X_SSX3_TRICKY_MENU=1 and
+// PS2X_SSX3_TRICKY_MUSIC_INF names the host composite: serve the disc file
+// from it starting now, and blank the brand line (Tricky's disc carries no
+// station branding: zero RADIO strings on the Tricky ISO). A manifest poke
+// cannot spell the blank (the parser trims trailing spaces), hence the
+// memset here. The manifest Tricky mode's own alias row (same file)
+// re-installs the alias at menu entry and Stock clears it; the rodata
+// blank persists (nothing rewrites it). Either knob unset (stock): no
+// reads, no writes. Returns true when installed (alias pending even if the
+// brand line already reads blank or the blank is refused).
+inline bool bootBannerFromEnv(uint8_t *ram)
+{
+    static constexpr uint32_t kBrandAddr = 0x46EAE8u;
+    static constexpr char kBrand[] = "EA RADIO BIG";
+    const char *menu = std::getenv("PS2X_SSX3_TRICKY_MENU");
+    const char *host = std::getenv("PS2X_SSX3_TRICKY_MUSIC_INF");
+    if (!menu || std::strcmp(menu, "1") != 0 || !host || !*host || !ram)
+        return false;
+    if (ramHas(ram, kBrandAddr, kBrand))
+        std::memset(ram + kBrandAddr, ' ', sizeof(kBrand) - 1);
+    else
+        std::fprintf(stderr, "[ssx3-course] boot banner brand not blanked (0x%06x holds no \"%s\")\n",
+                     kBrandAddr, kBrand);
+    ps2_cd_overlay::setModeAliases({{"/DATA/CONFIG/MUSIC.INF", host}});
+    std::fprintf(stderr, "[ssx3-course] boot alias /DATA/CONFIG/MUSIC.INF -> %s\n", host);
+    return true;
+}
+
 // Runtime entry: called once from loadELF. Unset or empty knob = no-op.
 inline void applyFromEnv(uint8_t *ram)
 {
@@ -1123,8 +1156,8 @@ inline void applyFromEnv(uint8_t *ram)
     }
     if (hasPicker)
         armPicker(picker(), ram, blocks, log);
-    else
-        armModes(courseModes(), ram, modes, log);
+    else if (armModes(courseModes(), ram, modes, log))
+        bootBannerFromEnv(ram);
 }
 
 } // namespace ps2_ssx3_course

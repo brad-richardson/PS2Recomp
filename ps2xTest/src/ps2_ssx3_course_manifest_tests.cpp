@@ -538,4 +538,39 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsTrue(armed, "mode armed");
             t.Equals(rel, (root / "rel-speech").lexically_normal().string(), "relative host resolved");
             t.Equals(abs, std::string("/abs/music-big"), "absolute host unchanged"); });
+
+        tc.Run("tk-banner-1 boot banner: knob-gated alias + brand blank, stock is a no-op", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            std::vector<uint8_t> ram(kRamSize, 0);
+            ::unsetenv("PS2X_SSX3_TRICKY_MENU");
+            ::unsetenv("PS2X_SSX3_TRICKY_MUSIC_INF");
+            t.IsFalse(bootBannerFromEnv(ram.data()), "unset knobs install nothing");
+            t.IsFalse(bootBannerFromEnv(nullptr), "null ram installs nothing");
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "no pending alias");
+            ::setenv("PS2X_SSX3_TRICKY_MENU", "1", 1);
+            t.IsFalse(bootBannerFromEnv(ram.data()), "menu without composite installs nothing");
+            ::setenv("PS2X_SSX3_TRICKY_MUSIC_INF", "/host/music-inf-tricky-big", 1);
+            t.IsTrue(bootBannerFromEnv(ram.data()), "menu + composite installs");
+            auto pending = ps2_cd_overlay::pendingAliases();
+            t.Equals(pending.size(), static_cast<size_t>(1), "one pending alias");
+            t.Equals(pending[0].first, std::string("/DATA/CONFIG/MUSIC.INF"), "disc path");
+            t.Equals(pending[0].second, std::string("/host/music-inf-tricky-big"), "host path");
+            // Brand blanked only over the exact stock bytes; refusal keeps the alias.
+            const char brand[] = "EA RADIO BIG";
+            std::memcpy(&ram[0x46EAE8], brand, sizeof(brand) - 1);
+            t.IsTrue(bootBannerFromEnv(ram.data()), "brand present: still installs");
+            t.Equals(std::string(reinterpret_cast<const char *>(&ram[0x46EAE8]), sizeof(brand) - 1),
+                     std::string(sizeof(brand) - 1, ' '), "brand blanked");
+            std::memcpy(&ram[0x46EAE8], "EA RADIO BIZ", sizeof(brand) - 1);
+            t.IsTrue(bootBannerFromEnv(ram.data()), "brand mismatch: alias still installs");
+            t.Equals(std::string(reinterpret_cast<const char *>(&ram[0x46EAE8]), sizeof(brand) - 1),
+                     std::string("EA RADIO BIZ"), "mismatch left alone");
+            ::setenv("PS2X_SSX3_TRICKY_MENU", "0", 1);
+            ps2_cd_overlay::clearModeAlias();
+            t.IsFalse(bootBannerFromEnv(ram.data()), "menu off installs nothing");
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "still off");
+            ::unsetenv("PS2X_SSX3_TRICKY_MENU");
+            ::unsetenv("PS2X_SSX3_TRICKY_MUSIC_INF");
+            ps2_cd_overlay::clearModeAlias(); });
         }); }
