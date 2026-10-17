@@ -68,6 +68,16 @@ namespace ps2_net_protocol
                nowMs - lastRegMs >= 250u;
     }
 
+    // online-stock-2: the STOCK120 state side channel is an "O5KA" keep-alive
+    // carrying "ST" + payload. Only a side that runs STOCK120 (enabled)
+    // treats it as state; otherwise it stays an ordinary keep-alive (no
+    // inbox, no connection-state change).
+    inline bool isStateDatagram(const uint8_t *buf, size_t n, bool enabled)
+    {
+        return enabled && buf && n > 6u && buf[0] == 'O' && buf[1] == '5' && buf[2] == 'K' && buf[3] == 'A' &&
+               buf[4] == 'S' && buf[5] == 'T';
+    }
+
     inline std::string relayRegistration(char role, const std::string &token)
     {
         return "SSX3RLY2" + std::string(1u, role) + token;

@@ -101,6 +101,9 @@ namespace ps2_net
     // keep-alives carrying "ST" + payload; never delivered to the guest). stateSend returns false
     // without a connected link; stateDrain moves the received payloads out
     // (with host-monotonic arrival microseconds).
+    // stateEnable: called by the STOCK120 consumer; until then (knob off) a
+    // received "ST" keep-alive is an ordinary keep-alive.
+    void stateEnable();
     bool stateSend(const uint8_t *data, size_t n);
     void stateDrain(std::vector<std::vector<uint8_t>> &payloads, std::vector<uint64_t> &rxUs);
 } // namespace ps2_net

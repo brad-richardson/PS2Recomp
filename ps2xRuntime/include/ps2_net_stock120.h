@@ -192,6 +192,8 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
 {
     if (!ps2_fh1::netStock120())
         return;
+    static const bool enabled = (ps2_net::stateEnable(), true);
+    (void)enabled;
     State &s = state();
     if (tick == s.lastTick)
         return;

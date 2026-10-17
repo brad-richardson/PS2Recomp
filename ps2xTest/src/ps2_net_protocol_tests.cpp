@@ -70,6 +70,18 @@ namespace
             t.IsFalse(ps2_net_protocol::shouldArmOnline(1, false, 2, seen), "launch mode has no rearm");
         });
 
+        tc.Run("online-stock-2: ST keep-alives are state only when STOCK120 is on", [](TestCase &t)
+        {
+            const uint8_t st[] = {'O', '5', 'K', 'A', 'S', 'T', 1, 2, 3};
+            const uint8_t ka[] = {'O', '5', 'K', 'A'};
+            const uint8_t pk[] = {'O', '5', 'P', 'K', 'S', 'T', 1};
+            t.IsTrue(ps2_net_protocol::isStateDatagram(st, sizeof(st), true), "enabled: state");
+            t.IsFalse(ps2_net_protocol::isStateDatagram(st, sizeof(st), false), "knob off: plain keep-alive");
+            t.IsFalse(ps2_net_protocol::isStateDatagram(ka, sizeof(ka), true), "bare keep-alive");
+            t.IsFalse(ps2_net_protocol::isStateDatagram(pk, sizeof(pk), true), "other tag");
+            t.IsFalse(ps2_net_protocol::isStateDatagram(st, 6u, true), "no payload");
+        });
+
         tc.Run("relay registration is bounded and byte exact", [](TestCase &t)
         {
             t.IsTrue(ps2_net_protocol::relayRegisterEnabled(nullptr), "default on");

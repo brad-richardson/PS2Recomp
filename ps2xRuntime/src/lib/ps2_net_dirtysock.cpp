@@ -1483,6 +1483,7 @@ namespace ps2_net
     }
 
     // online-stock-2: state side channel ("O5KA" + "ST" + payload; see stateSend).
+    std::atomic<bool> g_stEnabled{false}; // set by the STOCK120 consumer (stateEnable)
     std::mutex g_stMu;
     std::vector<std::vector<uint8_t>> g_stInbox;
     std::vector<uint64_t> g_stRxUs;
@@ -1663,12 +1664,14 @@ namespace ps2_net
                     }
                     u.connected = true;
                 }
-                else if (std::memcmp(buf, "O5KA", 4) == 0 && r > 6 && buf[4] == 'S' && buf[5] == 'T')
+                else if (ps2_net_protocol::isStateDatagram(reinterpret_cast<const uint8_t *>(buf),
+                                                           static_cast<size_t>(r), g_stEnabled.load()))
                 {
                     // online-stock-2 state side channel rides a keep-alive
                     // with a payload (the relay forwards the four stock
                     // tags only; older HLEs ignore keep-alive payloads).
-                    u.connected = true;
+                    // Only a STOCK120 side takes it; connection state is
+                    // left to the stock hello/ack/packet branches.
                     std::lock_guard<std::mutex> lock(g_stMu);
                     if (g_stInbox.size() >= kP2pRxCap)
                     {
@@ -2993,6 +2996,13 @@ namespace ps2_net
         (void)n;
 #endif
         return false;
+    }
+
+    void stateEnable()
+    {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+        g_stEnabled.store(true);
+#endif
     }
 
     void stateDrain(std::vector<std::vector<uint8_t>> &payloads, std::vector<uint64_t> &rxUs)
