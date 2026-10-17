@@ -41,6 +41,7 @@ struct HookInterest;
 } // namespace ps2_fh1
 
 struct R5900Context;
+class PS2Runtime;
 // A guest invocation the runtime must queue (defined in
 // runtime/ee_scheduler.h); hooks report one through an out-parameter and
 // return whether an invocation was produced.
@@ -63,7 +64,8 @@ namespace ps2_game_module
     // 8 (full120 slice 1): the FIX-policy content below.
     // 9 (full120 slice 2): the clock policy below.
     // 10 (full120 slice 3): the dispatch cold side below.
-    inline constexpr uint32_t kAbiVersion = 10u;
+    // 11 (full120 slice 4): the dispatch hot side below.
+    inline constexpr uint32_t kAbiVersion = 11u;
 
     // FIX-policy content (full120 slice 1). The module owns the group
     // name/bit tables, the "all" composition and the mask-compat predicates;
@@ -202,6 +204,14 @@ namespace ps2_game_module
         // empty table: table mode then refuses every branch, which is the
         // generic no-game-hooks behavior.
         void (*fh1BuildHookInterest)(const ps2_fh1::HookConfig *cfg, ps2_fh1::HookInterest *out) = nullptr;
+        // Dispatch hot side (full120 slice 4): the branch-chain body (the
+        // old onBranchT). Runs at every dispatched guest branch the table
+        // does not refuse; `fast` selects the cached-flags (FASTHOOKS=1)
+        // or the original-call order. Null (or no module) skips the chain
+        // (generic: no game hooks). The table check, the refused guard and
+        // the call sites stay runtime-side.
+        bool (*fh1OnBranch)(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc,
+                            PS2Runtime *runtime, bool fast) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

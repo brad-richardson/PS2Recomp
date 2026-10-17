@@ -83,7 +83,8 @@ namespace
                                           &ps2_ssx3_fh1::inputChainPoolFlip,
                                           &ps2_ssx3_fh1::inputChainPoolStep,
                                           &ps2_ssx3_fh1::fh28PoolOverride,
-                                          &ps2_ssx3_fh1::buildHookInterest};
+                                          &ps2_ssx3_fh1::buildHookInterest,
+                                          &ps2_ssx3_fh1::onBranch};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

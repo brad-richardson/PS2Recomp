@@ -3392,144 +3392,6 @@ inline void in4NoteRider(uint8_t *ram, R5900Context *ctx)
     ps2x::inputdiag::noteRider(P, old, w0, g_lastTick);
 }
 
-template <bool Fast>
-inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc, PS2Runtime *runtime = nullptr)
-{
-    // GT3: Fast reads the once-computed flags; !Fast makes the original calls
-    // in the original order. Every flag is fixed after its first read.
-    const BranchFlags *const bf = Fast ? &branchFlags() : nullptr;
-    const auto flag = [bf](bool BranchFlags::*m, bool (*fn)()) { return Fast ? bf->*m : fn(); };
-    if ((Fast ? bf->always : mode() == Mode::Always) && sourcePc == kHookSite && !g_patched)
-    {
-        g_patched = true;
-        patchAtManagerInit(ram);
-    }
-    if (Fast ? bf->events : mode() == Mode::Events)
-        eventsOnBranch(ram, ctx, sourcePc, targetPc);
-    if (flag(&BranchFlags::life2, life2Fix))
-        life2Hook(ram, ctx, sourcePc, targetPc);
-    if (flag(&BranchFlags::trailring, trailRingFix))
-        trailRingAllocPre(ram, ctx, targetPc);
-    const bool on = Fast ? (bf->always || (bf->events && g_guestActive)) : hooksOn();
-    if (on && flag(&BranchFlags::clock, clockFix))
-        clockPreHook(ram, targetPc);
-    if (on && flag(&BranchFlags::raceClock, raceClockFix))
-        raceClockPreHook(ram, ctx, sourcePc, targetPc);
-    if (on && flag(&BranchFlags::launch, launchFix))
-        launchPreHook(ram, ctx, targetPc);
-    bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
-    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                                    pidFix() || c2capFix() || input2Fix() || inputChainFix())))
-        parityHook(ram, sourcePc);
-    if (on && flag(&BranchFlags::rng, rngFix))
-        skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
-    bool queryWasSkipped = false;
-    if (on && flag(&BranchFlags::query, queryFix))
-    {
-        queryWasSkipped = querySkip(ram, ctx, sourcePc, targetPc);
-        skip = queryWasSkipped || skip;
-    }
-    if (on && flag(&BranchFlags::query, queryFix))
-        queryPreHook(ctx, sourcePc, targetPc);
-    if (on && asymkFix() && sourcePc == kCruiseQuerySite && targetPc == kCruiseQuery)
-    {
-        // Scope to pressed contact (pre-query qdepth < 0, where the
-        // penetration adjust fires): leaving/lip approaches (qdepth >= 0)
-        // keep vnret, preserving lip contact and takeoff behavior.
-        // REV1 (RV27 F3): trust the chain only under querySkip's surf sanity
-        // ([R+0x438] <= 0xffff); a stale [P+0x18] otherwise leaves qdepth at
-        // its safe 0.0f default (the vnret/status-quo branch, as on a read
-        // failure before) instead of classifying on arbitrary RAM bits.
-        uint32_t pa = getRegU32(ctx, 4), r = 0u, surf = 0u, qd = 0u;
-        float qdepth = 0.0f;
-        if (rd32(ram, pa + 0x18u, r) && rd32(ram, r + 0x438u, surf) && surf <= 0xffffu &&
-            rd32(ram, r + 0x454u, qd))
-            std::memcpy(&qdepth, &qd, 4);
-        uint32_t k;
-        if (qdepth < 0.0f)
-            k = queryWasSkipped ? 0x00000000u : kAsymKStock;
-        else
-            k = (fixMask() & kFixVnRet) != 0u ? 0xbe66d021u : kAsymKStock; // status quo ante
-        wr32(ram, kAsymKPoolK, k);
-    }
-    if (on && flag(&BranchFlags::trick, trickFix) && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
-        skip = true;
-    if (on && flag(&BranchFlags::aiGate, aiGateFix))
-        skip = aiGateHook(ctx, sourcePc, targetPc) || skip;
-    if (on && flag(&BranchFlags::particles, particlesFix) && g_rngOdd && targetPc == kParticlePass &&
-        (sourcePc == kParticleSiteAll || sourcePc == kParticleSiteOne))
-        skip = true;
-    if (on && flag(&BranchFlags::flare, flareFix) && g_rngOdd && sourcePc == kFlareProbeSite &&
-        targetPc == kFlareProbeLoop)
-        skip = true;
-    if (on && flag(&BranchFlags::ground2, ground2Fix))
-        ground2PreHook(ctx, targetPc);
-    if (on && flag(&BranchFlags::stuntchg, stuntchgFix))
-        stuntchgPreHook(ram, ctx, targetPc);
-    if (on && flag(&BranchFlags::normcap, normcapFix))
-        normcapPreHook(ctx, targetPc);
-    if (on && flag(&BranchFlags::jcam2, jcam2Fix))
-        skip = jcam2Hook(ram,ctx,sourcePc,targetPc,runtime) || skip;
-    if (on && flag(&BranchFlags::jcam, jcamFix))
-        jcamPreHook(ram, ctx, targetPc);
-    if (on && flag(&BranchFlags::envFilt, envFiltFix))
-        envFiltPreHook(ctx, sourcePc, targetPc);
-    if (on && flag(&BranchFlags::pid, pidFix))
-        pidPreHook(ram, ctx, targetPc);
-    if (on && flag(&BranchFlags::c2cap, c2capFix) && g_rngOdd && targetPc == kC2Update)
-        skip = true;
-    if (on && flag(&BranchFlags::bonus, bonusFix))
-        bonusHook(ram, ctx, sourcePc, targetPc);
-    if (on && flag(&BranchFlags::lift, liftFix))
-        liftHook(ctx, sourcePc, targetPc);
-    if (on && flag(&BranchFlags::flags, flagsFix))
-        flagsPreHook(ram, ctx, targetPc);
-    if (flag(&BranchFlags::rclock, rclockFix)) // also after exit: S keeps its frozen offset
-        skip = rclockHook(ram, ctx, targetPc) || skip;
-    if (on && flag(&BranchFlags::fh12, fh12Hooks))
-        fh12PreHook(ram, ctx, targetPc);
-    if (!Fast || bf->src)
-    {
-        srcTap(ram, ctx, sourcePc, targetPc);
-        fh26TapCall(ram, ctx, targetPc);
-    }
-    if (!Fast || bf->fh9)
-        fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
-    // IN4 rider layer (PS2X_INPUT_DIAG=1): edges of the rider action-block
-    // watch bits at each entry of the rider control dispatcher 0x111728
-    // (a1 = block filled by 0x121068; low 20 bits of +0 = action-map bits;
-    // the IN3 in3-in tap's site, branch in3 4774566). One compare per branch
-    // when off; the note itself early-outs on the cached knob.
-    if (targetPc == 0x111728u && ctx)
-        in4NoteRider(ram, ctx);
-    const bool drawSkip = on && flag(&BranchFlags::draw, drawLimit) && !skip && drawHook(ctx, sourcePc, targetPc);
-    skip = skip || drawSkip;
-    if (on && !skip && flag(&BranchFlags::trails,trailsFix)) trailsPreHook(ctx,sourcePc,targetPc);
-    if (on && !skip && flag(&BranchFlags::trailring,trailRingFix)) trailRingPushPre(ram,ctx,targetPc);
-    if (on && !skip && flag(&BranchFlags::chase2,chase2Fix)) chase2PreHook(ctx,sourcePc,targetPc);
-    if (on && !skip && flag(&BranchFlags::shadowpub, shadowPubFix))
-        shadowPubPreHook(ram, ctx, sourcePc, targetPc);
-    if (Fast && !bf->tap)
-        return skip;
-    Tap &t = tap();
-    if (!t.on)
-        return skip;
-    fh10HistBranch(targetPc);
-    if (targetPc == kUpdateTarget)
-        ++t.updates;
-    else if (targetPc == kRenderTarget && !drawSkip)
-        ++t.renders;
-    for (size_t i = 0; i < t.nCount; ++i)
-        if (t.countPcs[i] == targetPc)
-        {
-            ++t.counts[i];
-            if (t.logArgs && ctx)
-                for (int r = 0; r < 4; ++r)
-                    t.args[i][r] = getRegU32(ctx, 4 + r);
-        }
-    return skip;
-}
-
 // Out of line as before, so dispatchGuestBranch keeps its shape (and its PGO
 // profile match). HK1: the table path first asks the precomputed lookup; a
 // miss is provably inert (census §1) and returns "don't skip" directly.
@@ -3543,7 +3405,14 @@ __attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, 
         if (!hi.always && !hookTableHit(hi, sourcePc, targetPc))
             return false;
     }
-    return fastHooks() ? onBranchT<true>(ram, ctx, sourcePc, targetPc, runtime) : onBranchT<false>(ram, ctx, sourcePc, targetPc, runtime);
+    // Full120 slice 4: the chain body lives in the module
+    // (games/ssx3/module/src/fh1_dispatch.cpp) and is reached through
+    // Module.fh1OnBranch. Null (or no module) skips the chain (generic:
+    // no game hooks).
+    const ps2_game_module::Module *m = ps2_game_module::linkedModule();
+    if (m && m->fh1OnBranch)
+        return m->fh1OnBranch(ram, ctx, sourcePc, targetPc, runtime, fastHooks());
+    return false;
 }
 
 // ---- Per-VBlank frame capture (PS2X_FH1_SEQ=dir, PS2X_FH1_SEQ_TICKS=a-b[,c-d]) --
