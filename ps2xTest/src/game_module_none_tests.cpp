@@ -147,6 +147,23 @@ void register_game_module_none_tests()
             t.IsFalse(ps2_fh1::onBranch(ram.data(), &ctx, 0x11a3f0u, 0x117638u, nullptr),
                       "chain skipped with no module");
         });
+        // full120 slice 5: the post-call consume side belongs to the
+        // module. Without one, onReturn/postUnwindRestore are no-ops:
+        // RAM is untouched and no record arms.
+        tc.Run("no post-call consume side without the module", [](TestCase &t)
+               {
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0xA5u);
+            R5900Context ctx{};
+            ps2_fh1::onReturn(ram.data(), &ctx, 0x117638u, true);
+            ps2_fh1::postUnwindRestore(ram.data());
+            t.IsFalse(ps2_fh1::g_postArmed, "nothing armed");
+            t.IsFalse(ps2_fh1::g_pubArmed, "nothing published");
+            t.IsFalse(ps2_fh1::g_normcapArmed, "nothing held");
+            bool clean = true;
+            for (uint8_t b : ram)
+                clean = clean && b == 0xA5u;
+            t.IsTrue(clean, "RAM untouched");
+        });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass
         // and with SSX 3's copied payload intact in RAM.

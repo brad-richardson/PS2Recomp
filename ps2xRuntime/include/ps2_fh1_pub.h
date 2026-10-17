@@ -25,8 +25,9 @@ struct PubRecord
     uint32_t addr[64] = {};
     uint32_t saved[64] = {};
 };
-inline PubRecord g_pub;
-inline bool g_pubArmed = false;
+// Full120 slice 5: lives in the module (see ps2_fh1_full120.h).
+extern PubRecord g_pub;
+extern bool g_pubArmed;
 
 inline void pubRestore(uint8_t *ram) noexcept
 {

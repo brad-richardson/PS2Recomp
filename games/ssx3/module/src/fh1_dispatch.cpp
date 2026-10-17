@@ -356,3 +356,110 @@ bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targe
                 : onBranchT<false>(ram, ctx, sourcePc, targetPc, runtime);
 }
 } // namespace ps2_ssx3_fh1
+
+namespace ps2_fh1
+{
+// Full120 slice 5: post-call state definitions (moved from
+// ps2_fh1_full120.h / ps2_fh1_pub.h). The chain above arms them; the
+// consume-side bodies below read them. Runtime users (pre-hook bodies,
+// savestate, dispatch guards, tests) see them through extern
+// declarations; the no-module binary gets its copies from the none glue.
+PostCall g_post;
+bool g_postArmed = false;
+PubRecord g_pub;
+bool g_pubArmed = false;
+NormcapPost g_normcap;
+bool g_normcapArmed = false;
+NormcapSlot g_normcapSlots[kNormcapSlots];
+NormcapOwner g_normcapOwners[kNormcapSlots];
+} // namespace ps2_fh1
+
+namespace ps2_ssx3_fh1
+{
+using namespace ps2_fh1;
+
+void postUnwindRestore(uint8_t *ram) noexcept
+{
+    trailRingRngRestore(ram);
+    pubRestore(ram); // JDR2: an unwound published call keeps no published word
+    normcapUnwind();
+    if (!g_postArmed)
+        return;
+    if (g_post.kind == 6u)
+        pidHoldRelease(ram, g_post.obj, g_post.saved, true);
+    else if (g_post.kind == 5u)
+        wr32(ram, g_post.obj + 0x2c4u, g_post.saved[0]);
+    g_post = PostCall{};
+    g_postArmed = false;
+}
+
+void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
+{
+    trailRingOnReturn(ram, ctx, targetPc);
+    if (g_pubArmed)
+        pubOnReturn(ram, ctx, targetPc);
+    normcapReturnMatch(ram, ctx, targetPc, returned);
+    if (!g_postArmed)
+        return;
+    if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
+        return;
+    g_postArmed = false;
+    if (g_post.kind == 9u)
+    {
+        if (returned) chase2OnReturn(ram,ctx);
+        return;
+    }
+    if (g_post.kind == 6u)
+    {
+        pidHoldRelease(ram, g_post.obj, g_post.saved, returned); // gains come back even when suspended
+        return;
+    }
+    if (!returned)
+        return;
+    if (g_post.kind == 7u)
+    {
+        ground2OnReturn(ram);
+        return;
+    }
+    if (g_post.kind == 8u)
+    {
+        queryOnReturn(ram, ctx);
+        return;
+    }
+    if (g_post.kind == 11u)
+    {
+        stuntchgOnReturn(ram);
+        return;
+    }
+    if (g_post.kind == 5u)
+    {
+        jcamOnReturn(ram);
+        return;
+    }
+    if (g_post.kind != 0u)
+    {
+        fh12OnReturn(ram);
+        return;
+    }
+    for (int i = 0; i < 6; ++i)
+    {
+        const uint32_t a = g_post.obj + kFlagPhaseOffs[i];
+        uint32_t bits = 0u;
+        if (!rd32(ram, a, bits) || bits == g_post.saved[i])
+            continue;
+        float o = 0.0f, n = 0.0f;
+        std::memcpy(&o, &g_post.saved[i], 4);
+        std::memcpy(&n, &bits, 4);
+        float d = n - o;
+        if (d < 0.0f)
+            d += 1.0f;
+        if (!(d >= 0.0f && d < 1.0f))
+            continue;
+        float v = o + d * 0.5f;
+        if (v >= 1.0f)
+            v -= 1.0f;
+        std::memcpy(&bits, &v, 4);
+        wr32(ram, a, bits);
+    }
+}
+} // namespace ps2_ssx3_fh1

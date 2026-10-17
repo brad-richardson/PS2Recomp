@@ -26,4 +26,6 @@ namespace ps2_ssx3_fh1
 void buildHookInterest(const ps2_fh1::HookConfig *cfg, ps2_fh1::HookInterest *out);
 bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc, PS2Runtime *runtime,
               bool fast);
+void postUnwindRestore(uint8_t *ram) noexcept;
+void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned);
 }

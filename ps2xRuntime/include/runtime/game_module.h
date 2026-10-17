@@ -65,7 +65,8 @@ namespace ps2_game_module
     // 9 (full120 slice 2): the clock policy below.
     // 10 (full120 slice 3): the dispatch cold side below.
     // 11 (full120 slice 4): the dispatch hot side below.
-    inline constexpr uint32_t kAbiVersion = 11u;
+    // 12 (full120 slice 5): the post-call consume side below.
+    inline constexpr uint32_t kAbiVersion = 12u;
 
     // FIX-policy content (full120 slice 1). The module owns the group
     // name/bit tables, the "all" composition and the mask-compat predicates;
@@ -212,6 +213,11 @@ namespace ps2_game_module
         // the call sites stay runtime-side.
         bool (*fh1OnBranch)(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc,
                             PS2Runtime *runtime, bool fast) = nullptr;
+        // Post-call consume side (full120 slice 5): the branch post-call
+        // fixups (armed by chain pre-hooks) and the unwind restore. Null
+        // (or no module) is a no-op (generic: no game hooks).
+        void (*fh1OnReturn)(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned) = nullptr;
+        void (*fh1PostUnwind)(uint8_t *ram) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

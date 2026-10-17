@@ -1383,14 +1383,17 @@ struct NormcapSlot
     uint32_t correctedTick = 0u;
     bool correctedFirst = false;
 };
-inline NormcapSlot g_normcapSlots[kNormcapSlots];
+// Full120 slice 5: post-call state lives in the module
+// (games/ssx3/module/src/fh1_dispatch.cpp, with the chain); the runtime
+// reaches the consume side through Module.fh1OnReturn/fh1PostUnwind.
+extern NormcapSlot g_normcapSlots[kNormcapSlots];
 
 struct NormcapPost
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
 };
-inline NormcapPost g_normcap;
-inline bool g_normcapArmed = false;
+extern NormcapPost g_normcap;
+extern bool g_normcapArmed;
 
 // Owner->rider mapping, learned on skip halves only. querySkip's chain
 // (R = [P+0x18]) is valid pre-call; after the query runs, [P+0x18] no
@@ -1400,7 +1403,7 @@ struct NormcapOwner
 {
     uint32_t pa = 0u, r = 0u;
 };
-inline NormcapOwner g_normcapOwners[kNormcapSlots];
+extern NormcapOwner g_normcapOwners[kNormcapSlots];
 
 inline void normcapUnwind() noexcept
 {
@@ -2332,27 +2335,23 @@ struct PostCall
     uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29), 7 ground2 (FH33), 8 query hold (JMP4), 9 chase2 (FH35), 10 reserved (KNC5: JMP5 springhold removed), 11 stuntchg (FLP2)
     uint32_t saved[7] = {};
 };
-inline PostCall g_post;
-inline bool g_postArmed = false;
+extern PostCall g_post;
+extern bool g_postArmed;
 
 // CAM2 R1: unwind a pending post-call record. The armed call never completes,
 // so its pre-hook mutations are reverted (pid: gains+ring+idx; jcam: the
 // retention counter bump) and the record is fully cleared, so no later
 // return can match it stale. Save-only kinds (flags, texuv, loops, fxtimer,
 // loop ctor, ground2, chase2) need no RAM undo. Idempotent.
+// Full120 slice 5: body lives in the module
+// (games/ssx3/module/src/fh1_dispatch.cpp) and is reached through
+// Module.fh1PostUnwind. Null (or no module) is a no-op (generic: no
+// game hooks; the armed flags stay false without a module).
 inline void postUnwindRestore(uint8_t *ram) noexcept
 {
-    trailRingRngRestore(ram);
-    pubRestore(ram); // JDR2: an unwound published call keeps no published word
-    normcapUnwind();
-    if (!g_postArmed)
-        return;
-    if (g_post.kind == 6u)
-        pidHoldRelease(ram, g_post.obj, g_post.saved, true);
-    else if (g_post.kind == 5u)
-        wr32(ram, g_post.obj + 0x2c4u, g_post.saved[0]);
-    g_post = PostCall{};
-    g_postArmed = false;
+    const ps2_game_module::Module *m = ps2_game_module::linkedModule();
+    if (m && m->fh1PostUnwind)
+        m->fh1PostUnwind(ram);
 }
 
 inline void flagsPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
@@ -2742,74 +2741,15 @@ inline void clearHostCachesForLoad() noexcept
     stuntchgReset();
 }
 
+// Full120 slice 5: body lives in the module
+// (games/ssx3/module/src/fh1_dispatch.cpp) and is reached through
+// Module.fh1OnReturn. Null (or no module) is a no-op (generic: no game
+// hooks; only armed post records consume, and none arm without a module).
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
-    trailRingOnReturn(ram, ctx, targetPc);
-    if (g_pubArmed)
-        pubOnReturn(ram, ctx, targetPc);
-    normcapReturnMatch(ram, ctx, targetPc, returned);
-    if (!g_postArmed)
-        return;
-    if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
-        return;
-    g_postArmed = false;
-    if (g_post.kind == 9u)
-    {
-        if (returned) chase2OnReturn(ram,ctx);
-        return;
-    }
-    if (g_post.kind == 6u)
-    {
-        pidHoldRelease(ram, g_post.obj, g_post.saved, returned); // gains come back even when suspended
-        return;
-    }
-    if (!returned)
-        return;
-    if (g_post.kind == 7u)
-    {
-        ground2OnReturn(ram);
-        return;
-    }
-    if (g_post.kind == 8u)
-    {
-        queryOnReturn(ram, ctx);
-        return;
-    }
-    if (g_post.kind == 11u)
-    {
-        stuntchgOnReturn(ram);
-        return;
-    }
-    if (g_post.kind == 5u)
-    {
-        jcamOnReturn(ram);
-        return;
-    }
-    if (g_post.kind != 0u)
-    {
-        fh12OnReturn(ram);
-        return;
-    }
-    for (int i = 0; i < 6; ++i)
-    {
-        const uint32_t a = g_post.obj + kFlagPhaseOffs[i];
-        uint32_t bits = 0u;
-        if (!rd32(ram, a, bits) || bits == g_post.saved[i])
-            continue;
-        float o = 0.0f, n = 0.0f;
-        std::memcpy(&o, &g_post.saved[i], 4);
-        std::memcpy(&n, &bits, 4);
-        float d = n - o;
-        if (d < 0.0f)
-            d += 1.0f;
-        if (!(d >= 0.0f && d < 1.0f))
-            continue;
-        float v = o + d * 0.5f;
-        if (v >= 1.0f)
-            v -= 1.0f;
-        std::memcpy(&bits, &v, 4);
-        wr32(ram, a, bits);
-    }
+    const ps2_game_module::Module *m = ps2_game_module::linkedModule();
+    if (m && m->fh1OnReturn)
+        m->fh1OnReturn(ram, ctx, targetPc, returned);
 }
 
 // ---- FH12 hooks (own mask fixMask12; events only, like every hook) ---------
