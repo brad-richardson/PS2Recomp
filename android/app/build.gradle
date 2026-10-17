@@ -61,7 +61,13 @@ def ps2xKeyPassword = project.findProperty('ps2xKeyPassword') ?: ''
 // maintainer/debug Gradle recipe supplies no keystore property and retains
 // its installed package and card directory.
 def ps2xAppId = project.findProperty('ps2xAppId') ?: (ps2xKeystoreFile ? 'com.ssx3.recomp' : 'com.ps2x.runner')
+// odin-testapp-1: side-by-side test legs install under -Pps2xAppId with
+// their own label (-Pps2xAppLabel, default below keeps the play label).
+def ps2xAppLabel = project.findProperty('ps2xAppLabel') ?: 'PS2 Recomp'
 def ps2xBootElf = project.findProperty('ps2xBootElf') ?: "/storage/emulated/0/Android/data/${ps2xAppId}/files/game.elf"
+if (ps2xPgoGen && ps2xAppId != 'com.ps2x.runner') {
+    throw new GradleException('ps2xPgoGen supports only the play package: wrap.sh profiles into /data/user/0/com.ps2x.runner/files')
+}
 
 android {
     androidResources {
@@ -76,6 +82,7 @@ android {
 
     defaultConfig {
         applicationId ps2xAppId
+        manifestPlaceholders = [ps2xAppLabel: ps2xAppLabel]
         minSdk 29
         targetSdk 34
         versionCode ps2xVersionCode
