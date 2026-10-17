@@ -8844,11 +8844,21 @@ void PS2Runtime::run()
                 else if (prog.driving)
                 {
                     // Any fresh press cancels the drive (the user takes over).
-                    if ((ds1TrueRaw & ~tkPrevUnion) != 0u)
+                    // Diagnostic: name the edge source (script span, tap echo,
+                    // or walker) offline from tick + bits + list state. A real
+                    // player's Back press must never be swallowed: no guard
+                    // here, logging only.
+                    const uint16_t tkFresh = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
+                    if (tkFresh != 0u)
                     {
                         tkl::driveDisarm();
-                        std::fprintf(stderr, "[tklist] tick=%llu drive cancelled by user\n",
-                                     static_cast<unsigned long long>(tkTick));
+                        const tkl::CourseOption &tkCancelGoal = tkl::listGoal(tkList);
+                        std::fprintf(stderr,
+                                     "[tklist] tick=%llu cancel edge fresh=0x%04x prev=0x%04x "
+                                     "goal=(%u,%u,%u evmap=%d) list(step%d sel%d mode%d)\n",
+                                     static_cast<unsigned long long>(tkTick), tkFresh, tkPrevUnion,
+                                     tkCancelGoal.peak, tkCancelGoal.type, tkCancelGoal.row,
+                                     tkCancelGoal.map.event, tkList.step, tkList.sel, tkList.mode);
                     }
                 }
                 else if (tkTarget)
