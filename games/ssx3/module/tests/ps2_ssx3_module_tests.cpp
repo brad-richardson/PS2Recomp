@@ -2,6 +2,7 @@
 #include "Ssx3LodScale.h"
 #include "Ssx3TrickyLayer.h"
 #include "Ssx3StockMeter.h"
+#include "Ssx3Fh1Clock.h"
 #include "Ssx3Fh1FixContent.h"
 #include "ps2_fh1_fix.h"
 #include "Ssx3TrickyMenu.h"
@@ -90,7 +91,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky-layer tick hook points at the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 7u, "abi");
+            t.Equals(m.abiVersion, 9u, "abi"); // full120 slice 2 (rebase: ABI 9)
             t.IsTrue(m.trickyLayerTick == &ps2_tricky_layer::tickHook, "tick hook");
             // The forward matches the inline reducer on the early-out path
             // (layer off / null / empty): no state, no crash.
@@ -142,7 +143,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 8u, "abi"); // full120 slice 1 (rebase: ABI 8)
+            t.Equals(m.abiVersion, 9u, "abi"); // full120 slice 2 (rebase: ABI 9)
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -162,7 +163,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 8u, "abi"); // full120 slice 1 (rebase: ABI 8)
+            t.Equals(m.abiVersion, 9u, "abi"); // full120 slice 2 (rebase: ABI 9)
             t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
             t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
             t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
@@ -170,7 +171,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the TK34 patch-grow providers point at the module (ABI 6)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 8u, "abi"); // full120 slice 1 (rebase: ABI 8)
+            t.Equals(m.abiVersion, 9u, "abi"); // full120 slice 2 (rebase: ABI 9)
             t.IsTrue(m.patchGrowSave == &ps2_tricky_state::patchGrowSave, "save");
             t.IsTrue(m.patchGrowValidate == &ps2_tricky_state::patchGrowValidate, "validate");
             t.IsTrue(m.patchGrowLoad == &ps2_tricky_state::patchGrowLoad, "load");
@@ -185,7 +186,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the FIX-policy content is published by the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 7u, "abi");
+            t.Equals(m.abiVersion, 9u, "abi"); // full120 slice 2 (rebase: ABI 9)
             t.IsTrue(m.fh1FixPolicy != nullptr, "policy published");
             t.IsTrue(m.fh1FixPolicy == &ps2_ssx3_fh1::fixPolicy(), "policy is the moved table");
             const ps2_game_module::Fh1FixPolicy &p = *m.fh1FixPolicy;
@@ -198,6 +199,28 @@ void register_ps2_ssx3_module_tests()
             t.IsTrue((p.allMain & ps2_fh1::kFixRider) != 0u, "rider in all");
             t.IsTrue((p.allMain & ps2_fh1::kFixLife2) == 0u, "life2 out of all");
             t.IsTrue(p.asymkOk != nullptr && p.normcapOk != nullptr, "compat published");
+        });
+        tc.Run("the clock policy is published by the module (ABI 8)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 9u, "abi"); // full120 slice 2 (rebase: ABI 9)
+            t.IsTrue(m.fh1SchedDivisor == &ps2_ssx3_fh1::schedDivisor, "schedDivisor");
+            t.IsTrue(m.fh1VblankDivisor == &ps2_ssx3_fh1::vblankDivisor, "vblankDivisor");
+            t.IsTrue(m.fh1EeClockShiftNow == &ps2_ssx3_fh1::eeClockShiftNow, "eeClockShiftNow");
+            t.IsTrue(m.fh1StockHalfTicks == &ps2_ssx3_fh1::stockHalfTicks, "stockHalfTicks");
+            t.IsTrue(m.fh1StockHalfTicksLegacy == &ps2_ssx3_fh1::stockHalfTicksLegacy, "stockHalfTicksLegacy");
+            t.IsTrue(m.fh1StockHalfStepNext == &ps2_ssx3_fh1::stockHalfStepNext, "stockHalfStepNext");
+            t.IsTrue(m.fh1OnVBlankCommit == &ps2_ssx3_fh1::onVBlankCommit, "onVBlankCommit");
+            t.IsTrue(m.fh1PatchAtManagerInit == &ps2_ssx3_fh1::patchAtManagerInit, "patchAtManagerInit");
+            t.IsTrue(m.fh1InputChainPoolFlip == &ps2_ssx3_fh1::inputChainPoolFlip, "flip");
+            t.IsTrue(m.fh1InputChainPoolStep == &ps2_ssx3_fh1::inputChainPoolStep, "step");
+            t.IsTrue(m.fh1Fh28PoolOverride == &ps2_ssx3_fh1::fh28PoolOverride, "override");
+            // No FULL120 env in the test process: stock defaults end to end.
+            t.Equals(ps2_fh1::vblankDivisor(), 1u, "stock divisor");
+            t.Equals(ps2_fh1::schedDivisor(), 1u, "stock sched divisor");
+            t.Equals(ps2_fh1::eeClockShiftNow(), 0u, "stock shift");
+            t.Equals(ps2_fh1::stockHalfTicks(), 0u, "stock half ticks");
+            t.Equals(ps2_fh1::stockHalfStepNext(), 2u, "stock half step");
         });
         tc.Run("the override pass wraps both anim entries and chains to the originals", [](TestCase &t)
                {

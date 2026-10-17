@@ -52,7 +52,8 @@ namespace ps2_game_module
     // 6 (snd-seam-1 family #8): the TK34 patch-grow field providers below.
     // 7 (snd-seam-1 Part 5 slice 4): the Tricky-layer VBlank hook below.
     // 8 (full120 slice 1): the FIX-policy content below.
-    inline constexpr uint32_t kAbiVersion = 8u;
+    // 9 (full120 slice 2): the clock policy below.
+    inline constexpr uint32_t kAbiVersion = 9u;
 
     // FIX-policy content (full120 slice 1). The module owns the group
     // name/bit tables, the "all" composition and the mask-compat predicates;
@@ -165,6 +166,25 @@ namespace ps2_game_module
         void (*trickyLayerTick)(uint8_t *rdram, size_t ramSize, uint64_t tick) = nullptr;
         // FIX-policy content (full120 slice 1): see Fh1FixPolicy above.
         const Fh1FixPolicy *fh1FixPolicy = nullptr;
+        // Clock policy (full120 slice 2): the VBlank/EE rate switch, the
+        // stock-time accumulators, the VBlank commit, the manager word
+        // table and its helpers. Bodies live in the module and operate on
+        // the same inline guest-conversion state. Null (or no module) is
+        // stock behavior: divisors 1, shifts 0, accumulators 0, commit and
+        // patching no-ops, word conversion refused.
+        uint32_t (*fh1SchedDivisor)() = nullptr;
+        uint32_t (*fh1VblankDivisor)() = nullptr;
+        uint32_t (*fh1EeClockShiftNow)() = nullptr;
+        uint64_t (*fh1StockHalfTicks)() = nullptr;
+        uint64_t (*fh1StockHalfTicksLegacy)() = nullptr;
+        uint32_t (*fh1StockHalfStepNext)() = nullptr;
+        void (*fh1OnVBlankCommit)(uint8_t *ram, uint64_t tick) = nullptr;
+        bool (*fh1ApplyWords)(uint8_t *ram, uint32_t a, bool toActive, uint64_t mainMask, uint32_t fix12Mask,
+                              bool playBuild) = nullptr;
+        void (*fh1PatchAtManagerInit)(uint8_t *ram) = nullptr;
+        void (*fh1InputChainPoolFlip)(uint8_t *ram, bool toActive) = nullptr;
+        void (*fh1InputChainPoolStep)(uint8_t *ram, bool odd) = nullptr;
+        bool (*fh1Fh28PoolOverride)(uint32_t address, uint64_t mainMask) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

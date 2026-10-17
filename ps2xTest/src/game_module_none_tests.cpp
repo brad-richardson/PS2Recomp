@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "game_overrides.h"
 #include "ps2_fh1_fix.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
@@ -109,6 +110,18 @@ void register_game_module_none_tests()
             t.IsFalse(ps2_fh1::parseFix("rider").ok, "names refuse with no module");
             t.IsFalse(ps2_fh1::asymkMaskOk(~0ull), "compat false with no module");
             t.IsFalse(ps2_fh1::normcapMaskOk(~0ull), "compat false with no module");
+        });
+        // full120 slice 2: the clock policy belongs to the module. Without
+        // one, every reader sees stock behavior (divisors 1, shifts 0,
+        // accumulators 0, commit and patching no-ops, words refused).
+        tc.Run("no clock policy without the module", [](TestCase &t)
+               {
+            t.Equals(ps2_fh1::vblankDivisor(), 1u, "stock divisor");
+            t.Equals(ps2_fh1::schedDivisor(), 1u, "stock sched divisor");
+            t.Equals(ps2_fh1::eeClockShiftNow(), 0u, "stock shift");
+            t.Equals(ps2_fh1::stockHalfTicks(), 0u, "stock half ticks");
+            t.Equals(ps2_fh1::stockHalfTicksLegacy(), 0u, "stock legacy half ticks");
+            t.Equals(ps2_fh1::stockHalfStepNext(), 2u, "stock half step");
         });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass
