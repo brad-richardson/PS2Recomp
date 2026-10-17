@@ -1360,7 +1360,11 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     {
         if (clock < s.lastClock && chain)
         {
-            endSession(tick, "race restarted", "Quick Play ended - restart races the AI");
+            // After our finish the clock resets for the next event: over, not a restart.
+            if (s.lastFinSent)
+                endSession(tick, "race over", nullptr);
+            else
+                endSession(tick, "race restarted", "Quick Play ended - restart races the AI");
             return;
         }
         if (++s.lostTicks > kRaceLostTicks)
