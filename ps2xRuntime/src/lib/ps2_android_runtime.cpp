@@ -128,9 +128,13 @@ void loadSettingsEnvFile()
             for (const auto &entry : ps2x::parseEnvFileContent(content))
             {
                 // android-touch-1: Touch row persists under its env name.
-                // settings-res-1: Menu button row persists under its env name.
+                // settings-res-1: Menu button row persists under its env name;
+                // Upscale row too (same iPhone-bug class as the iOS mirror:
+                // without this the panel's Upscale choice never survives a
+                // restart on Android either).
                 if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF" &&
-                    entry.first != "PS2X_VIRTUAL_PAD" && entry.first != "PS2X_MENU_BUTTON")
+                    entry.first != "PS2X_VIRTUAL_PAD" && entry.first != "PS2X_MENU_BUTTON" &&
+                    entry.first != "GE1_ONDEVICE_UPSCALE")
                     continue;
                 setenv(entry.first.c_str(), entry.second.c_str(), 1);
                 __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
