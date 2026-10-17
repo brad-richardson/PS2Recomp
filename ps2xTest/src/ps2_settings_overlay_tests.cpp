@@ -381,6 +381,31 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(resDefaultRow(true, false, 8 * kGiB, 2400, 1081) == Res::R2x,
                      "1081p is not a 1080p panel"); });
 
+        tc.Run("restart persists the pending rows, never the effective env", [](TestCase &t)
+               {
+            using ps2x::set2::Res;
+            using ps2x::set2::SettingsPairs;
+            // Brad 10-17 iPhone bug: stale file {native} + pending 3x must
+            // write 3, keeping the other rows and their order.
+            const SettingsPairs stale{{"GE1_UPSCALE", "native"},
+                                      {"PS2X_SETTINGS_PERF", "0"},
+                                      {"PS2X_VIRTUAL_PAD", "1"}};
+            const auto w1 = ps2x::set2::settingsForRestart(stale, Res::R3x, true);
+            t.Equals(w1.size(), static_cast<size_t>(3), "row count kept");
+            t.IsTrue(w1[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("3")),
+                     "pending 3x wins over stale native");
+            t.IsTrue(w1[1] == std::make_pair(std::string("PS2X_SETTINGS_PERF"), std::string("1")),
+                     "live perf flag");
+            t.IsTrue(w1[2] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("1")),
+                     "untouched row kept");
+            // Screen writes native explicitly (no default-clearing choice).
+            const auto w2 = ps2x::set2::settingsForRestart({}, Res::Screen, false);
+            t.IsTrue(w2.size() == 2 && w2[0].second == "native" && w2[1].second == "0",
+                     "empty file gains both lines");
+            // 1x writes 1 (it is never a default, but it is writable).
+            const auto w3 = ps2x::set2::settingsForRestart({}, Res::R1x, false);
+            t.IsTrue(w3[0].second == "1", "1x persists"); });
+
         tc.Run("menu button maps to its line (shown clears it)", [](TestCase &t)
                {
             using ps2x::set2::MenuBtn;

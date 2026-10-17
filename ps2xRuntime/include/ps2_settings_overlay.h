@@ -588,6 +588,12 @@ inline std::string formatSettingsEnv(const SettingsPairs &pairs)
     return s;
 }
 
+// What the restart persists: the PENDING Resolution choice (never the
+// effective env) plus the live Perf flag. Pure so the write path is
+// unit-tested (Brad 10-17 iPhone bug: a stale choice must not survive the
+// restart — the file must carry exactly what the rows show).
+inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf);
+
 // Upsert one key (empty val removes it). Keeps file order, appends new keys.
 inline SettingsPairs upsertSettings(SettingsPairs cur, const std::string &key, const std::string &val)
 {
@@ -632,6 +638,13 @@ inline const char *resToUpscale(Res r)
     default:
         return "native";
     }
+}
+
+inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf)
+{
+    SettingsPairs out = upsertSettings(pairs, "GE1_UPSCALE", resToUpscale(res));
+    out = upsertSettings(out, "PS2X_SETTINGS_PERF", perf ? "1" : "0");
+    return out;
 }
 
 inline Res resFromSetting(const std::string &val, Res platformDefault)

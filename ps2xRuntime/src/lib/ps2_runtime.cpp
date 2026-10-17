@@ -8504,13 +8504,13 @@ void PS2Runtime::run()
         };
         auto set2DoRestart = [&] {
             const bool want120 = set2Nav.mode == ps2x::set2::Mode::M120;
-            const char *upscale = ps2x::set2::resToUpscale(set2Nav.res); // "" = platform default
+            const char *upscale = ps2x::set2::resToUpscale(set2Nav.res); // pending choice, always explicit
             std::fprintf(stderr, "[set2] restart want120=%d upscale=%s\n", want120 ? 1 : 0,
                          upscale[0] ? upscale : "(default)");
 #if defined(PS2X_IOS)
-            auto pairs = set2ReadSettings();
-            pairs = ps2x::set2::upsertSettings(pairs, "GE1_UPSCALE", upscale);
-            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF", set2Perf ? "1" : "0");
+            // settings-res-1: the persisted file carries the pending rows
+            // (settingsForRestart, unit-tested) — never the effective env.
+            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf);
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8525,9 +8525,7 @@ void PS2Runtime::run()
             std::fflush(nullptr);
             std::_Exit(0);
 #elif defined(__ANDROID__)
-            auto pairs = set2ReadSettings();
-            pairs = ps2x::set2::upsertSettings(pairs, "GE1_UPSCALE", upscale);
-            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF", set2Perf ? "1" : "0");
+            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf);
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
