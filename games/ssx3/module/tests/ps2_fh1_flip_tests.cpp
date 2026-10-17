@@ -11,6 +11,26 @@
 namespace
 {
     using namespace ps2_fh1;
+
+    // Twin of the stuntchg latch helpers (ps2_fh1_stuntchg_tests.cpp): each
+    // TU keeps its own copy; both touch the same runtime latch state.
+    void dirtyLatch()
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            g_stuntchgHigh[i] = true;
+            g_stuntchgIdle[i] = 3;
+            g_stuntchgDelay[i] = 2;
+        }
+    }
+
+    bool latchClear()
+    {
+        for (int i = 0; i < 2; ++i)
+            if (g_stuntchgHigh[i] || g_stuntchgIdle[i] != 0 || g_stuntchgDelay[i] != 0)
+                return false;
+        return true;
+    }
 } // namespace
 
 void register_ps2_fh1_flip_tests()
