@@ -630,5 +630,26 @@ void register_ps2_ssx3_tricky_list_tests()
             const std::string blob = tkfontBlob(16, 16, 64, 64, {g});
             ps2_tk_font::Baked b;
             t.IsFalse(ps2_tk_font::parseTkFont(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), b),
-                      "oob cell rejected"); }); });
+                      "oob cell rejected"); });
+        tc.Run("tkfont uniform scale ignores descenders", [&](TestCase &t)
+               {
+            ps2_tk_font::Glyph a, y;
+            a.code = 65;
+            a.x = 0; a.y = 0; a.w = 10; a.h = 12; a.xoff = 0; a.yoff = 2; a.adv = 11;
+            y.code = 121;
+            y.x = 0; y.y = 0; y.w = 10; y.h = 20; y.xoff = 0; y.yoff = 2; y.adv = 10;
+            const std::string blob = tkfontBlob(16, 32, 64, 128, {a, y});
+            ps2_tk_font::Baked b;
+            t.IsTrue(ps2_tk_font::parseTkFont(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), b),
+                     "two glyphs parse");
+            float top = 0.0f, bot = 0.0f;
+            ps2_tk_font::fullBand(b, top, bot);
+            t.Equals(top, 2.0f, "full top");
+            t.Equals(bot, 22.0f, "full bottom covers descender");
+            const float ku = ps2_tk_font::scaleUniform(b, 40.0f);
+            t.Equals(ku, 2.0f, "uniform scale is string-independent");
+            const ps2_tk_font::Metrics ma = ps2_tk_font::measure(b, "A");
+            const ps2_tk_font::Metrics may = ps2_tk_font::measure(b, "Ay");
+            t.IsTrue(ps2_tk_font::scaleFor(may, 40.0f) < ps2_tk_font::scaleFor(ma, 40.0f),
+                     "per-string fit shrinks the descender row (the row bug)"); }); });
 }

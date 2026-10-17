@@ -158,4 +158,36 @@ inline float scaleFor(const Metrics &m, float targetH)
     return (m.anyInk && band > 0 && targetH > 0) ? targetH / band : 0.0f;
 }
 
+// Full-font ink band (string-independent): min yoff .. max yoff+h over the
+// baked inked glyphs. scaleUniform gives every string the SAME glyph size —
+// use it for list rows so a descender ('y' in "Elysium Alps") cannot shrink
+// its row next to descender-free neighbours ("Garibaldi").
+inline void fullBand(const Baked &b, float &top, float &bot)
+{
+    top = 1e9f;
+    bot = -1e9f;
+    for (const Glyph &g : b.glyphs)
+    {
+        if (g.w <= 1)
+            continue;
+        if (g.yoff < top)
+            top = g.yoff;
+        if (g.yoff + g.h > bot)
+            bot = g.yoff + g.h;
+    }
+    if (!(bot > top))
+    {
+        top = 0.0f;
+        bot = 10.0f;
+    }
+}
+
+inline float scaleUniform(const Baked &b, float targetH)
+{
+    float top = 0.0f, bot = 10.0f;
+    fullBand(b, top, bot);
+    const float band = bot - top;
+    return (b.ok && band > 0 && targetH > 0) ? targetH / band : 0.0f;
+}
+
 } // namespace ps2_tk_font

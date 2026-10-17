@@ -9101,12 +9101,11 @@ void PS2Runtime::run()
                 const bool tkUseUp = tkFontBaked.ok && (tkFontTex1.id != 0u || tkFontTex4.id != 0u);
                 // Upload-font quad draw (face + down/right shadow, in-game
                 // layering); returns drawn width. yTop = top of the ink band.
-                const auto tkUpDraw = [&](const char *s, float x, float yTop, float hPx, Color tint,
-                                          bool right) -> float {
-                    const tkf::Metrics m = tkf::measure(tkFontBaked, s);
-                    const float k = tkf::scaleFor(m, hPx);
+                const auto tkUpDrawK = [&](const char *s, float x, float yTop, float hPx, float k,
+                                           float topRef, Color tint, bool right) -> float {
                     if (k <= 0.0f)
                         return 0.0f;
+                    const tkf::Metrics m = tkf::measure(tkFontBaked, s);
                     float pen = right ? x - m.width * k : x;
                     const float x0 = pen;
                     Texture2D &tex = (tkUpscale && tkFontTex4.id != 0u) ? tkFontTex4 : tkFontTex1;
@@ -9122,7 +9121,7 @@ void PS2Runtime::run()
                             const Rectangle src{static_cast<float>(g->x) * mult, static_cast<float>(g->y) * mult,
                                                 static_cast<float>(g->w) * mult, static_cast<float>(g->h) * mult};
                             const Rectangle dst{pen + static_cast<float>(g->xoff) * k,
-                                                yTop + (static_cast<float>(g->yoff) - m.top) * k,
+                                                yTop + (static_cast<float>(g->yoff) - topRef) * k,
                                                 static_cast<float>(g->w) * k, static_cast<float>(g->h) * k};
                             const Rectangle dsh{dst.x + sh, dst.y + sh, dst.width, dst.height};
                             DrawTexturePro(tex, src, dsh, Vector2{0, 0}, 0.0f, Color{0, 0, 0, 160});
@@ -9131,6 +9130,11 @@ void PS2Runtime::run()
                         pen += static_cast<float>(g->adv) * k;
                     }
                     return pen - x0;
+                };
+                const auto tkUpDraw = [&](const char *s, float x, float yTop, float hPx, Color tint,
+                                          bool right) -> float {
+                    const tkf::Metrics m = tkf::measure(tkFontBaked, s);
+                    return tkUpDrawK(s, x, yTop, hPx, tkf::scaleFor(m, hPx), m.top, tint, right);
                 };
                 const auto tkTxDraw = [&](const char *s, float x, float yTop, float hPx, Color tint,
                                           bool right) -> float {
@@ -9265,16 +9269,35 @@ void PS2Runtime::run()
                     tkNRows = tkStepCourse.nOpts;
                     tkRowSel = tkList.mode;
                 }
+                // Uniform rows: one string-independent scale for every row, so a
+                // descender ('y' in "Elysium Alps") cannot shrink its row next
+                // to descender-free neighbours ("Garibaldi"). Same top
+                // reference keeps baselines aligned; title/pane/help keep the
+                // per-string fit (unchanged pixels there).
                 float tkRowS = tkg.rowH * 0.58f;
+                float tkRowTop = 0.0f;
+                if (tkUseUp)
+                {
+                    float tkRowBot = 10.0f;
+                    tkf::fullBand(tkFontBaked, tkRowTop, tkRowBot);
+                }
                 for (int pass = 0; pass < 2; ++pass)
                 {
+                    const float tkRowK = tkUseUp ? tkf::scaleUniform(tkFontBaked, tkRowS) : 0.0f;
                     float nameW = 0.0f;
                     for (int i = 0; i < tkNRows; ++i)
-                        nameW = std::max(nameW, tkW(tkRows[i], tkRowS));
+                    {
+                        if (tkUseUp)
+                            nameW = std::max(nameW,
+                                             tkf::measure(tkFontBaked, tkRows[i]).width * tkRowK);
+                        else
+                            nameW = std::max(nameW, tkW(tkRows[i], tkRowS));
+                    }
                     const float avail = tkg.rowW - 20.0f;
                     if (nameW > avail && nameW > 0.0f)
                         tkRowS *= avail / nameW;
                 }
+                const float tkRowK = tkUseUp ? tkf::scaleUniform(tkFontBaked, tkRowS) : 0.0f;
                 for (int i = 0; i < tkNRows; ++i)
                 {
                     const bool sel = (tkRowSel == i);
@@ -9283,7 +9306,11 @@ void PS2Runtime::run()
                                   sel ? Color{154, 62, 2, 255} : Color{24, 36, 62, 255});
                     const Color tkInk = sel ? Color{250, 248, 244, 255} : Color{205, 212, 224, 255};
                     const float tkRy = tkg.rowY[i] + (tkg.rowH - 2 - tkRowS) * 0.5f;
-                    tkDraw(tkRows[i], tkg.rowX + 10, tkRy, tkRowS, tkInk, false);
+                    if (tkUseUp)
+                        tkUpDrawK(tkRows[i], tkg.rowX + 10, tkRy, tkRowS, tkRowK, tkRowTop,
+                                  tkInk, false);
+                    else
+                        tkDraw(tkRows[i], tkg.rowX + 10, tkRy, tkRowS, tkInk, false);
                 }
                 // Preview/event pane.
                 DrawRectangle(static_cast<int>(tkg.paneX), static_cast<int>(tkg.paneY),
