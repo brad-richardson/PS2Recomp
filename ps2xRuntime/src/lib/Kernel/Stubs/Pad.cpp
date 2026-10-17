@@ -17,6 +17,7 @@
 #include "ps2_net_link.h" // np-link-1: delay-lockstep client (default off)
 #include "ps2_net_protocol.h"
 #include "ps2_netsync.h" // online-v0-1: Quick Play menus + START barrier (default off)
+#include "ps2_net_stock120.h" // online-stock-2: autopilot own-rider mode (PS2X_TK12_AP_PTR=own)
 #include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
@@ -539,6 +540,7 @@ namespace ps2_stubs
             bool init = false;
             bool on = false;
             bool done = false;
+            bool own = false; // PS2X_TK12_AP_PTR=own (online-stock-2)
             uint32_t ptr = 0x53FF4Cu;
             uint64_t from = 0;
             uint64_t to = ~0ull;
@@ -571,7 +573,10 @@ namespace ps2_stubs
                 if (const char *v = std::getenv(k)) out = std::strtod(v, nullptr);
             };
             uint64_t ptr = g_tk12.ptr;
-            envU("PS2X_TK12_AP_PTR", ptr);
+            if (const char *v = std::getenv("PS2X_TK12_AP_PTR"); v && std::strcmp(v, "own") == 0)
+                g_tk12.own = true; // online-stock-2: this side's stock120 rider, resolved per read
+            else
+                envU("PS2X_TK12_AP_PTR", ptr);
             g_tk12.ptr = static_cast<uint32_t>(ptr);
             envU("PS2X_TK12_AP_FROM", g_tk12.from);
             envU("PS2X_TK12_AP_TO", g_tk12.to);
@@ -623,7 +628,10 @@ namespace ps2_stubs
             if (!rdram)
                 return;
             uint32_t r = 0;
-            std::memcpy(&r, rdram + (g_tk12.ptr & PS2_RAM_MASK), 4);
+            if (g_tk12.own)
+                r = ps2_net_stock120::ownRider(rdram);
+            else
+                std::memcpy(&r, rdram + (g_tk12.ptr & PS2_RAM_MASK), 4);
             if (r == 0 || (r & PS2_RAM_MASK) + 0x120u > PS2_RAM_SIZE)
                 return;
             float p[3];

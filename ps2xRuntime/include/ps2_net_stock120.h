@@ -161,6 +161,18 @@ inline bool rider(const uint8_t *r, int slot, uint32_t &out)
            ps2_netsync::inRam(out, 0x240u);
 }
 
+// This side's own rider while a stock120 race is linked (0 otherwise).
+// Used by the APH1 autopilot (PS2X_TK12_AP_PTR=own) on test legs.
+inline uint32_t ownRider(const uint8_t *r)
+{
+    if (!ps2_fh1::netStock120() || !ps2_net::lockstepLinkActive())
+        return 0u;
+    const int lq = ps2_fh1::g_s120LocalQueue;
+    const int slot = knobs().own >= 0 ? knobs().own : (lq == 1 ? 1 : 0);
+    uint32_t o = 0u;
+    return rider(r, slot, o) ? o : 0u;
+}
+
 inline void logLine(const char *what, uint64_t tick)
 {
     State &s = state();
