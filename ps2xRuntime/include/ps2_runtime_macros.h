@@ -563,60 +563,6 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 #define PS2_PCGTH(a, b) _mm_cmpgt_epi16((__m128i)(a), (__m128i)(b))
 #define PS2_PCGTB(a, b) _mm_cmpgt_epi8((__m128i)(a), (__m128i)(b))
 
-// Packed Add with Signed Saturation Word (PADDSW)
-inline __m128i ps2_paddsw(__m128i a, __m128i b)
-{
-
-    __m128i sum = _mm_add_epi32(a, b);
-    // Check for over/underflow. Clamp to either INT32_MIN/INT32_MAX.
-    __m128i overflow = _mm_and_si128(_mm_xor_si128(a, sum),
-                                     _mm_xor_si128(b, sum));
-    // Extract input sign.
-    overflow = _mm_srai_epi32(overflow, 31);
-    __m128i input_sign = _mm_srai_epi32(a, 31);
-    // Select saturation value based on overflow sign.
-    #if defined(__SSE4_1__)
-    __m128i sat = _mm_blendv_epi8(
-        _mm_set1_epi32(INT32_MAX),
-        _mm_set1_epi32(INT32_MIN),
-        input_sign);
-    return _mm_blendv_epi8(sum, sat, overflow);
-    #else
-    __m128i sat = _mm_or_si128(_mm_and_si128(input_sign, _mm_set1_epi32(INT32_MIN)),
-                               _mm_andnot_si128(input_sign, _mm_set1_epi32(INT32_MAX)));
-    return _mm_or_si128(_mm_and_si128(overflow, sat),
-                        _mm_andnot_si128(overflow, sum));
-    #endif
-}
-#define PS2_PADDSW(a, b) ps2_paddsw((__m128i)(a), (__m128i)(b))
-
-// Packed Subtract with Signed Saturation Word (PSUBSW)
-inline __m128i ps2_psubsw(__m128i a, __m128i b)
-{
-    __m128i diff = _mm_sub_epi32(a, b);
-    // Check for over/underflow. Clamp to either INT32_MIN/INT32_MAX.
-    __m128i overflow = _mm_and_si128(_mm_xor_si128(a, b),
-                                     _mm_xor_si128(a, diff));
-    // Extract input sign.
-    overflow = _mm_srai_epi32(overflow, 31);
-    __m128i input_sign = _mm_srai_epi32(a, 31);
-    // Select saturation value based on overflow sign.
-    #if defined(__SSE4_1__)
-    __m128i sat = _mm_blendv_epi8(
-        _mm_set1_epi32(INT32_MAX),
-        _mm_set1_epi32(INT32_MIN),
-        input_sign);
-    return _mm_blendv_epi8(diff, sat, overflow);
-    #else
-    __m128i sat = _mm_or_si128(_mm_and_si128(input_sign, _mm_set1_epi32(INT32_MIN)),
-                               _mm_andnot_si128(input_sign, _mm_set1_epi32(INT32_MAX)));
-    return _mm_or_si128(_mm_and_si128(overflow, sat),
-                        _mm_andnot_si128(overflow, diff));
-    #endif
-
-}
-#define PS2_PSUBSW(a, b) ps2_psubsw((__m128i)(a), (__m128i)(b))
-
 // Packed Compare Equal (PCEQ)
 #define PS2_PCEQW(a, b) _mm_cmpeq_epi32((__m128i)(a), (__m128i)(b))
 #define PS2_PCEQH(a, b) _mm_cmpeq_epi16((__m128i)(a), (__m128i)(b))
@@ -681,54 +627,6 @@ inline __m128i ps2_ppacb(__m128i rs, __m128i rt)
 
 // Packed Multiply-Add (PMADD)
 #define PS2_PMADDW(a, b) _mm_add_epi32(_mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(1, 0, 3, 2)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(1, 0, 3, 2))), _mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0))))
-
-// Packed Variable Shifts
-#define PS2_PSLLVW(a, b) _mm_custom_sllv_epi32((__m128i)(a), (__m128i)(b))
-#define PS2_PSRLVW(a, b) _mm_custom_srlv_epi32((__m128i)(a), (__m128i)(b))
-#define PS2_PSRAVW(a, b) _mm_custom_srav_epi32((__m128i)(a), (__m128i)(b))
-
-inline __m128i _mm_custom_sllv_epi32(__m128i a, __m128i count)
-{
-    alignas(16) int32_t a_arr[4];
-    alignas(16) int32_t count_arr[4];
-    alignas(16) int32_t result[4];
-
-    std::memcpy(a_arr, &a, sizeof(a));
-    std::memcpy(count_arr, &count, sizeof(count));
-
-    for (int i = 0; i < 4; i++)
-    {
-        result[i] = a_arr[i] << (count_arr[i] & 0x1F);
-    }
-
-    __m128i out;
-    std::memcpy(&out, result, sizeof(out));
-    return out;
-}
-
-inline __m128i _mm_custom_srlv_epi32(__m128i a, __m128i count)
-{
-    int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i *)a_arr, a);
-    _mm_storeu_si128((__m128i *)count_arr, count);
-    for (int i = 0; i < 4; i++)
-    {
-        result[i] = (uint32_t)a_arr[i] >> (count_arr[i] & 0x1F);
-    }
-    return _mm_loadu_si128((__m128i *)result);
-}
-
-inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count)
-{
-    int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i *)a_arr, a);
-    _mm_storeu_si128((__m128i *)count_arr, count);
-    for (int i = 0; i < 4; i++)
-    {
-        result[i] = a_arr[i] >> (count_arr[i] & 0x1F);
-    }
-    return _mm_loadu_si128((__m128i *)result);
-}
 
 // PMFHL function implementations
 inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
@@ -944,22 +842,6 @@ static inline __m128 Ps2VuMin(__m128 a, __m128 b)
     const __m128i bothNeg = _mm_srai_epi32(_mm_and_si128(ia, ib), 31);
     const __m128i hi = _mm_max_epi32(ia, ib), lo = _mm_min_epi32(ia, ib);
     return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(bothNeg, hi), _mm_andnot_si128(bothNeg, lo)));
-}
-// VCLIPw: shift the 24-bit clip history by 6 and set +x,-x,+y,-y,+z,-z
-// against |ft.w| with PCSX2's integer compare (_vuCLIP).
-static inline uint32_t Ps2VuClip(uint32_t clipFlags, __m128 fs, uint32_t ftwBits)
-{
-    int32_t value = static_cast<int32_t>(ftwBits);
-    value = (value & 0x7F800000) ? (value & 0x7FFFFFFF) : 0x007FFFFF;
-    const uint32_t x = Ps2VuLane(fs, 0), y = Ps2VuLane(fs, 1), z = Ps2VuLane(fs, 2);
-    uint32_t f = clipFlags << 6;
-    if (static_cast<int32_t>(x) > value) f |= 0x01u;
-    if (static_cast<int32_t>(x ^ 0x80000000u) > value) f |= 0x02u;
-    if (static_cast<int32_t>(y) > value) f |= 0x04u;
-    if (static_cast<int32_t>(y ^ 0x80000000u) > value) f |= 0x08u;
-    if (static_cast<int32_t>(z) > value) f |= 0x10u;
-    if (static_cast<int32_t>(z ^ 0x80000000u) > value) f |= 0x20u;
-    return f & 0xFFFFFFu;
 }
 // R register: 23-bit LFSR value with the exponent of 1.0, kept in every lane
 // of ctx->vu0_r (AdvanceLFSR / _vuRINIT / _vuRXOR).
