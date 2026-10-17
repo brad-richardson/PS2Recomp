@@ -5,6 +5,17 @@ project(PS2Runtime VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Xcode creates prefix headers itself. A cached Clang PCH embeds the
+# old cmake_pch.hxx mtime and fails after a clean configure recreates it,
+# even when the header content is identical. Keep dependency/content checks.
+function(ps2x_precompile_headers target)
+    target_precompile_headers(${target} PRIVATE ${ARGN})
+    if(CMAKE_GENERATOR STREQUAL "Xcode" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-Xclang -fno-pch-timestamp>")
+    endif()
+endfunction()
+
 option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity build" ON)
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 32 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2EntryRunner" ON)
@@ -786,7 +797,7 @@ if(PS2X_ENABLE_RUNNER_PCH)
         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_stubs.h"
     )
 
-    target_precompile_headers(ps2EntryRunner PRIVATE ${PS2X_RUNNER_PCH_HEADERS})
+    ps2x_precompile_headers(ps2EntryRunner ${PS2X_RUNNER_PCH_HEADERS})
 endif()
 
 if(PS2X_DEFAULT_BOOT_ELF_DEFINE)
@@ -849,7 +860,7 @@ if(PS2X_GAME_CODEGEN_DIR)
         # build-time-1: every generated function opens with this prelude, and
         # each unity TU re-parses it (~1.4 s of front end per TU). Same
         # objects with or without it; for cold one-shot builds (build.py).
-        target_precompile_headers(ps2_game_objects PRIVATE
+        ps2x_precompile_headers(ps2_game_objects
             <stdexcept> [["ps2_runtime_macros.h"]] [["ps2_runtime.h"]]
             <ps2_recompiled_functions.h> <ps2_recompiled_stubs.h>
             [["ps2_syscalls.h"]] [["ps2_stubs.h"]])
