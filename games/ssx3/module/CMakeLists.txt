@@ -21,17 +21,21 @@ add_library(ssx3_game_module STATIC
     src/stock_meter.cpp
     src/lod_scale.cpp
     src/tricky_layer_tick.cpp
+    src/vis_native.cpp
 )
 target_include_directories(ssx3_game_module
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+    # split-input-1 #3: vis_native reuses the VU vector FMAC core by design
+    # (see Ssx3VisNative.h); that header is runtime-private (src/lib/vu).
+    PRIVATE ${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib
 )
 target_link_libraries(ssx3_game_module PUBLIC ps2_runtime)
 set_target_properties(ssx3_game_module PROPERTIES
     PS2X_GAME_MODULE_ENTRY ps2x_ssx3_game_module
     PS2X_GAME_MODULE_HEADER ps2_ssx3_module.h
     # Product suite sources; ps2xTest adds them to ps2x_tests.
-    PS2X_GAME_MODULE_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_anim_pick_guard_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_module_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_input_marker_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_copied_payload_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_sif_handshake_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_snd_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_tricky_song_provider_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_movie_stub_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fix_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fh28_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_life2_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_savestate_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_hooktable_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_flip_tests.cpp"
+    PS2X_GAME_MODULE_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_anim_pick_guard_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_module_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_input_marker_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_copied_payload_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_sif_handshake_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_snd_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_tricky_song_provider_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_movie_stub_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_vis_native_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fix_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fh28_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_life2_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_savestate_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_hooktable_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_flip_tests.cpp"
 )
 
 # Same release flags as ps2_runtime, where this code compiled before the move.

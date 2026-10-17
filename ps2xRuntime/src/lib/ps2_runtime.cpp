@@ -11,7 +11,6 @@
 #include "ps2_android_toast.h"
 #include "ps2_e7.h"
 #include "ps2_e41_trace.h"
-#include "ps2_ssx3_vis_native.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_lod.h"
@@ -6220,38 +6219,13 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
 }
 
 
-// VNP1: PS2X_SSX3_VIS_NATIVE (unset/0 = the VU0 engine, the exact path;
-// 1 = SSX 3's visibility tests 0xDB8 + the walker's 0x570 in host code;
-// check = both, compared). Off when the native image is unavailable or
-// the PCSX2 float mode is selected.
-namespace
+// split-input-1 #3 (Part 2): SSX 3's VU0 visibility tests live in the game
+// module now (Ssx3VisNative.h); the export helper below is generic VU0
+// state plumbing, so its definition stays here. The runtime never includes
+// the game header (seam direction); the declaration is repeated verbatim.
+namespace ps2_ssx3_vis_native
 {
-    int ssx3VisNativeMode()
-    {
-        static const int mode = []
-        {
-            const char *value = std::getenv("PS2X_SSX3_VIS_NATIVE");
-            // Default on (VNP1P2: exact refactor, 3 det keys IDENTICAL); 0 = the VU0 engine, check = both.
-            int m = 1;
-            if (value != nullptr && std::strcmp(value, "check") == 0)
-                m = 2;
-            else if (value != nullptr && value[0] == '0')
-                m = 0;
-            if (m == 0)
-                return 0;
-            const char *floatMode = std::getenv("PS2X_VU_FLOAT");
-            const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
-            if (!ps2_ssx3_vis_native::available() || pcsx2Float)
-            {
-                std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d)\n",
-                             value, ps2_ssx3_vis_native::available() ? 1 : 0, pcsx2Float ? 1 : 0);
-                return 0;
-            }
-            std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s\n", m == 2 ? "check" : "1");
-            return m;
-        }();
-        return mode;
-    }
+    void exportVu0StateForTest(const VuState &state, R5900Context *ctx);
 }
 
 void ps2_ssx3_vis_native::exportVu0StateForTest(const VuState &state, R5900Context *ctx)
@@ -6273,30 +6247,30 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         return;
     }
 
+    // split-input-1 #3 (Part 2): SSX 3's VU0 visibility tests run in the
+    // game module (default on, PS2X_SSX3_VIS_NATIVE); without it the VU0
+    // engine runs: the exact/reference path. Same order as the moved block:
+    // pc match, knob mode, image match, then serve (mode 1) or the
+    // check-mode snapshot pair around the engine run below.
     bool visCheck = false;
     uint32_t visPc = 0;
-    ps2_ssx3_vis_native::Vu0Snapshot visIn, visNative;
-    if (startPC == ps2_ssx3_vis_native::kStartPc || startPC == ps2_ssx3_vis_native::kStartPc570)
+    const ps2_game_module::Module *visModule = ps2_game_module::installed();
+    const bool visHooked = visModule != nullptr && visModule->visNativeMatchesPc != nullptr &&
+                           visModule->visNativeMode != nullptr && visModule->visNativeImageMatches != nullptr &&
+                           visModule->visNativeRun != nullptr && visModule->visNativeCheckBegin != nullptr &&
+                           visModule->visNativeCheckEnd != nullptr;
+    if (visHooked && visModule->visNativeMatchesPc(startPC))
     {
-        const int visMode = ssx3VisNativeMode();
-        if (visMode != 0 && ps2_ssx3_vis_native::imageMatches(vu0Code, m_memory.getVU0CodeGeneration()))
+        const int visMode = visModule->visNativeMode();
+        if (visMode != 0 && visModule->visNativeImageMatches(vu0Code, m_memory.getVU0CodeGeneration()))
         {
             visPc = startPC;
             if (visMode == 1)
             {
-                if (startPC == ps2_ssx3_vis_native::kStartPc570)
-                    ps2_ssx3_vis_native::runP570(ctx);
-                else
-                    ps2_ssx3_vis_native::runDb8(ctx, vu0Data);
+                visModule->visNativeRun(ctx, vu0Data, startPC);
                 return;
             }
-            visIn = ps2_ssx3_vis_native::snapshot(*ctx);
-            if (startPC == ps2_ssx3_vis_native::kStartPc570)
-                ps2_ssx3_vis_native::runP570(ctx);
-            else
-                ps2_ssx3_vis_native::runDb8(ctx, vu0Data);
-            visNative = ps2_ssx3_vis_native::snapshot(*ctx);
-            ps2_ssx3_vis_native::restore(*ctx, visIn);
+            visModule->visNativeCheckBegin(ctx, vu0Data, startPC);
             visCheck = true;
         }
     }
@@ -6312,7 +6286,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                   startPC, 0u, ctx->vu0_itop, 4096);
     copyVu0StateToContext(m_vu0.state(), ctx);
     if (visCheck)
-        ps2_ssx3_vis_native::noteCheck(visPc, visIn, ps2_ssx3_vis_native::snapshot(*ctx), visNative);
+        visModule->visNativeCheckEnd(ctx, visPc);
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)

@@ -1,11 +1,15 @@
-#ifndef PS2_SSX3_VIS_NATIVE_H
-#define PS2_SSX3_VIS_NATIVE_H
+#ifndef SSX3_VIS_NATIVE_H
+#define SSX3_VIS_NATIVE_H
 
 // VNP1: native port of SSX 3's VU0 visibility test, micro program 0xDB8 of VU0
 // image 40829a098c260b4f (the AABB/frustum test called by the terrain test
 // 0x22A128 and the instance test 0x229FC8), plus the walker's 0x570 (VNP1P2).
 // PS2X_SSX3_VIS_NATIVE unset/1 runs them in host code (default); =check runs
 // both and compares; =0 keeps the VU0 engine (the reference path).
+//
+// split-input-1 #3 (Part 2): moved here from ps2xRuntime (verbatim); the
+// runtime reaches it through the visNative Module hooks below (ABI 9), and
+// the VU0 engine stays the no-module path.
 //
 // Contract: on return, every R5900Context field that executeVU0Microprogram's
 // exact path exports (VF/VI/ACC/Q/P/I/R, MAC/status/clip, TPC/PC, ITOP, VPU
@@ -68,6 +72,18 @@ namespace ps2_ssx3_vis_native
     // check mode: counts calls and mismatches, prints the first mismatches
     // with their inputs and a periodic summary (stderr, "[vnp1]").
     void noteCheck(uint32_t startPc, const Vu0Snapshot &in, const Vu0Snapshot &ref, const Vu0Snapshot &got);
+
+    // Module-hook providers (ABI 9): the VU0-start dispatch the runtime
+    // calls at executeVU0Microprogram. mode() reads PS2X_SSX3_VIS_NATIVE
+    // once (0 = engine, 1 = serve in host code, 2 = both, compared);
+    // matchesPc covers both programs; run serves mode 1; checkBegin runs
+    // the host copy around the engine run (snapshots held module-side),
+    // checkEnd compares and reports.
+    int visNativeMode();
+    bool visNativeMatchesPc(uint32_t startPC);
+    void visNativeRun(R5900Context *ctx, const uint8_t *vu0Data, uint32_t startPC);
+    void visNativeCheckBegin(R5900Context *ctx, const uint8_t *vu0Data, uint32_t startPC);
+    void visNativeCheckEnd(R5900Context *ctx, uint32_t startPC);
 }
 
-#endif
+#endif // SSX3_VIS_NATIVE_H

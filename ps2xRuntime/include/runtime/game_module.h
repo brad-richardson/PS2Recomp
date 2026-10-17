@@ -69,7 +69,8 @@ namespace ps2_game_module
     // 13 (full120 slice 6): the tap-target lists below.
     // 14 (split-input-1 family #5): the input-marker pad-read hook below.
     // 15 (split-input-1 family #7): the widescreen presentation hooks below.
-    inline constexpr uint32_t kAbiVersion = 15u;
+    // 16 (split-input-1 family #3): the VU0 visibility-test provider below.
+    inline constexpr uint32_t kAbiVersion = 16u;
 
     // Tap-target lists (full120 slice 6). The tap bodies (srcTap,
     // fh26TapCall, fh9OnBranch, fh10HistBranch, in4NoteRider) stay generic
@@ -261,6 +262,19 @@ namespace ps2_game_module
         // keeps the game default at both read sites.
         void (*noteWidescreenDispatch)(uint8_t *rdram, uint32_t sourcePc) = nullptr;
         bool (*widescreenAnamorphic)(void) = nullptr;
+        // VU0 visibility-test provider (split-input-1 family #3). Called
+        // at every VU0 start in the same order the runtime ran SSX 3's
+        // 0xDB8/0x570 tests: pc match, knob mode, image match, then serve
+        // (mode 1) or the check-mode pair around the engine run. mode()
+        // reads PS2X_SSX3_VIS_NATIVE once (0 = engine, 1 = host, 2 =
+        // both, compared). Null (or no module) runs the VU0 engine: the
+        // exact/reference path.
+        int (*visNativeMode)(void) = nullptr;
+        bool (*visNativeMatchesPc)(uint32_t startPC) = nullptr;
+        bool (*visNativeImageMatches)(const uint8_t *vu0Code, uint64_t generation) = nullptr;
+        void (*visNativeRun)(R5900Context *ctx, const uint8_t *vu0Data, uint32_t startPC) = nullptr;
+        void (*visNativeCheckBegin)(R5900Context *ctx, const uint8_t *vu0Data, uint32_t startPC) = nullptr;
+        void (*visNativeCheckEnd)(R5900Context *ctx, uint32_t startPC) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

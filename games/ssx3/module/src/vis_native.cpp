@@ -1,5 +1,5 @@
 // VNP1: native port of SSX 3's VU0 visibility test (micro program 0xDB8 of
-// image 40829a098c260b4f). See ps2_ssx3_vis_native.h for the contract.
+// image 40829a098c260b4f). See Ssx3VisNative.h for the contract.
 //
 // The port follows the VU0 engine's own model, not real hardware:
 // - FMAC arithmetic, exact-result classification, value overrides, MAC and
@@ -29,7 +29,7 @@
 //          (MAC sign x, read by FMAND four pairs later) skips to the next
 //          bit; all five non-negative: VI1 = 1, return. No bit left: VI1 = 0.
 
-#include "ps2_ssx3_vis_native.h"
+#include "Ssx3VisNative.h"
 
 #include "ps2_fpmode.h"
 #include "ps2_runtime.h"
@@ -40,6 +40,7 @@
 #include "runtime/third_party/xxhash.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ps2_ssx3_vis_native
@@ -675,5 +676,80 @@ namespace ps2_ssx3_vis_native
                          static_cast<unsigned long long>(results[4]), static_cast<unsigned long long>(callsDb8),
                          static_cast<unsigned long long>(calls570), static_cast<unsigned long long>(mismDb8),
                          static_cast<unsigned long long>(mism570));
+    }
+
+    // split-input-1 #3 (Part 2): the VU0-start dispatch provider. The runtime
+    // calls these at executeVU0Microprogram in the same order the moved block
+    // ran: pc match, knob mode, image match, then serve (mode 1) or the
+    // check-mode snapshot pair around the engine run. Check snapshots live
+    // here (noteCheck already keeps its counters in function statics); the
+    // EE is single-threaded.
+    int visNativeMode()
+    {
+        static const int mode = []
+        {
+            const char *value = std::getenv("PS2X_SSX3_VIS_NATIVE");
+            // Default on (VNP1P2: exact refactor, 3 det keys IDENTICAL); 0 = the VU0 engine, check = both.
+            int m = 1;
+            if (value != nullptr && std::strcmp(value, "check") == 0)
+                m = 2;
+            else if (value != nullptr && value[0] == '0')
+                m = 0;
+            if (m == 0)
+                return 0;
+            const char *floatMode = std::getenv("PS2X_VU_FLOAT");
+            const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
+            if (!available() || pcsx2Float)
+            {
+                std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d)\n",
+                             value, available() ? 1 : 0, pcsx2Float ? 1 : 0);
+                return 0;
+            }
+            std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s\n", m == 2 ? "check" : "1");
+            return m;
+        }();
+        return mode;
+    }
+
+    bool visNativeMatchesPc(uint32_t startPC)
+    {
+        return startPC == kStartPc || startPC == kStartPc570;
+    }
+
+    void visNativeRun(R5900Context *ctx, const uint8_t *vu0Data, uint32_t startPC)
+    {
+        if (startPC == kStartPc570)
+            runP570(ctx);
+        else
+            runDb8(ctx, vu0Data);
+    }
+
+    namespace
+    {
+        struct VisCheckState
+        {
+            Vu0Snapshot in;
+            Vu0Snapshot native;
+        };
+        VisCheckState &visCheckState()
+        {
+            static VisCheckState st;
+            return st;
+        }
+    }
+
+    void visNativeCheckBegin(R5900Context *ctx, const uint8_t *vu0Data, uint32_t startPC)
+    {
+        VisCheckState &st = visCheckState();
+        st.in = snapshot(*ctx);
+        visNativeRun(ctx, vu0Data, startPC);
+        st.native = snapshot(*ctx);
+        restore(*ctx, st.in);
+    }
+
+    void visNativeCheckEnd(R5900Context *ctx, uint32_t startPC)
+    {
+        const VisCheckState &st = visCheckState();
+        noteCheck(startPC, st.in, snapshot(*ctx), st.native);
     }
 }

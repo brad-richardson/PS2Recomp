@@ -17,6 +17,7 @@
 #include "ps2_snd_spike.h"
 #include "Ssx3Widescreen.h"
 #include "Ssx3InputMarker.h"
+#include "Ssx3VisNative.h"
 #include "ssx3_module_internal.h"
 #include "runtime/ps2_savestate.h"
 
@@ -97,7 +98,13 @@ namespace
                                           &ps2_ssx3_fh1::tapTargets(),
                                           &ps2_stubs::notePadRead,
                                           &ps2_ssx3_widescreen::noteWidescreenDispatch,
-                                          &ps2_ssx3_widescreen::widescreenAnamorphic};
+                                          &ps2_ssx3_widescreen::widescreenAnamorphic,
+                                          &ps2_ssx3_vis_native::visNativeMode,
+                                          &ps2_ssx3_vis_native::visNativeMatchesPc,
+                                          &ps2_ssx3_vis_native::imageMatches,
+                                          &ps2_ssx3_vis_native::visNativeRun,
+                                          &ps2_ssx3_vis_native::visNativeCheckBegin,
+                                          &ps2_ssx3_vis_native::visNativeCheckEnd};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

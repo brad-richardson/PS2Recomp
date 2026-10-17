@@ -7,7 +7,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu_state.h"
-#include "../../ps2xRuntime/src/lib/ps2_ssx3_vis_native.h"
+#include "Ssx3VisNative.h"
 #include "ps2_fpmode.h"
 
 #include <cstdint>

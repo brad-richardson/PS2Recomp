@@ -14,6 +14,7 @@
 #include "ps2_snd_spike.h"
 #include "Ssx3Widescreen.h"
 #include "Ssx3InputMarker.h"
+#include "Ssx3VisNative.h"
 #include "ps2_ssx3_anim_pick_guard.h"
 #include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_menu.h"
@@ -102,7 +103,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky-layer tick hook points at the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family #7: ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family #3: ABI 16
             t.IsTrue(m.trickyLayerTick == &ps2_tricky_layer::tickHook, "tick hook");
             // The forward matches the inline reducer on the early-out path
             // (layer off / null / empty): no state, no crash.
@@ -154,7 +155,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family #7: ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family #3: ABI 16
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -174,15 +175,15 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family #7: ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family #3: ABI 16
             t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
             t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
             t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
         });
-        tc.Run("the input path + widescreen default point at the moved rows and hooks (ABI 9)", [](TestCase &t)
+        tc.Run("the input path + widescreen default point at the moved rows and hooks (ABI 10)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family #7: ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family #3: ABI 16
             t.IsTrue(m.notePadRead == &ps2_stubs::notePadRead, "pad-read tap");
             t.IsTrue(m.overrides[7].apply == &ps2_ssx3_input2::applyInput2, "input2 row");
             t.IsTrue(m.overrides[8].apply == &ps2_stubs::lim1Apply, "input-marker row");
@@ -193,10 +194,24 @@ void register_ps2_ssx3_module_tests()
             t.IsTrue(m.overrides[9].apply == &ps2_ssx3_widescreen::applySsx3Widescreen,
                      "widescreen row");
         });
+        tc.Run("the VU0 visibility tests point at the moved provider (ABI 10)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family #3: ABI 16
+            t.IsTrue(m.visNativeMode == &ps2_ssx3_vis_native::visNativeMode, "knob mode");
+            t.IsTrue(m.visNativeMatchesPc == &ps2_ssx3_vis_native::visNativeMatchesPc, "pc match");
+            t.IsTrue(m.visNativeImageMatches == &ps2_ssx3_vis_native::imageMatches, "image match");
+            t.IsTrue(m.visNativeRun == &ps2_ssx3_vis_native::visNativeRun, "serve");
+            t.IsTrue(m.visNativeCheckBegin == &ps2_ssx3_vis_native::visNativeCheckBegin, "check begin");
+            t.IsTrue(m.visNativeCheckEnd == &ps2_ssx3_vis_native::visNativeCheckEnd, "check end");
+            t.IsTrue(ps2_ssx3_vis_native::visNativeMatchesPc(0xDB8u), "0xDB8 matches");
+            t.IsTrue(ps2_ssx3_vis_native::visNativeMatchesPc(0x570u), "0x570 matches");
+            t.IsTrue(!ps2_ssx3_vis_native::visNativeMatchesPc(0x1000u), "other PCs pass through");
+        });
         tc.Run("the TK34 patch-grow providers point at the module (ABI 6)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family #7: ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family #3: ABI 16
             t.IsTrue(m.patchGrowSave == &ps2_tricky_state::patchGrowSave, "save");
             t.IsTrue(m.patchGrowValidate == &ps2_tricky_state::patchGrowValidate, "validate");
             t.IsTrue(m.patchGrowLoad == &ps2_tricky_state::patchGrowLoad, "load");
@@ -211,7 +226,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the FIX-policy content is published by the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family : ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family : ABI 16
             t.IsTrue(m.fh1FixPolicy != nullptr, "policy published");
             t.IsTrue(m.fh1FixPolicy == &ps2_ssx3_fh1::fixPolicy(), "policy is the moved table");
             const ps2_game_module::Fh1FixPolicy &p = *m.fh1FixPolicy;
@@ -228,7 +243,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the clock policy is published by the module (ABI 8)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family : ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family : ABI 16
             t.IsTrue(m.fh1SchedDivisor == &ps2_ssx3_fh1::schedDivisor, "schedDivisor");
             t.IsTrue(m.fh1VblankDivisor == &ps2_ssx3_fh1::vblankDivisor, "vblankDivisor");
             t.IsTrue(m.fh1EeClockShiftNow == &ps2_ssx3_fh1::eeClockShiftNow, "eeClockShiftNow");
@@ -250,7 +265,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the dispatch cold side is published by the module (ABI 10)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family : ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family : ABI 16
             t.IsTrue(m.fh1BuildHookInterest == &ps2_ssx3_fh1::buildHookInterest, "table builder");
             // End to end through the runtime wrapper: FIX=all lists the
             // census PCs and misses a bogus pair.
@@ -267,20 +282,20 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the dispatch hot side is published by the module (ABI 11)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family : ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family : ABI 16
             t.IsTrue(m.fh1OnBranch == &ps2_ssx3_fh1::onBranch, "chain body");
         });
         tc.Run("the post-call consume side is published by the module (ABI 12)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi"); // split-input-1 family : ABI 15
+            t.Equals(m.abiVersion, 16u, "abi"); // split-input-1 family : ABI 16
             t.IsTrue(m.fh1OnReturn == &ps2_ssx3_fh1::onReturn, "post-call fixups");
             t.IsTrue(m.fh1PostUnwind == &ps2_ssx3_fh1::postUnwindRestore, "unwind restore");
         });
         tc.Run("the tap-target lists are published by the module (ABI 13)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 15u, "abi");
+            t.Equals(m.abiVersion, 16u, "abi");
             t.IsTrue(m.fh1TapTargets == &ps2_ssx3_fh1::tapTargets(), "tap targets");
             const ps2_game_module::Fh1TapTargets &tt = ps2_ssx3_fh1::tapTargets();
             t.Equals(tt.stickTracker, 0x133308u, "stick tracker");
