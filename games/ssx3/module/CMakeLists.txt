@@ -11,6 +11,7 @@ add_library(ssx3_game_module STATIC
     src/tricky_savestate.cpp
     src/movie.cpp
     src/tricky_menu.cpp
+    src/stock_meter.cpp
 )
 target_include_directories(ssx3_game_module
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
