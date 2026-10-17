@@ -975,6 +975,71 @@ inline bool onlineStock60() noexcept
     return ps2_net::lockstepLinkActive() && !netLockstep120();
 }
 
+// online-stock-2: the guest's online race is lockstep per app update. The
+// update at 0x2306b8 calls the gate 0x237950 (at 0x230b64, a0 = input
+// object [app+0x7c]): NetGame state [ng+0x70] >= 14, no hold ([ng+0x3f8]
+// == 0, [ng+0x3fc] <= 0) and an unread input in every player's queue
+// (records at in+0x14, stride 0x18, read +4 / write +8, count in+0x10).
+// A closed gate skips the session machine and the rider pass for that
+// update; an open one consumes one input per player (0x2379c8). The
+// stock-cadence parity (parityHook) counts app updates, so stalled updates
+// shift it, and the two peers, which stall at different wall moments,
+// apply their odd-update conversions to different lockstep frames. With
+// LS120 sync the parity steps on open gates only, from the first open gate
+// on both peers.
+inline constexpr uint32_t kLsGateSite = 0x230b64u, kLsGate = 0x237950u;
+inline constexpr uint32_t kNetGamePtr = 0x4a30f0u - 0x204u; // gp-0x204
+
+inline bool netLs120Sync() noexcept
+{
+    static const bool on = netLockstep120() && [] {
+        const char *e = std::getenv("PS2X_NET_LS120_SYNC");
+        return !(e && std::strcmp(e, "0") == 0);
+    }();
+    return on;
+}
+
+inline bool netLs120Trace() noexcept
+{
+    static const bool on = [] {
+        const char *e = std::getenv("PS2X_NET_LS120_TRACE");
+        return e && *e && std::strcmp(e, "0") != 0;
+    }();
+    return on;
+}
+
+inline bool g_lsSeen = false, g_lsStarted = false;
+inline uint32_t g_lsFrames = 0u;
+inline uint64_t g_lsStallFrom = 0u;
+inline uint32_t g_lsStallWhy = 0u, g_lsStallN = 0u;
+
+// The gate's answer from RAM, as 0x237950 computes it (0 = open, else the
+// first closed reason: 1 state, 2 hold 0x3f8, 3 hold 0x3fc, 4+i queue i).
+inline uint32_t lsGateWhy(const uint8_t *ram, uint32_t in) noexcept
+{
+    uint32_t ng = 0u, st = 0u, h0 = 0u, h1 = 0u, n = 0u;
+    if (!rd32(ram, kNetGamePtr, ng) || !rd32(ram, ng + 0x70u, st) || static_cast<int32_t>(st) < 14)
+        return 1u;
+    if (!rd32(ram, ng + 0x3f8u, h0) || h0 != 0u)
+        return 2u;
+    if (!rd32(ram, ng + 0x3fcu, h1) || static_cast<int32_t>(h1) > 0)
+        return 3u;
+    if (!rd32(ram, in + 0x10u, n) || static_cast<int32_t>(n) <= 0)
+        return 0u;
+    for (uint32_t i = 0u; i < n && i < 8u; ++i)
+    {
+        uint32_t r = 0u, w = 0u;
+        const uint32_t rec = in + 0x14u + 0x18u * i;
+        if (!rd32(ram, rec + 4u, r) || !rd32(ram, rec + 8u, w) || r == w)
+            return 4u + i;
+    }
+    return 0u;
+}
+
+inline void parityStep(uint8_t *ram);
+inline void lsGateHook(uint8_t *ram, R5900Context *ctx);
+inline void lsTraceRaceTick(uint8_t *ram, R5900Context *ctx);
+
 inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     if (targetPc == kTrickPass && sourcePc == kTrickPassSite && ctx && bonusFlipFix())
@@ -987,8 +1052,14 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
         if (rd32(ram, getRegU32(ctx, 4) + 0xde0u, sel) && sel != 0u)
             g_anyAir = true;
     }
+    else if (sourcePc == kLsGateSite && targetPc == kLsGate && ctx)
+        lsGateHook(ram, ctx);
     else if (sourcePc == kRaceTickCallSite && targetPc == kRaceTickCallee)
+    {
         g_passRan = true;
+        if (netLs120Trace() && ctx)
+            lsTraceRaceTick(ram, ctx);
+    }
     else if (sourcePc == kRaceTick2CallSite && targetPc == kRaceTick2Callee)
     {
         g_clockRan = true;
@@ -1255,6 +1326,15 @@ inline void parityHook(uint8_t *ram, uint32_t sourcePc)
 {
     if (sourcePc != kAppUpdateSite)
         return;
+    if (!ps2_net::lockstepLinkActive())
+        g_lsSeen = g_lsStarted = false;
+    else if (g_lsSeen && netLs120Sync())
+        return; // lockstep race: lsGateHook steps on open gates
+    parityStep(ram);
+}
+
+inline void parityStep(uint8_t *ram)
+{
     g_rngOdd = (g_rngUpdates++ & 1u) != 0u;
     // INP3: keep the coupled nonlinear directional recurrence at stock
     // cadence. Only its seven private pool words change; grabs, physics and
@@ -3592,6 +3672,90 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
             else
                 n += std::snprintf(line + n, sizeof(line) - n, "%s%08x", j ? "," : "", w);
         }
+    }
+    std::fprintf(stderr, "%s\n", line);
+}
+
+// online-stock-2 (see kLsGateSite): runs at every gate call while a 120
+// lockstep link is up. The first open gate resets the per-call parities on
+// both peers (the session machine and the rider pass have not run in this
+// update yet); each open gate then steps the stock-cadence parity once.
+inline void lsGateHook(uint8_t *ram, R5900Context *ctx)
+{
+    if (!ps2_net::lockstepLinkActive() || !netLockstep120())
+        return;
+    g_lsSeen = true;
+    const uint32_t why = lsGateWhy(ram, getRegU32(ctx, 4));
+    if (netLs120Trace())
+    {
+        if (why != 0u)
+        {
+            if (g_lsStallN++ == 0u)
+            {
+                g_lsStallFrom = g_lastTick;
+                g_lsStallWhy = why;
+            }
+        }
+        else if (g_lsStallN != 0u)
+        {
+            std::fprintf(stderr, "[ls] stall t=%llu..%llu n=%u why=%u at=%u\n",
+                         static_cast<unsigned long long>(g_lsStallFrom),
+                         static_cast<unsigned long long>(g_lastTick), g_lsStallN, g_lsStallWhy, g_lsFrames);
+            g_lsStallN = 0u;
+        }
+    }
+    if (why != 0u)
+        return;
+    const bool parity = rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
+                        pidFix() || c2capFix() || input2Fix() || inputChainFix();
+    if (netLs120Sync() && hooksOn())
+    {
+        if (!g_lsStarted)
+        {
+            g_lsStarted = true;
+            g_raceTickCalls = g_raceTick2Calls = g_sessionCalls = 0u;
+            g_rngUpdates = 0u;
+            g_rngOdd = false;
+            g_lcgHeld = false;
+            std::fprintf(stderr, "[ls] start t=%llu parity=%d\n", static_cast<unsigned long long>(g_lastTick),
+                         parity ? 1 : 0);
+        }
+        if (parity)
+            parityStep(ram);
+    }
+    ++g_lsFrames;
+}
+
+// Diagnostic (PS2X_NET_LS120_TRACE=1): one line per rider pass while the
+// lockstep link is up: open-gate count, parities, race ticks and an FNV-1a
+// over each player rider's position, rotation and velocity (R+0x110,
+// R+0x120, R+0x1e0; riders [race+0x40+4i]+0x18, count [race+0x7c]).
+inline void lsTraceRaceTick(uint8_t *ram, R5900Context *ctx)
+{
+    if (!ps2_net::lockstepLinkActive())
+        return;
+    const uint32_t race = getRegU32(ctx, 19);
+    uint32_t n = 0u, rt = 0u, rt2 = 0u;
+    rd32(ram, race + 0x7cu, n);
+    rd32(ram, race + 0x8u, rt);
+    rd32(ram, race + 0xcu, rt2);
+    char line[256];
+    int k = std::snprintf(line, sizeof(line), "[ls] pass f=%u t=%llu odd=%d u=%u rc=%u sc=%u rt=%u rt2=%u",
+                          g_lsFrames, static_cast<unsigned long long>(g_lastTick), g_rngOdd ? 1 : 0, g_rngUpdates,
+                          g_raceTickCalls, g_sessionCalls, rt, rt2);
+    for (uint32_t i = 0u; i < n && i < 4u && k < static_cast<int>(sizeof(line)) - 16; ++i)
+    {
+        uint32_t p = 0u, r = 0u, h = 2166136261u;
+        if (!rd32(ram, race + 0x40u + 4u * i, p) || !p || !rd32(ram, p + 0x18u, r) || !r)
+            continue;
+        for (uint32_t off : {0x110u, 0x114u, 0x118u, 0x120u, 0x124u, 0x128u, 0x12cu, 0x1e0u, 0x1e4u, 0x1e8u})
+        {
+            uint32_t w = 0u;
+            rd32(ram, r + off, w);
+            for (int b = 0; b < 4; ++b)
+                h = (h ^ ((w >> (8 * b)) & 0xffu)) * 16777619u;
+        }
+        k += std::snprintf(line + k, sizeof(line) - k, " h%u=%08x", i, h);
     }
     std::fprintf(stderr, "%s\n", line);
 }

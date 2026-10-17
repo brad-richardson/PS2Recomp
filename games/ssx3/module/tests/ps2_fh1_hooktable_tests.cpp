@@ -187,6 +187,7 @@ void register_ps2_fh1_hooktable_tests()
             };
             // Events facts / entry-exit (eventsOnBranch).
             srcOnly(kAppUpdateSite);
+            srcOnly(kLsGateSite); // online-stock-2 lockstep gate
             pair(kRaceTickCallSite, kRaceTickCallee);
             pair(kRaceTick2CallSite, kRaceTick2Callee);
             tgtOnly(kSelectorDispatch);

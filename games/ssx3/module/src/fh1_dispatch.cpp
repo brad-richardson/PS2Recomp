@@ -33,6 +33,7 @@ void buildHookInterest(const ps2_fh1::HookConfig *cfg, ps2_fh1::HookInterest *ou
         addSrc(kRaceTickCallSite);
         addSrc(kRaceTick2CallSite);
         addSrc(kAppUpdateSite);
+        addSrc(kLsGateSite); // online-stock-2: lockstep gate (no-op without a 120 link)
         addTgt(kSelectorDispatch);
         addTgt(kRaceTickCallee);
         addTgt(kRaceTick2Callee);
