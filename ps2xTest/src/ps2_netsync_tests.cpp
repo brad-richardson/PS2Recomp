@@ -275,6 +275,31 @@ namespace
             t.IsFalse(stateStale(start, start, start + 100u, timeout), "clock never runs backwards");
         });
 
+        tc.Run("online-stock-2: fresh STATE holds the stock peer-silence count", [](TestCase &t)
+        {
+            using ps2_net_stock120::holdPeerSilence;
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            constexpr uint32_t ng = 0x2000u;
+            const uint64_t timeout = 3000000u, start = 10000000u;
+            ps2_fh1::wr32(ram.data(), ng + 0x5cu, 900u);
+            t.IsFalse(holdPeerSilence(ram.data(), start + 1000000u, start, start + 500000u, timeout),
+                      "no NetGame: untouched");
+            ps2_fh1::wr32(ram.data(), ps2_fh1::kNetGamePtr, ng);
+            t.IsFalse(holdPeerSilence(ram.data(), start + 1000000u, start, 0u, timeout),
+                      "no STATE since the race start: stock count runs");
+            t.IsFalse(holdPeerSilence(ram.data(), start + 9000000u, start, start + 5000000u, timeout),
+                      "stale STATE: stock count runs");
+            uint32_t n = 0u;
+            ps2_fh1::rd32(ram.data(), ng + 0x5cu, n);
+            t.Equals(n, 900u, "count untouched while STATE is missing");
+            t.IsTrue(holdPeerSilence(ram.data(), start + 6000000u, start, start + 5000000u, timeout),
+                     "fresh STATE clears the count");
+            ps2_fh1::rd32(ram.data(), ng + 0x5cu, n);
+            t.Equals(n, 0u, "count cleared");
+            t.IsFalse(holdPeerSilence(ram.data(), start + 6000000u, start, start + 5000000u, timeout),
+                      "already zero: no write");
+        });
+
         tc.Run("online-stock-2: R4 STATE ring is tick-ordered within a race epoch", [](TestCase &t)
         {
             using ps2_net_stock120::ringInsert;

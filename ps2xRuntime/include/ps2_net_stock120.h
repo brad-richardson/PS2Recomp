@@ -233,6 +233,28 @@ inline bool stateStale(uint64_t now, uint64_t raceStartUs, uint64_t lastValidUs,
     return now > base && now - base > timeoutUs;
 }
 
+// Peer-silence counter (pause leg p2). The NetGame pump (0x257b6c) counts
+// updates without a peer message in [ng+0x5c] unless the peer paused
+// ([ng+0x78], set by a stock code-0 pause); at 1800 it sets [ng+0x2c]
+// (peer lost). A local-only pause (no code 0) stops the paused side's
+// inputs, so the other side's count reached 1800 after 15 s at 120 and
+// both sides showed the disconnect dialog. While racing, fresh peer STATE
+// (it keeps flowing through a pause) clears the count, so STATE health
+// alone decides the link (R3). Pure (unit-tested): true when it cleared.
+constexpr uint32_t kNgSilenceOff = 0x5cu;
+
+inline bool holdPeerSilence(uint8_t *ram, uint64_t now, uint64_t raceStartUs, uint64_t lastValidUs,
+                            uint64_t timeoutUs)
+{
+    if (lastValidUs <= raceStartUs || stateStale(now, raceStartUs, lastValidUs, timeoutUs))
+        return false;
+    uint32_t ng = 0u, n = 0u;
+    if (!ps2_fh1::rd32(ram, ps2_fh1::kNetGamePtr, ng) || ng == 0u || !ps2_fh1::rd32(ram, ng + kNgSilenceOff, n) ||
+        n == 0u)
+        return false;
+    return ps2_fh1::wr32(ram, ng + kNgSilenceOff, 0u);
+}
+
 struct State
 {
     bool racing = false;
@@ -249,6 +271,7 @@ struct State
     uint8_t localEpoch = 0u;
     RingEpoch peerEpoch;
     uint64_t raceStartUs = 0u, lastValidUs = 0u;
+    uint64_t silenceHolds = 0u;
     bool raceOver = false, forcedDown = false;
     bool peerFin = false, peerFinApplied = false;
     float peerFtime = -1.0f;
@@ -285,13 +308,13 @@ inline void logLine(const char *what, uint64_t tick)
     State &s = state();
     std::fprintf(stderr,
                  "[stock120] %s t=%llu race=%llu sent=%llu recvd=%llu bad=%llu shows=%llu ring=%zu alive=%d "
-                 "err_mean=%.1f err_max=%.1f lag_mean=%.1f fed=%llu trim=%llu ck=%llu ckfix=%llu\n",
+                 "err_mean=%.1f err_max=%.1f lag_mean=%.1f fed=%llu trim=%llu ck=%llu ckfix=%llu holds=%llu\n",
                  what, (unsigned long long)tick, (unsigned long long)(s.racing ? tick - s.t0 : 0u),
                  (unsigned long long)s.sent, (unsigned long long)s.recvd, (unsigned long long)s.bad,
                  (unsigned long long)s.shows, s.ring.size(), s.alive ? 1 : 0, s.errN ? s.errSum / double(s.errN) : 0.0,
                  s.errMax, s.shows ? double(s.lagSum) / double(s.shows) : 0.0,
                  (unsigned long long)ps2_fh1::g_s120Fed, (unsigned long long)ps2_fh1::g_s120Trim,
-                 (unsigned long long)ps2_fh1::g_s120Ck, (unsigned long long)ps2_fh1::g_s120CkFixed);
+                 (unsigned long long)ps2_fh1::g_s120Ck, (unsigned long long)ps2_fh1::g_s120CkFixed, (unsigned long long)s.silenceHolds);
 }
 
 // Once per guest vsync tick (game thread).
@@ -430,6 +453,8 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
         ps2_net::forceLinkDown();
         logLine("STATE lost: stock disconnect", tick);
     }
+    if (!s.raceOver && holdPeerSilence(r, now, s.raceStartUs, s.lastValidUs, kTimeoutUs))
+        ++s.silenceHolds;
     if (!s.mapped && !s.ring.empty())
     {
         s.mapped = true;
