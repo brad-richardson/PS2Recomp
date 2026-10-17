@@ -320,7 +320,8 @@ void register_ps2_ssx3_tricky_list_tests()
             navStart(n, g.goal, 2, 0);
             uint64_t tick = 0;
             uint16_t lastOut = 0;
-            for (int i = 0; i < 600 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            // Part 2: 4 Cross accepts x 150-tick blind already fill the old cap.
+            for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, g.view(), tick, true, true);
                 // A press that just finished takes effect in the guest.
@@ -719,7 +720,9 @@ void register_ps2_ssx3_tricky_list_tests()
             // P5: the reset-aware fallback spends ~2 extra presses per
             // back-out cycle (accept-first); the product bounds (tries cap,
             // press budget) are unchanged, so only this harness cap grows.
-            for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            // Part 2: each Cross accept blinds 150 ticks (slow transitions),
+            // so the instant guest needs ~6 accepts' worth of headroom.
+            for (int i = 0; i < 3000 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, view(), tick, false, false);
                 if (lastOut != 0 && o.mask == 0)
@@ -772,7 +775,8 @@ void register_ps2_ssx3_tricky_list_tests()
                 else if (mask == kPadTriangle && screen > 0)
                     --screen;
             };
-            for (int i = 0; i < 1200 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            // Part 2: the 150-tick accept blind needs headroom (4 accepts here).
+            for (int i = 0; i < 2400 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, view(), tick, false, true);
                 if (lastOut != 0 && o.mask == 0)
