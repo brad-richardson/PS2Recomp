@@ -4,6 +4,7 @@
 #include "Ssx3StockMeter.h"
 #include "Ssx3Fh1Clock.h"
 #include "Ssx3Fh1FixContent.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_fh1_fix.h"
 #include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
