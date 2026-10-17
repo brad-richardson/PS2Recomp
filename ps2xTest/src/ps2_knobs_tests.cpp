@@ -133,7 +133,6 @@ void register_ps2_knobs_tests()
             t.Equals(std::string(::getenv("PS2X_MTVU_FINISH_EE")), std::string("1"), "CFG1 D4: probe-drain EE defaulted");
             t.Equals(std::string(::getenv("PS2X_MTVU_VIF1_STAT_FREE")), std::string("1"), "CFG1 D4: probe-drain STAT defaulted");
             t.Equals(std::string(::getenv("PS2X_AUDIO_DC_BLOCK")), std::string("1"), "AU19: DC block defaulted on");
-            t.IsTrue(::getenv("GE1_VERTEX_KICK") == nullptr, "CFG1: dead VERTEX_KICK no longer defaulted");
         });
 
         tc.Run("reference profile disables every default", [](TestCase &t)
@@ -324,7 +323,6 @@ void register_ps2_knobs_tests()
             g.track("PS2X_UNPACED");
             g.track("PS2X_DETERMINISTIC");
             g.track("PS2X_DET_HASH_EVERY");
-            g.track("GE1_VERTEX_KICK");
             g.track("PS2X_PAD_RECORD_DIR");
             clearDefaults();
             ps2x::cf2ApplyAndroidDefaults("/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72");
@@ -335,9 +333,7 @@ void register_ps2_knobs_tests()
             ::setenv("PS2X_UNPACED", "1", 1);
             ::setenv("PS2X_DETERMINISTIC", "1", 1);
             ::setenv("PS2X_DET_HASH_EVERY", "5", 1);
-            // PB5/6 play-env lines past P3 (explicit: not compiled defaults;
-            // CFG1: VERTEX_KICK is compiled nowhere, kept here as a stale-env line).
-            ::setenv("GE1_VERTEX_KICK", "2", 1);
+            // PB5/6 play-env lines past P3 (explicit: not compiled defaults).
             ::setenv("PS2X_PAD_RECORD_DIR",
                      "/storage/emulated/0/Android/data/com.ps2x.runner/files/padrec", 1);
             const std::string line = ps2x::cf2BuildKnobsLine();
