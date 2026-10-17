@@ -125,8 +125,8 @@ inline constexpr uint32_t kPreviewsIndex = 1255u;
 inline constexpr uint32_t kDonorIndex = 941u;            // "No dial tone is detected..." (dial-up only)
 inline constexpr uint32_t kKeyPreviewsHelp = 0x05C9A824u; // FEAMER, index 672
 inline constexpr uint32_t kPreviewsHelpIndex = 672u;
-inline constexpr const char *kLabel = "Tricky Courses";
-inline constexpr const char *kHelp = "Ride the courses of SSX Tricky.";
+inline constexpr const char *kLabel = "Tricky Courses (Alpha)";
+inline constexpr const char *kHelp = "Alpha: SSX Tricky courses, WIP.";
 
 inline uint32_t rd32(const uint8_t *ram, uint32_t a)
 {

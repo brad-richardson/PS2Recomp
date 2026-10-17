@@ -7889,7 +7889,12 @@ void PS2Runtime::run()
     if (tkShotPrefix && !tkShotPrefix[0])
         tkShotPrefix = nullptr;
     if (tkListOn)
-        std::fprintf(stderr, "[tklist] overlay on (PS2X_SSX3_TRICKY_LIST=1)\n");
+    {
+        const char *tkListEnv = std::getenv("PS2X_SSX3_TRICKY_LIST");
+        const char *tkMenuEnv = std::getenv("PS2X_SSX3_TRICKY_MENU");
+        std::fprintf(stderr, "[tklist] overlay on (LIST=%s MENU=%s)\n", tkListEnv ? tkListEnv : "unset",
+                     tkMenuEnv ? tkMenuEnv : "unset");
+    }
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
     // load + one clock per host frame; the line draws only when perf is on).
     auto set2PerfWinStart = std::chrono::steady_clock::now();

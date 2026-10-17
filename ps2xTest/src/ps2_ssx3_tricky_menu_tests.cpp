@@ -155,7 +155,7 @@ void register_ps2_ssx3_tricky_menu_tests()
             const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyPreviews);
             t.Equals(ps2_ssx3_tricky::rd32(ram.data(), e + 4), kDonorIndex, "Previews now reads the donor index");
             t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kDonorIndex)),
-                     std::string("Tricky Courses"), "label text");
+                     std::string("Tricky Courses (Alpha)"), "label text");
             t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kPreviewsIndex)),
                      std::string("Previews"), "the Previews string itself is untouched");
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "second call: already patched"); });
@@ -173,7 +173,7 @@ void register_ps2_ssx3_tricky_menu_tests()
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 1, msg.c_str());
             const uint32_t donor = locString(ram.data(), base, kCmnAmer, kDonorIndex);
             t.Equals(ps2_ssx3_tricky::rd32(ram.data(), e + 4), donor, "entry now holds the donor's address");
-            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, donor), std::string("Tricky Courses"), "label");
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, donor), std::string("Tricky Courses (Alpha)"), "label");
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "idempotent");
             const uint32_t fb = 0xC00000;
             buildLoc(ram, fb, kFeAmer, {{kKeyPreviewsHelp, kPreviewsHelpIndex}},

@@ -25,13 +25,17 @@
 namespace ps2_ssx3_tricky_list
 {
 
-// The LIST knob (default off; also requires the MENU knob armed with Tricky
-// mode on). Cached: knobs never change mid-run.
+// The LIST knob (lane override, default off) or the MENU knob (release path:
+// the RC ships TRICKY_MENU=1 with no LIST row, and the overlay never armed).
+// Cached: knobs never change mid-run.
 inline bool knob()
 {
     static const bool on = [] {
         const char *v = std::getenv("PS2X_SSX3_TRICKY_LIST");
-        return v && std::strcmp(v, "1") == 0;
+        if (v && std::strcmp(v, "1") == 0)
+            return true;
+        const char *m = std::getenv("PS2X_SSX3_TRICKY_MENU");
+        return m && std::strcmp(m, "1") == 0;
     }();
     return on;
 }
