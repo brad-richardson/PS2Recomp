@@ -960,13 +960,27 @@ inline void replayRateHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
         forget(g_rpl, input);
 }
 
-// ONL6: online v0 uses stock lockstep. The post-v0 experiment is opt-in.
-inline bool netLockstep120() noexcept
+// online-stock-2: the stock online race at 120 with state sync
+// (PS2X_NET_STOCK120=1): the gate never stalls on a missing peer input once
+// racing, the peer rider follows its STATE stream, the checksum verdict is
+// neutralized (see stock120GateFeed / stock120CkHook, ps2_net_stock120.h).
+inline bool netStock120() noexcept
 {
     static const bool on = eventsMode() && [] {
-        const char *e = std::getenv("PS2X_NET_LOCKSTEP120");
+        const char *e = std::getenv("PS2X_NET_STOCK120");
         return e && *e && std::strcmp(e, "0") != 0;
     }();
+    return on;
+}
+
+// ONL6: online v0 uses stock lockstep. The post-v0 experiment is opt-in;
+// the stock-race state sync holds 120 while linked too.
+inline bool netLockstep120() noexcept
+{
+    static const bool on = eventsMode() && ([] {
+        const char *e = std::getenv("PS2X_NET_LOCKSTEP120");
+        return e && *e && std::strcmp(e, "0") != 0;
+    }() || netStock120());
     return on;
 }
 
@@ -979,25 +993,25 @@ inline bool onlineStock60() noexcept
 // update at 0x2306b8 calls the gate 0x237950 (at 0x230b64, a0 = input
 // object [app+0x7c]): NetGame state [ng+0x70] >= 14, no hold ([ng+0x3f8]
 // == 0, [ng+0x3fc] <= 0) and an unread input in every player's queue
-// (records at in+0x14, stride 0x18, read +4 / write +8, count in+0x10).
-// A closed gate skips the session machine and the rider pass for that
-// update; an open one consumes one input per player (0x2379c8). The
-// stock-cadence parity (parityHook) counts app updates, so stalled updates
-// shift it, and the two peers, which stall at different wall moments,
-// apply their odd-update conversions to different lockstep frames. With
-// LS120 sync the parity steps on open gates only, from the first open gate
-// on both peers.
+// (records at in+0x14, stride 0x18: buffer +0, read +4, write +8, local
+// pad +0xc (0 = remote), count in+0x10; ring size in+4, 100-byte entries,
+// N = in+8 frames per input message). A closed gate skips the session
+// machine and the rider pass for that update; an open one consumes one
+// input per player (0x2379c8). The queues are filled by 0x2373b8 before
+// the gate: the local record samples, sends and pushes N copies every N
+// updates; the remote record pushes N copies per received message.
 inline constexpr uint32_t kLsGateSite = 0x230b64u, kLsGate = 0x237950u;
 inline constexpr uint32_t kNetGamePtr = 0x4a30f0u - 0x204u; // gp-0x204
-
-inline bool netLs120Sync() noexcept
-{
-    static const bool on = netLockstep120() && [] {
-        const char *e = std::getenv("PS2X_NET_LS120_SYNC");
-        return !(e && std::strcmp(e, "0") == 0);
-    }();
-    return on;
-}
+// Race object: [[[0x4a28a8]+0x84]+0xc] (netsync chain B): +4 current race
+// state (0x113c20: 4 countdown, 5 racing, 6 finished), +0xc race clock.
+inline constexpr uint32_t kRaceRootPtr = 0x4a30f0u - 0x848u; // gp-0x848
+// Checksum verdict: sub_00258F20(ng, frame, hash), single caller 0x12bdf4,
+// stores the local hash at ng+0x410[(frame/60)%60], sends NetGame type-3
+// code 4 {frame, hash} every other call, then compares the local and peer
+// (ng+0x500[...], stored on receipt by sub_00257F98's code-4 case at
+// 0x2580f0) tables at min(local, peer latest frame) and sets the desync
+// flag [ng+0xc] = 1 at 0x25907c on a mismatch.
+inline constexpr uint32_t kCkSite = 0x12bdf4u, kCkFn = 0x258f20u;
 
 inline bool netLs120Trace() noexcept
 {
@@ -1008,10 +1022,11 @@ inline bool netLs120Trace() noexcept
     return on;
 }
 
-inline bool g_lsSeen = false, g_lsStarted = false;
 inline uint32_t g_lsFrames = 0u;
 inline uint64_t g_lsStallFrom = 0u;
 inline uint32_t g_lsStallWhy = 0u, g_lsStallN = 0u;
+inline uint64_t g_s120Fed = 0u, g_s120Trim = 0u, g_s120Ck = 0u, g_s120CkFixed = 0u;
+inline int32_t g_s120State = -1;
 
 // The gate's answer from RAM, as 0x237950 computes it (0 = open, else the
 // first closed reason: 1 state, 2 hold 0x3f8, 3 hold 0x3fc, 4+i queue i).
@@ -1036,6 +1051,80 @@ inline uint32_t lsGateWhy(const uint8_t *ram, uint32_t in) noexcept
     return 0u;
 }
 
+// The race-state machine's current state, or -1 when the chain is not live.
+inline int32_t raceState(const uint8_t *ram) noexcept
+{
+    uint32_t g = 0u, a = 0u, b = 0u, st = 0u;
+    if (!rd32(ram, kRaceRootPtr, g) || !g || !rd32(ram, g + 0x84u, a) || !a || !rd32(ram, a + 0xcu, b) || !b ||
+        !rd32(ram, b + 4u, st))
+        return -1;
+    return static_cast<int32_t>(st);
+}
+
+// Never-wait feed (racing only): an empty queue gets its last pushed entry
+// again (held input); the remote queue keeps at most 2N unread entries.
+// Returns the number of entries written.
+inline uint32_t stock120GateFeed(uint8_t *ram, uint32_t in) noexcept
+{
+    uint32_t n = 0u, size = 0u, per = 0u;
+    if (!rd32(ram, in + 0x10u, n) || !rd32(ram, in + 4u, size) || !rd32(ram, in + 8u, per) || n == 0u || n > 8u ||
+        size == 0u || size > 4096u)
+        return 0u;
+    const uint32_t keep = per > 1u && per < size / 2u ? 2u * per : 2u;
+    uint32_t fed = 0u;
+    for (uint32_t i = 0u; i < n; ++i)
+    {
+        const uint32_t rec = in + 0x14u + 0x18u * i;
+        uint32_t base = 0u, r = 0u, w = 0u, local = 0u;
+        if (!rd32(ram, rec, base) || !rd32(ram, rec + 4u, r) || !rd32(ram, rec + 8u, w) || !rd32(ram, rec + 0xcu, local))
+            continue;
+        if (local == 0u && w - r > keep && w - r <= size)
+        {
+            wr32(ram, rec + 4u, w - keep);
+            ++g_s120Trim;
+        }
+        if (r != w || w == 0u)
+            continue;
+        const uint32_t src = base + ((w - 1u) % size) * 100u, dst = base + (w % size) * 100u;
+        for (uint32_t k = 0u; k < 100u; k += 4u)
+        {
+            uint32_t v = 0u;
+            rd32(ram, src + k, v);
+            wr32(ram, dst + k, v);
+        }
+        wr32(ram, rec + 8u, w + 1u);
+        ++fed;
+    }
+    g_s120Fed += fed;
+    return fed;
+}
+
+// Checksum neutralizer (pre-hook at 0x12bdf4 -> 0x258f20): the peer table
+// becomes the local one plus this call's hash, so the compare matches.
+inline void stock120CkHook(uint8_t *ram, R5900Context *ctx) noexcept
+{
+    if (!netStock120() || !ps2_net::lockstepLinkActive())
+        return;
+    const uint32_t ng = getRegU32(ctx, 4), frame = getRegU32(ctx, 5), hash = getRegU32(ctx, 6);
+    uint32_t live = 0u;
+    if (!rd32(ram, kNetGamePtr, live) || live != ng || !ng)
+        return;
+    bool differed = false;
+    for (uint32_t i = 0u; i < 60u; ++i)
+    {
+        uint32_t mine = 0u, peer = 0u;
+        rd32(ram, ng + 0x410u + 4u * i, mine);
+        rd32(ram, ng + 0x500u + 4u * i, peer);
+        differed = differed || mine != peer;
+        wr32(ram, ng + 0x500u + 4u * i, mine);
+    }
+    const uint32_t idx = static_cast<uint32_t>((static_cast<int32_t>(frame) / 60) % 60);
+    wr32(ram, ng + 0x500u + 4u * (idx < 60u ? idx : 0u), hash);
+    ++g_s120Ck;
+    if (differed)
+        ++g_s120CkFixed;
+}
+
 inline void parityStep(uint8_t *ram);
 inline void lsGateHook(uint8_t *ram, R5900Context *ctx);
 inline void lsTraceRaceTick(uint8_t *ram, R5900Context *ctx);
@@ -1054,6 +1143,8 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
     }
     else if (sourcePc == kLsGateSite && targetPc == kLsGate && ctx)
         lsGateHook(ram, ctx);
+    else if (sourcePc == kCkSite && targetPc == kCkFn && ctx)
+        stock120CkHook(ram, ctx);
     else if (sourcePc == kRaceTickCallSite && targetPc == kRaceTickCallee)
     {
         g_passRan = true;
@@ -1326,10 +1417,6 @@ inline void parityHook(uint8_t *ram, uint32_t sourcePc)
 {
     if (sourcePc != kAppUpdateSite)
         return;
-    if (!ps2_net::lockstepLinkActive())
-        g_lsSeen = g_lsStarted = false;
-    else if (g_lsSeen && netLs120Sync())
-        return; // lockstep race: lsGateHook steps on open gates
     parityStep(ram);
 }
 
@@ -3677,15 +3764,29 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 }
 
 // online-stock-2 (see kLsGateSite): runs at every gate call while a 120
-// lockstep link is up. The first open gate resets the per-call parities on
-// both peers (the session machine and the rider pass have not run in this
-// update yet); each open gate then steps the stock-cadence parity once.
+// link is up. With PS2X_NET_STOCK120, once the race state reaches racing
+// (5) the queues are fed so the gate never closes on a missing peer input;
+// the stock pre-race sync (NetGame state, countdown) stays as it was.
 inline void lsGateHook(uint8_t *ram, R5900Context *ctx)
 {
     if (!ps2_net::lockstepLinkActive() || !netLockstep120())
         return;
-    g_lsSeen = true;
-    const uint32_t why = lsGateWhy(ram, getRegU32(ctx, 4));
+    const uint32_t in = getRegU32(ctx, 4);
+    if (netStock120())
+    {
+        const int32_t st = raceState(ram);
+        if (st != g_s120State)
+        {
+            std::fprintf(stderr, "[stock120] race state %d -> %d t=%llu fed=%llu trim=%llu ck=%llu ckfix=%llu\n",
+                         g_s120State, st, static_cast<unsigned long long>(g_lastTick),
+                         static_cast<unsigned long long>(g_s120Fed), static_cast<unsigned long long>(g_s120Trim),
+                         static_cast<unsigned long long>(g_s120Ck), static_cast<unsigned long long>(g_s120CkFixed));
+            g_s120State = st;
+        }
+        if (st >= 5 && st < 32)
+            stock120GateFeed(ram, in);
+    }
+    const uint32_t why = lsGateWhy(ram, in);
     if (netLs120Trace())
     {
         if (why != 0u)
@@ -3704,26 +3805,8 @@ inline void lsGateHook(uint8_t *ram, R5900Context *ctx)
             g_lsStallN = 0u;
         }
     }
-    if (why != 0u)
-        return;
-    const bool parity = rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                        pidFix() || c2capFix() || input2Fix() || inputChainFix();
-    if (netLs120Sync() && hooksOn())
-    {
-        if (!g_lsStarted)
-        {
-            g_lsStarted = true;
-            g_raceTickCalls = g_raceTick2Calls = g_sessionCalls = 0u;
-            g_rngUpdates = 0u;
-            g_rngOdd = false;
-            g_lcgHeld = false;
-            std::fprintf(stderr, "[ls] start t=%llu parity=%d\n", static_cast<unsigned long long>(g_lastTick),
-                         parity ? 1 : 0);
-        }
-        if (parity)
-            parityStep(ram);
-    }
-    ++g_lsFrames;
+    if (why == 0u)
+        ++g_lsFrames;
 }
 
 // Diagnostic (PS2X_NET_LS120_TRACE=1): one line per rider pass while the

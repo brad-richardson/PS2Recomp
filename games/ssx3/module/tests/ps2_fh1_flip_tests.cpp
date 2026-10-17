@@ -57,5 +57,33 @@ void register_ps2_fh1_flip_tests()
             rd32(ram.data(), manager + 0x10u, rate);
             t.Equals(rate, 60u, "manager restored on exit");
         });
+
+        tc.Run("online-stock-2: lsGateWhy mirrors the 0x237950 lockstep gate", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            constexpr uint32_t ng = 0x2000u, in = 0x3000u;
+            wr32(ram.data(), kNetGamePtr, ng);
+            wr32(ram.data(), ng + 0x70u, 13u);
+            wr32(ram.data(), in + 0x10u, 2u);
+            for (uint32_t i = 0u; i < 2u; ++i)
+            {
+                wr32(ram.data(), in + 0x14u + 0x18u * i + 4u, 5u);
+                wr32(ram.data(), in + 0x14u + 0x18u * i + 8u, 7u);
+            }
+            t.Equals(lsGateWhy(ram.data(), in), 1u, "state 13 closes");
+            wr32(ram.data(), ng + 0x70u, 14u);
+            t.Equals(lsGateWhy(ram.data(), in), 0u, "state 14, both queues hold input: open");
+            wr32(ram.data(), ng + 0x3f8u, 1u);
+            t.Equals(lsGateWhy(ram.data(), in), 2u, "pause hold closes");
+            wr32(ram.data(), ng + 0x3f8u, 0u);
+            wr32(ram.data(), ng + 0x3fcu, 3u);
+            t.Equals(lsGateWhy(ram.data(), in), 3u, "countdown hold closes");
+            wr32(ram.data(), ng + 0x3fcu, 0xffffffffu);
+            t.Equals(lsGateWhy(ram.data(), in), 0u, "negative countdown is open");
+            wr32(ram.data(), in + 0x14u + 0x18u + 8u, 5u);
+            t.Equals(lsGateWhy(ram.data(), in), 5u, "player 1 queue empty closes");
+            wr32(ram.data(), in + 0x10u, 0u);
+            t.Equals(lsGateWhy(ram.data(), in), 0u, "no players: open");
+        });
     });
 }

@@ -1480,6 +1480,11 @@ namespace ps2_net
                  reinterpret_cast<const struct sockaddr *>(&u.peer), sizeof(u.peer));
     }
 
+    // online-stock-2: state side channel ("O5KA" + "ST" + payload; see stateSend).
+    std::mutex g_stMu;
+    std::vector<std::vector<uint8_t>> g_stInbox;
+    std::vector<uint64_t> g_stRxUs;
+
     // Deliver queued packets into an armed EE record (IRX RpcPush layout).
     void p2pDeliver(uint8_t *rdram, uint32_t linkH, P2pLink &l, uint64_t tick)
     {
@@ -1655,6 +1660,22 @@ namespace ps2_net
                                   << tick << std::endl;
                     }
                     u.connected = true;
+                }
+                else if (std::memcmp(buf, "O5KA", 4) == 0 && r > 6 && buf[4] == 'S' && buf[5] == 'T')
+                {
+                    // online-stock-2 state side channel rides a keep-alive
+                    // with a payload (the relay forwards the four stock
+                    // tags only; older HLEs ignore keep-alive payloads).
+                    u.connected = true;
+                    std::lock_guard<std::mutex> lock(g_stMu);
+                    if (g_stInbox.size() >= kP2pRxCap)
+                    {
+                        g_stInbox.erase(g_stInbox.begin());
+                        g_stRxUs.erase(g_stRxUs.begin());
+                    }
+                    g_stInbox.emplace_back(buf + 6, buf + r);
+                    g_stRxUs.push_back(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count()));
                 }
                 else if (std::memcmp(buf, "O5PK", 4) == 0 && r > 4)
                 {
@@ -2948,5 +2969,40 @@ namespace ps2_net
                       << std::dec << std::endl;
             return true;
         }
+    }
+
+    bool stateSend(const uint8_t *data, size_t n)
+    {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+        for (auto &lk : g_p2pLink)
+        {
+            auto it = g_p2pUtil.find(lk.second.util);
+            if (it != g_p2pUtil.end() && it->second.connected)
+            {
+                std::vector<uint8_t> d{'S', 'T'};
+                d.insert(d.end(), data, data + n);
+                p2pSendRaw(it->second, "O5KA", d.data(), d.size());
+                return true;
+            }
+        }
+#else
+        (void)data;
+        (void)n;
+#endif
+        return false;
+    }
+
+    void stateDrain(std::vector<std::vector<uint8_t>> &payloads, std::vector<uint64_t> &rxUs)
+    {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+        std::lock_guard<std::mutex> lock(g_stMu);
+        payloads.swap(g_stInbox);
+        rxUs.swap(g_stRxUs);
+        g_stInbox.clear();
+        g_stRxUs.clear();
+#else
+        payloads.clear();
+        rxUs.clear();
+#endif
     }
 } // namespace ps2_net

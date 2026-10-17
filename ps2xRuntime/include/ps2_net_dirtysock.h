@@ -95,4 +95,11 @@ namespace ps2_net
     // beside the Quick Play login path); Quick Play netplay posts it on its
     // first entry since its menu never reaches the DirtySock path.
     void firstRunNotice();
+
+    // online-stock-2: HLE-only side channel on the P2P race socket ("O5KA"
+    // keep-alives carrying "ST" + payload; never delivered to the guest). stateSend returns false
+    // without a connected link; stateDrain moves the received payloads out
+    // (with host-monotonic arrival microseconds).
+    bool stateSend(const uint8_t *data, size_t n);
+    void stateDrain(std::vector<std::vector<uint8_t>> &payloads, std::vector<uint64_t> &rxUs);
 } // namespace ps2_net

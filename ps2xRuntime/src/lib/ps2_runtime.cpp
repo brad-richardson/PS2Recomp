@@ -29,6 +29,7 @@
 #include "ps2_ssx3_tricky_resetvol.h"
 #include "ps2_ssx3_tricky_preview.h"
 #include "ps2_netsync.h" // Quick Play netplay (PS2X_NETSYNC, default off)
+#include "ps2_net_stock120.h" // online-stock-2 stock race state sync (PS2X_NET_STOCK120, default off)
 #include <filesystem>
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
@@ -5657,6 +5658,8 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
 {
     // Quick Play netplay: race start, STATE, ghost show (no-op unless PS2X_NETSYNC=1).
     ps2_netsync::onTick(rdram, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
+    // online-stock-2: stock online race state sync (no-op unless PS2X_NET_STOCK120=1).
+    ps2_net_stock120::onTick(rdram, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
     struct Mgx1LapSlot { uint32_t rider = 0u; uint32_t clock = 0u; uint32_t ignored = 0u; uint8_t lap = 1u; bool beforeCheckpoint = false; bool armed = false; bool reseed = false; bool finished = false; };
     static Mgx1LapSlot mgx1Laps[6];
     static const bool mgx1MegaLaps = [] {

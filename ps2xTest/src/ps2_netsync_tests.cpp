@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_netsync.h"
+#include "ps2_net_stock120.h"
 
 #include <cstdint>
 #include <cstring>
@@ -181,6 +182,45 @@ namespace
             t.Equals(port, (uint16_t)41000u, "port");
             t.IsFalse(ps2_netsync::parseServer("", host, port), "empty refuses");
             t.IsFalse(ps2_netsync::parseServer("h:0", host, port), "port 0 refuses");
+        });
+
+        tc.Run("online-stock-2: stock120 state payload round-trips", [](TestCase &t)
+        {
+            ps2_netsync::Sample a;
+            a.pos = {1.5f, -2.25f, 300.0f};
+            a.qx = 0.1f; a.qy = 0.2f; a.qz = 0.3f; a.qw = 0.9f;
+            a.vel = {-4.0f, 5.0f, 6.5f};
+            a.fin = 1u;
+            a.ftime = 123.25f;
+            uint8_t p[ps2_net_stock120::kPayloadLen];
+            ps2_net_stock120::encode(p, 4321u, a);
+            ps2_netsync::Sample b;
+            t.IsTrue(ps2_net_stock120::decode(p, sizeof(p), b), "decodes");
+            t.Equals(b.tick, (uint64_t)4321u, "tick");
+            t.IsTrue(b.pos.z == 300.0f && b.vel.x == -4.0f && b.qw == 0.9f && b.fin == 1u && b.ftime == 123.25f,
+                     "fields");
+            t.IsFalse(ps2_net_stock120::decode(p, sizeof(p) - 1u, b), "short payload refused");
+            p[0] = 9u;
+            t.IsFalse(ps2_net_stock120::decode(p, sizeof(p), b), "wrong version refused");
+        });
+
+        tc.Run("online-stock-2: stock120 show tick uses the peer's observed rate", [](TestCase &t)
+        {
+            std::vector<ps2_netsync::Sample> ring;
+            for (int i = 0; i <= 10; ++i)
+            {
+                ps2_netsync::Sample s;
+                s.tick = (uint64_t)i * 6u;
+                s.rxUs = 1000000u + (uint64_t)i * 200000u; // 6 ticks per 0.2 s: 30 ticks/s
+                ring.push_back(s);
+            }
+            uint64_t out = 0u;
+            t.IsTrue(ps2_net_stock120::showTick(ring, 3000000u + 1000000u, 12u, out), "has a show tick");
+            t.Equals(out, (uint64_t)(60u + 30u - 12u), "newest 60 + 1 s at 30/s - idelay 12");
+            std::vector<ps2_netsync::Sample> one(ring.begin(), ring.begin() + 1);
+            t.IsTrue(ps2_net_stock120::showTick(one, 1000000u + 100000u, 0u, out), "single sample");
+            t.Equals(out, (uint64_t)12u, "falls back to 120/s");
+            t.IsFalse(ps2_net_stock120::showTick({}, 0u, 0u, out), "empty ring");
         });
     }
 } // namespace
