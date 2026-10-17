@@ -488,7 +488,7 @@ void register_ps2_fh1_fix_tests()
             std::ostringstream buffer;
             buffer << file.rdbuf();
             const std::string source = buffer.str();
-            const std::regex itemRe(R"((?:item == \"|streq\(item, \")([a-z0-9]+)\"))");
+            const std::regex itemRe(R"re((?:item == "|streq\(item, ")([a-z0-9]+)")re");
             size_t parsed = 0;
             for (auto it = std::sregex_iterator(source.begin(), source.end(), itemRe);
                  it != std::sregex_iterator(); ++it)
