@@ -93,7 +93,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky-layer tick hook points at the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 10u, "abi"); // full120 slice 3 (restack: ABI 10)
+            t.Equals(m.abiVersion, 11u, "abi"); // full120 slice 4 (restack: ABI 11)
             t.IsTrue(m.trickyLayerTick == &ps2_tricky_layer::tickHook, "tick hook");
             // The forward matches the inline reducer on the early-out path
             // (layer off / null / empty): no state, no crash.
