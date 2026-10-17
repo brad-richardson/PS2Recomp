@@ -103,7 +103,11 @@ constexpr uint32_t kDe4Off = 0xde4u;
 constexpr uint32_t kSlotOff = 0x86cu;
 constexpr uint32_t kResBase = 0x536640u;
 // In-game roster: the local rider is slot 0, the Rival Challenge rival
-// (the remote rider's body) slot 1, on both clients.
+// (the remote rider's body) slot 1, on both clients. The lobby seat
+// (start.slot, 0 or 1) only labels frames on the wire and never selects an
+// actor: send, own-input cache, peer input replace and the ghost write all
+// use these game slots (netsync-spike-1 847c5c0d: on net slot 1 the peer
+// drove the local rider, Brad's iPad drove the phone's rider).
 constexpr int kOwnRoster = 0;
 constexpr int kGhostRoster = 1;
 
