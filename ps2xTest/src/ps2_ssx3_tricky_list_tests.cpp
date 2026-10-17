@@ -203,9 +203,10 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(s.mode, 1, "Elysium mode down to Slopestyle");
             listMove(s, false);
             t.Equals(s.mode, 0, "mode wraps over the course's own modes");
-            s.sel = 0;
+            s.sel = 6;
+            s.mode = 0;
             listMove(s, false);
-            t.Equals(s.sel, 0, "step 1 moves modes, not courses");
+            t.Equals(s.sel, 6, "step 1 moves modes, not courses");
             t.Equals(s.mode, 0, "single-mode course has one mode"); });
 
         tc.Run("readView gates on the Map sub-state and short RAM", [](TestCase &t)
