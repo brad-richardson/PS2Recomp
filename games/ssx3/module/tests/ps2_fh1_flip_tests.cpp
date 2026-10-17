@@ -85,5 +85,41 @@ void register_ps2_fh1_flip_tests()
             wr32(ram.data(), in + 0x10u, 0u);
             t.Equals(lsGateWhy(ram.data(), in), 0u, "no players: open");
         });
+
+        tc.Run("online-stock-2: input-delay trim and paused-local neutral input", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            constexpr uint32_t in = 0x3000u, base0 = 0x4000u, base1 = 0x8000u;
+            wr32(ram.data(), in, 12u);       // [in+0] delay target
+            wr32(ram.data(), in + 4u, 16u);  // ring size
+            wr32(ram.data(), in + 8u, 4u);   // N
+            wr32(ram.data(), in + 0x10u, 2u);
+            const uint32_t recs[2] = {in + 0x14u, in + 0x2cu};
+            wr32(ram.data(), recs[0], base0);
+            wr32(ram.data(), recs[0] + 4u, 3u);
+            wr32(ram.data(), recs[0] + 8u, 5u);
+            wr32(ram.data(), recs[0] + 0xcu, 0x1234u); // local pad
+            wr32(ram.data(), recs[1], base1);
+            wr32(ram.data(), recs[1] + 4u, 3u);
+            wr32(ram.data(), recs[1] + 8u, 5u);
+            wr32(ram.data(), recs[1] + 0xcu, 0u);      // remote
+            for (uint32_t k = 3u; k < 5u; ++k)
+            {
+                wr32(ram.data(), base0 + k * 100u, 24u);
+                wr32(ram.data(), base0 + k * 100u + 8u, 0x3f800000u);
+                wr32(ram.data(), base1 + k * 100u + 8u, 0x3f800000u);
+            }
+            stock120TrimDelay(ram.data(), in);
+            uint32_t v = 0u;
+            rd32(ram.data(), in, v);
+            t.Equals(v, 4u, "delay trimmed to N");
+            stock120NeutralLocal(ram.data(), in);
+            rd32(ram.data(), base0 + 3u * 100u + 8u, v);
+            t.Equals(v, 0u, "local unread input zeroed");
+            rd32(ram.data(), base0 + 3u * 100u, v);
+            t.Equals(v, 24u, "count word kept");
+            rd32(ram.data(), base1 + 3u * 100u + 8u, v);
+            t.Equals(v, 0x3f800000u, "remote input untouched");
+        });
     });
 }

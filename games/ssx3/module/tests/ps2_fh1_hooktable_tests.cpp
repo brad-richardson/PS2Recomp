@@ -189,6 +189,8 @@ void register_ps2_fh1_hooktable_tests()
             srcOnly(kAppUpdateSite);
             srcOnly(kLsGateSite); // online-stock-2 lockstep gate
             srcOnly(kCkSite);     // online-stock-2 checksum verdict
+            srcOnly(kSimEndSite); // online-stock-2 local pause
+            tgtOnly(kNetPause);   // online-stock-2 NetGame pause skip
             pair(kRaceTickCallSite, kRaceTickCallee);
             pair(kRaceTick2CallSite, kRaceTick2Callee);
             tgtOnly(kSelectorDispatch);
