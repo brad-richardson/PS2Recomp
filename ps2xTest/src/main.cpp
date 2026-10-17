@@ -33,6 +33,7 @@ void register_ps2_fh1_fh28_tests();
 void register_ps2_fh1_life2_tests();
 void register_ps2_fh1_savestate_tests();
 void register_ps2_fh1_hooktable_tests();
+void register_ps2_fh1_flip_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
 void register_game_module_none_tests();
@@ -137,6 +138,7 @@ int main(int argc, char **argv)
     register_ps2_fh1_life2_tests();
     register_ps2_fh1_savestate_tests();
     register_ps2_fh1_hooktable_tests();
+    register_ps2_fh1_flip_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
     register_game_module_none_tests();
