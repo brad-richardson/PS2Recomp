@@ -843,6 +843,24 @@ static inline __m128 Ps2VuMin(__m128 a, __m128 b)
     const __m128i hi = _mm_max_epi32(ia, ib), lo = _mm_min_epi32(ia, ib);
     return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(bothNeg, hi), _mm_andnot_si128(bothNeg, lo)));
 }
+// VCLIPw: shift the 24-bit clip history by 6 and set +x,-x,+y,-y,+z,-z
+// against |ft.w| with PCSX2's integer compare (_vuCLIP).
+// (deadcode-1: restored — referenced by generated e52 audit snippets;
+// zero-exec in gate boots but test-built.)
+static inline uint32_t Ps2VuClip(uint32_t clipFlags, __m128 fs, uint32_t ftwBits)
+{
+    int32_t value = static_cast<int32_t>(ftwBits);
+    value = (value & 0x7F800000) ? (value & 0x7FFFFFFF) : 0x007FFFFF;
+    const uint32_t x = Ps2VuLane(fs, 0), y = Ps2VuLane(fs, 1), z = Ps2VuLane(fs, 2);
+    uint32_t f = clipFlags << 6;
+    if (static_cast<int32_t>(x) > value) f |= 0x01u;
+    if (static_cast<int32_t>(x ^ 0x80000000u) > value) f |= 0x02u;
+    if (static_cast<int32_t>(y) > value) f |= 0x04u;
+    if (static_cast<int32_t>(y ^ 0x80000000u) > value) f |= 0x08u;
+    if (static_cast<int32_t>(z) > value) f |= 0x10u;
+    if (static_cast<int32_t>(z ^ 0x80000000u) > value) f |= 0x20u;
+    return f & 0xFFFFFFu;
+}
 // R register: 23-bit LFSR value with the exponent of 1.0, kept in every lane
 // of ctx->vu0_r (AdvanceLFSR / _vuRINIT / _vuRXOR).
 static inline uint32_t Ps2VuR(const R5900Context *ctx) { return Ps2VuLane(ctx->vu0_r, 0); }
