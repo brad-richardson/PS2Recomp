@@ -68,7 +68,8 @@ namespace ps2_game_module
     // 12 (full120 slice 5): the post-call consume side below.
     // 13 (full120 slice 6): the tap-target lists below.
     // 14 (split-input-1 family #5): the input-marker pad-read hook below.
-    inline constexpr uint32_t kAbiVersion = 14u;
+    // 15 (split-input-1 family #7): the widescreen presentation hooks below.
+    inline constexpr uint32_t kAbiVersion = 15u;
 
     // Tap-target lists (full120 slice 6). The tap bodies (srcTap,
     // fh26TapCall, fh9OnBranch, fh10HistBranch, in4NoteRider) stay generic
@@ -254,6 +255,12 @@ namespace ps2_game_module
         bool (*notePadRead)(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
                            uint64_t guestVsyncTick, int port, int slot, const uint8_t *rdram,
                            uint64_t *markMsOut) = nullptr;
+        // Widescreen-default presentation hooks (split-input-1 family
+        // #7). Armed by the "ssx3-widescreen-default" row from
+        // PS2X_WIDESCREEN (default anamorphic); null (or no module)
+        // keeps the game default at both read sites.
+        void (*noteWidescreenDispatch)(uint8_t *rdram, uint32_t sourcePc) = nullptr;
+        bool (*widescreenAnamorphic)(void) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

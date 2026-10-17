@@ -14,6 +14,7 @@ add_library(ssx3_game_module STATIC
     src/input_marker.cpp
     src/sif_handshake.cpp
     src/tricky_song.cpp
+    src/widescreen_default.cpp
     src/tricky_savestate.cpp
     src/movie.cpp
     src/tricky_menu.cpp

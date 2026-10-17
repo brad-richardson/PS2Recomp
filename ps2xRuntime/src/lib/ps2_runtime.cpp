@@ -48,6 +48,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
+#include "runtime/game_module.h"
 #include "ps2_turbo_boot.h" // BTS1: boot turbo yield latches
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
@@ -674,25 +675,6 @@ namespace
         if (!gsHandoffDietRequested())
             return 0u;
         return 8192u;
-    }
-
-    // SLUS_207.72 stores its video choice in bits 20-21 of the first options
-    // word. 0 is 4:3 and 2 is the menu's anamorphic choice. The game calls
-    // 0x228C08 to apply that choice after defaults, menu edits, and profile
-    // loading. Interpose at that call so all three paths obey the host option.
-    std::atomic<bool> g_ssx3WidescreenActive{false};
-    std::atomic<uint32_t> g_ssx3WidescreenMode{2u};
-    constexpr uint32_t kSsx3OptionsWord = 0x00535610u;
-    constexpr uint32_t kSsx3WidescreenMask = 0x00300000u;
-
-    void applySsx3Widescreen(PS2Runtime &)
-    {
-        const char *env = std::getenv("PS2X_WIDESCREEN");
-        const uint32_t mode = ps2x::present::ssx3WidescreenModeFromEnv(env);
-        g_ssx3WidescreenMode.store(mode, std::memory_order_relaxed);
-        g_ssx3WidescreenActive.store(true, std::memory_order_release);
-        std::fprintf(stderr, "[widescreen] SSX3 mode=%u (PS2X_WIDESCREEN=%s)\n",
-                     mode, env ? env : "default");
     }
 
     // TK15: SSX 3 terrain patch cache guard (PS2X_SSX3_PATCH_CACHE_GUARD=1,
@@ -1558,19 +1540,6 @@ namespace
         }
     }
 
-    void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
-    {
-        if (!rdram || !g_ssx3WidescreenActive.load(std::memory_order_acquire)) return;
-        uint32_t word = 0u;
-        std::memcpy(&word, rdram + kSsx3OptionsWord, sizeof(word));
-        const uint32_t mode = g_ssx3WidescreenMode.load(std::memory_order_relaxed);
-        const uint32_t wanted = (word & ~kSsx3WidescreenMask) | (mode << 20u);
-        if (word == wanted) return;
-        std::memcpy(rdram + kSsx3OptionsWord, &wanted, sizeof(wanted));
-        std::fprintf(stderr, "[widescreen] apply source=0x%x guest_mode=%u host_mode=%u\n",
-                     sourcePc, (word >> 20u) & 3u, mode);
-    }
-
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
@@ -1912,12 +1881,6 @@ void PS2Runtime::importVu0Context(const R5900Context *ctx, VuState &state, bool 
 {
     copyVu0ContextToStateImpl(ctx, state, lean);
 }
-
-PS2_REGISTER_GAME_OVERRIDE("ssx3-widescreen-default",
-                           "SLUS_207.72",
-                           0x00100008u,
-                           0u,
-                           applySsx3Widescreen);
 
 // FH1 full120 clock fix (full120 slice 2: the `ssx3-full120-clock` row,
 // its apply function and the interval wrapper moved verbatim to
@@ -6117,7 +6080,15 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
     if (isCall && targetPc == 0x00228C08u)
     {
-        enforceSsx3Widescreen(rdram, sourcePc);
+        // split-input-1 #7: the SSX 3 widescreen-default policy lives in
+        // the game module (0x228C08 applies the video choice after
+        // defaults, menu edits and profile loads). Null (or no module)
+        // keeps the game default.
+        if (const ps2_game_module::Module *wsModule = ps2_game_module::installed();
+            wsModule != nullptr && wsModule->noteWidescreenDispatch != nullptr)
+        {
+            wsModule->noteWidescreenDispatch(rdram, sourcePc);
+        }
     }
 
     // Every inter-function transfer is also a deterministic EE safe point.
@@ -7997,8 +7968,13 @@ void PS2Runtime::run()
     {
         std::fprintf(stderr, "[vpad] off (PS2X_VIRTUAL_PAD)\n");
     }
-    const bool anamorphic = g_ssx3WidescreenActive.load(std::memory_order_acquire) &&
-                            g_ssx3WidescreenMode.load(std::memory_order_relaxed) == 2u;
+    // split-input-1 #7: the anamorphic default lives in the game module
+    // (armed by the ssx3-widescreen-default row); without it the game
+    // default stands.
+    const ps2_game_module::Module *wsAnamorphicModule = ps2_game_module::installed();
+    const bool anamorphic = wsAnamorphicModule != nullptr &&
+                            wsAnamorphicModule->widescreenAnamorphic != nullptr &&
+                            wsAnamorphicModule->widescreenAnamorphic();
     const ps2x::present::Aspect presentAspect = ps2x::present::aspectFromEnv(std::getenv("PS2X_ASPECT"), anamorphic);
     const ps2x::present::Filter presentFilter = ps2x::present::filterFromEnv(std::getenv("PS2X_PRESENT_FILTER"));
     int appliedFilter = -1;

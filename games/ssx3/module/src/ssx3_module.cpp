@@ -15,6 +15,7 @@
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
+#include "Ssx3Widescreen.h"
 #include "Ssx3InputMarker.h"
 #include "ssx3_module_internal.h"
 #include "runtime/ps2_savestate.h"
@@ -35,6 +36,8 @@ namespace
         {"ssx3-lod-scale", "SLUS_207.72", kSsx3Entry, 0u, &ps2_lod_scale::applyLodScale},
         {"ssx3-input2", "SLUS_207.72", kSsx3Entry, 0u, &ps2_ssx3_input2::applyInput2},
         {"ssx3-input-marker", "SLUS_207.72", kSsx3Entry, 0u, &ps2_stubs::lim1Apply},
+        {"ssx3-widescreen-default", "SLUS_207.72", kSsx3Entry, 0u,
+         &ps2_ssx3_widescreen::applySsx3Widescreen},
     };
 
     // K1: the copied GetEntryAddress/TLB payload (Ssx3CopiedPayload.h). Both
@@ -92,7 +95,9 @@ namespace
                                           &ps2_ssx3_fh1::onReturn,
                                           &ps2_ssx3_fh1::postUnwindRestore,
                                           &ps2_ssx3_fh1::tapTargets(),
-                                          &ps2_stubs::notePadRead};
+                                          &ps2_stubs::notePadRead,
+                                          &ps2_ssx3_widescreen::noteWidescreenDispatch,
+                                          &ps2_ssx3_widescreen::widescreenAnamorphic};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept
