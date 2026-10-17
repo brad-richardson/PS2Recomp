@@ -27,7 +27,7 @@
 #include "ps2_ssx3_tricky_gems.h"
 #include "ps2_ssx3_tricky_resetvol.h"
 #include "ps2_ssx3_tricky_preview.h"
-#include "ps2_netsync.h" // netsync-spike-1-p3: SNP2 state sync (default off)
+#include "ps2_netsync.h" // Quick Play netplay (PS2X_NETSYNC, default off)
 #include <filesystem>
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
@@ -2096,6 +2096,91 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-turbo-boot", "SLUS_207.72", 0x00100008u, 0u, ap
 
 // snd-seam-1 Part 5 slice 3: the draw-distance override lives in the game
 // module now (games/ssx3/module/src/lod_scale.cpp, row "ssx3-lod-scale").
+
+// online-v0-1: Quick Play netplay entry (PS2X_NETSYNC=1; see ps2_netsync.h).
+// The main-menu Online row (widget "5online", state 0x31) runs the Single
+// Event case instead (the TK11 accept rewrite: item+0x18 = 9 before the
+// handler reads it) and starts a Quick Play session; a main-menu build ends
+// a pre-race one; the Map fill hands the navigator its controller. The
+// wrappers chain onto whatever is installed (the Tricky menu wraps the same
+// three entries), so either override may apply first. Knob unset: nothing
+// is wrapped.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_nsMenuBuild = nullptr;
+    PS2Runtime::RecompiledFunction g_nsMenuEvent = nullptr;
+    PS2Runtime::RecompiledFunction g_nsMapFill = nullptr;
+
+    void nsMenuBuildWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_netsync::onMainMenuBuild(runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u);
+        g_nsMenuBuild(rdram, ctx, runtime);
+    }
+
+    void nsMenuEventWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        const uint32_t item = getRegU32(ctx, 5) & 0x1FFFFFFFu;
+        if (getRegU32(ctx, 6) == kEventAccept && item && item + 0x40u < PS2_RAM_SIZE &&
+            ps2_ssx3_tricky::rd32(rdram, item + kItemWidgetHash) == nameHash("5online"))
+        {
+            const uint32_t st = ps2_ssx3_tricky::rd32(rdram, item + kItemState);
+            const uint64_t tick = runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
+            if (st == kStateOnline && ps2_netsync::onOnlineAccept(tick))
+            {
+                ps2_ssx3_tricky::wr32(rdram, item + kItemState, kStateSingleEvent);
+                ps2_net::firstRunNotice();
+                std::fprintf(stderr, "[netsync] main menu: Quick Play -> Single Event (item 0x%06x state 0x%x -> 0x%x)\n",
+                             item, st, kStateSingleEvent);
+            }
+        }
+        g_nsMenuEvent(rdram, ctx, runtime);
+    }
+
+    void nsMapFillWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_netsync::onMapFill(getRegU32(ctx, 4));
+        g_nsMapFill(rdram, ctx, runtime);
+    }
+
+    void applyNetsyncOnline(PS2Runtime &runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        if (!ps2_netsync::knobs().set)
+            return;
+        const uint8_t *ram = runtime.memory().getRDRAM();
+        struct Hook
+        {
+            uint32_t pc;
+            uint32_t word;
+            PS2Runtime::RecompiledFunction *orig;
+            PS2Runtime::RecompiledFunction wrap;
+        };
+        const Hook hooks[] = {{kMainMenuItemState, 0x27BDFFD0u, &g_nsMenuBuild, &nsMenuBuildWrapper},
+                              {kMainMenuEvent, 0x27BDFFC0u, &g_nsMenuEvent, &nsMenuEventWrapper},
+                              {kMapFill, 0x27BDFCC0u, &g_nsMapFill, &nsMapFillWrapper}};
+        for (const Hook &h : hooks)
+            if (!ram || ps2_ssx3_tricky::rd32(ram, h.pc) != h.word || !(*h.orig = runtime.lookupFunction(h.pc)))
+            {
+                std::fprintf(stderr, "[netsync] refused: entry 0x%x does not match; Quick Play menu off\n", h.pc);
+                return;
+            }
+        for (const Hook &h : hooks)
+            if (!runtime.replaceFunction(h.pc, h.wrap))
+            {
+                std::fprintf(stderr, "[netsync] cannot wrap 0x%x\n", h.pc);
+                std::abort();
+            }
+        std::fprintf(stderr, "[netsync] armed: Online -> Quick Play (Single Event, %s)\n",
+                     ps2_netsync::menuOn() ? "pairing on" : "pairing off at 60 / no server");
+    }
+}
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-netsync-online",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyNetsyncOnline);
 
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the
@@ -5410,7 +5495,7 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     const char *npLink = std::getenv("PS2X_NP_LINK_ENABLE");
     if (npLink && std::strcmp(npLink, "1") == 0)
         dspSet(g_dsp.tgt, 0x00111728u);
-    // netsync-spike-1-p3: input-consumer hook for ghost drive.
+    // Quick Play netplay: input-consumer hook for the ghost drive.
     // Knob off leaves the filter untouched.
     {
         const char *sync = std::getenv("PS2X_NETSYNC");
@@ -5534,7 +5619,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                                                                    GuestBranchKind kind,
                                                                    const char *debugName)
 {
-    // netsync-spike-1-p3: SNP2 state sync (no-op unless PS2X_NETSYNC=1).
+    // Quick Play netplay: race start, STATE, ghost show (no-op unless PS2X_NETSYNC=1).
     ps2_netsync::onTick(rdram, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
     struct Mgx1LapSlot { uint32_t rider = 0u; uint32_t clock = 0u; uint32_t ignored = 0u; uint8_t lap = 1u; bool beforeCheckpoint = false; bool armed = false; bool reseed = false; bool finished = false; };
     static Mgx1LapSlot mgx1Laps[6];
@@ -5805,65 +5890,32 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                     }
                     ps2_savestate::canonicalRecordRider(tick, slot, d.ordinal, de4, d.why,
                                                         d.applied);
-    // netsync-spike-1-p3 (default off): SNP2 ghost drive at the same
-    // input-consumer boundary. Listed in the DSP1 target filter above
-    // only while PS2X_NETSYNC=1.
-    if (targetPc == 0x00111728u &&
-        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
-    {
-        const uint64_t syncTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
-        const uint32_t syncCtl = getRegU32(ctx, 4) & PS2_RAM_MASK;
-        const uint32_t syncRec = getRegU32(ctx, 5) & PS2_RAM_MASK;
-        uint32_t liveW0 = 0u, liveW1 = 0u;
-        if (syncCtl + 0xDF0u <= PS2_RAM_SIZE && syncRec + 8u <= PS2_RAM_SIZE)
-        {
-            uint32_t pre0 = 0u, pre1 = 0u;
-            std::memcpy(&pre0, rdram + syncRec, 4u);
-            std::memcpy(&pre1, rdram + syncRec + 4u, 4u);
-            const char *why = "off";
-            if (ps2_netsync::onInput(syncTick, syncCtl, syncRec, rdram, liveW0, liveW1, why))
-            {
-                std::memcpy(rdram + syncRec, &liveW0, 4u);
-                std::memcpy(rdram + syncRec + 4u, &liveW1, 4u);
-            }
-            ps2_netsync::Config &syncCfg = ps2_netsync::config();
-            if (syncCfg.enabled)
-            {
-                uint32_t lgDe4 = 0u;
-                int lgSlot = -1;
-                uint32_t a = 0u;
-                std::memcpy(&a, rdram + syncCtl + 0x18u, 4u);
-                a &= PS2_RAM_MASK;
-                std::memcpy(&lgDe4, rdram + syncCtl + 0xDE4u, 4u);
-                if (a + 0x870u <= PS2_RAM_SIZE)
-                {
-                    int32_t sv = -1;
-                    std::memcpy(&sv, rdram + a + 0x86Cu, 4u);
-                    if (sv >= 0 && sv <= 5)
-                        lgSlot = sv;
-                }
-                if (lgSlot == syncCfg.peer || lgSlot == syncCfg.slot)
-                {
-                    uint32_t out0 = pre0, out1 = pre1;
-                    if (std::strcmp(why, "applied") == 0)
-                    {
-                        std::memcpy(&out0, rdram + syncRec, 4u);
-                        std::memcpy(&out1, rdram + syncRec + 4u, 4u);
-                    }
-                    std::fprintf(stderr,
-                                 "[netsync] I tick=%llu slot=%d de4=%u ai=%08x,%08x out=%08x,%08x %s\n",
-                                 (unsigned long long)syncTick, lgSlot, lgDe4, pre0, pre1,
-                                 out0, out1, why);
-                }
-            }
-        }
-    }
                     std::fprintf(stderr,
                                  "[np-rider] tick=%llu slot=%u ctl=%08x de4=%u ai=%08x,%08x out=%08x,%08x %s\n",
                                  (unsigned long long)tick, slot, getRegU32(ctx, 4), de4, w0, w1,
                                  d.applied ? d.outW0 : w0, d.applied ? d.outW1 : w1, d.why);
                 }
             }
+        }
+    }
+    // Quick Play netplay (PS2X_NETSYNC, default off): ghost drive at the
+    // same input-consumer boundary. Listed in the DSP1 target filter above
+    // only while PS2X_NETSYNC=1; counters go to the periodic [netsync] line.
+    // (online-v0-1: its own block. The train-28 landing sat inside the
+    // np-rider decision above, so it only ran with PS2X_NP_RIDER_ENABLE=1.)
+    if (targetPc == 0x00111728u &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        const uint32_t syncCtl = getRegU32(ctx, 4) & PS2_RAM_MASK;
+        const uint32_t syncRec = getRegU32(ctx, 5) & PS2_RAM_MASK;
+        uint32_t liveW0 = 0u, liveW1 = 0u;
+        const char *why = "off";
+        if (syncCtl + 0xDF0u <= PS2_RAM_SIZE && syncRec + 8u <= PS2_RAM_SIZE &&
+            ps2_netsync::onInput(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), syncCtl, syncRec,
+                                 rdram, liveW0, liveW1, why))
+        {
+            std::memcpy(rdram + syncRec, &liveW0, 4u);
+            std::memcpy(rdram + syncRec + 4u, &liveW1, 4u);
         }
     }
     // TK45c: Tricky gem multipliers (PS2X_SSX3_TRICKY_GEMS=1; default off).

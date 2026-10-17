@@ -938,6 +938,11 @@ namespace ps2_net
         return qpCardHasEaLoginImpl();
     }
 
+    void firstRunNotice()
+    {
+        maybeFirstRunNotice();
+    }
+
     QpNavMilestones qpNavMilestones()
     {
         QpNavMilestones m;

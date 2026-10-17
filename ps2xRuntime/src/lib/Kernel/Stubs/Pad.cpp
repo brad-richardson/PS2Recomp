@@ -15,6 +15,7 @@
 #include "ps2_net_dirtysock.h" // ONL10: navigator milestone snapshot
 #include "ps2_net_link.h" // np-link-1: delay-lockstep client (default off)
 #include "ps2_net_protocol.h"
+#include "ps2_netsync.h" // online-v0-1: Quick Play menus + START barrier (default off)
 #include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
@@ -1405,7 +1406,9 @@ namespace ps2_stubs
             // screen, so re-apply whenever title/main is seen. Leaving
             // the menu restores stock (f3: no stale handles into
             // submenu pool reuse).
-            if (g_qpNav.onlineMode && port == 0 && runtime != nullptr && ps2_net::enabled())
+            // online-v0-1: Quick Play netplay relabels the same row.
+            if (port == 0 && runtime != nullptr &&
+                ((g_qpNav.onlineMode && ps2_net::enabled()) || ps2_netsync::menuOn()))
             {
                 uint8_t *labelRam = runtime->memory().getRDRAM();
                 if (labelRam)
@@ -4336,6 +4339,9 @@ namespace ps2_stubs
                         qpNavUserActive); // ONL10: no-op unless NAV=1+QUICKPLAY=1
             tkListDriveOnRead(state, guestVsyncTick, runtime,
                               port); // tk-menu-1: no-op unless TRICKY_LIST=1 and armed
+            if (port == 0 && runtime != nullptr)
+                ps2_netsync::onPadRead(state.buttons, guestVsyncTick,
+                                       runtime->memory().getRDRAM()); // online-v0-1: no-op unless PS2X_NETSYNC=1
             tk12OnRead(state, guestVsyncTick, runtime, port); // APH1 DEV-ONLY: no-op unless PS2X_TK12_AP_ROUTE set
             padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
             padMarkerOnRead(state, guestVsyncTick, port, slot,
