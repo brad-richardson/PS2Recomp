@@ -567,20 +567,6 @@ namespace ps2_syscalls
         scheduler.invokeCurrent(std::move(invocation));
     }
 
-    static bool tryResolveGuestSyscallMirrorAddr(uint32_t syscallIndex, uint32_t &guestAddr)
-    {
-        const int64_t offsetBytes =
-            static_cast<int64_t>(static_cast<int32_t>(syscallIndex)) * static_cast<int64_t>(sizeof(uint32_t));
-        const int64_t guestAddr64 = static_cast<int64_t>(kGuestSyscallTablePhysBase) + offsetBytes;
-        if (guestAddr64 < 0 || (guestAddr64 + static_cast<int64_t>(sizeof(uint32_t))) > static_cast<int64_t>(kGuestSyscallMirrorLimit))
-        {
-            return false;
-        }
-
-        guestAddr = static_cast<uint32_t>(guestAddr64);
-        return true;
-    }
-
     static void writeGuestKernelWord(uint8_t *rdram, uint32_t guestAddr, uint32_t value)
     {
         if (!rdram)
@@ -781,38 +767,6 @@ namespace ps2_syscalls
             return addr & 0x1FFFFFFFu;
         }
         return addr;
-    }
-
-    static uint32_t computeBuiltinFindAddressResult(uint8_t *rdram,
-                                                    uint32_t originalStart,
-                                                    uint32_t originalEnd,
-                                                    uint32_t target)
-    {
-        uint32_t start = (originalStart + 3u) & ~0x3u;
-        uint32_t end = originalEnd & ~0x3u;
-        if (start >= end)
-        {
-            return 0u;
-        }
-
-        const uint32_t targetNorm = normalizeKernelAlias(target);
-        for (uint32_t addr = start; addr < end; addr += sizeof(uint32_t))
-        {
-            const uint8_t *entryPtr = getConstMemPtr(rdram, addr);
-            if (!entryPtr)
-            {
-                break;
-            }
-
-            uint32_t entry = 0u;
-            std::memcpy(&entry, entryPtr, sizeof(entry));
-            if (entry == target || normalizeKernelAlias(entry) == targetNorm)
-            {
-                return addr;
-            }
-        }
-
-        return 0u;
     }
 
     struct FindAddressWordSample

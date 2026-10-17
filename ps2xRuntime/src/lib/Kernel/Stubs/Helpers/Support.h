@@ -1489,29 +1489,6 @@ namespace
         uint32_t addr = 0;
     };
 
-    ParsedDmaTag tryParseDmaTag(uint8_t *rdram, uint32_t guestAddr)
-    {
-        ParsedDmaTag out;
-        if (guestAddr == 0)
-        {
-            return out;
-        }
-
-        const uint8_t *ptr = getConstMemPtr(rdram, guestAddr);
-        if (!ptr)
-        {
-            return out;
-        }
-
-        uint64_t tag = 0;
-        std::memcpy(&tag, ptr, sizeof(tag));
-        out.valid = true;
-        out.qwc = static_cast<uint32_t>(tag & 0xFFFFu);
-        out.id = static_cast<uint32_t>((tag >> 28) & 0x7u);
-        out.addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFFu);
-        return out;
-    }
-
     uint32_t resolveDmaChannelBase(uint8_t *rdram, uint32_t chanArg)
     {
         if (isKnownDmaChannelBase(chanArg))
