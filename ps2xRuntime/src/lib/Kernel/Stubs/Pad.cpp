@@ -617,6 +617,36 @@ namespace ps2_stubs
                          static_cast<unsigned long long>(g_tk12.from), static_cast<unsigned long long>(g_tk12.to), g_tk12.look);
         }
 
+        // online-stock-2 DEV-ONLY harness (PS2X_NET_QUICKPLAY_PICKS=N, default
+        // off): after each +ses (pairing), press Cross N times (16 ticks,
+        // 480 apart, from +240) for the Character Matchup picks. Paired test
+        // legs then need no timed presses after Accept: a Cross while still
+        // queued cancels and re-queues, which lost two device pairings.
+        void qpPicksOnRead(PadInputState &state, uint64_t tick, int port)
+        {
+            static const uint32_t picks = [] {
+                const char *e = std::getenv("PS2X_NET_QUICKPLAY_PICKS");
+                const long v = e ? std::strtol(e, nullptr, 10) : 0;
+                return v > 0 && v <= 16 ? static_cast<uint32_t>(v) : 0u;
+            }();
+            static uint64_t lastSes = 0u;
+            if (picks == 0u || port != 0)
+                return;
+            const uint64_t ses = ps2_net::qpNavMilestones().ses;
+            if (ses == 0u || tick < ses + 240u)
+                return;
+            if (ses != lastSes)
+            {
+                lastSes = ses;
+                std::fprintf(stderr, "[qppicks] +ses at tick=%llu: %u picks from tick=%llu\n",
+                             static_cast<unsigned long long>(ses), picks,
+                             static_cast<unsigned long long>(ses + 240u));
+            }
+            const uint64_t k = (tick - ses - 240u) / 480u, phase = (tick - ses - 240u) % 480u;
+            if (k < picks && phase < 16u)
+                state.buttons = static_cast<uint16_t>(state.buttons & ~0x4000u);
+        }
+
         void tk12OnRead(PadInputState &state, uint64_t tick, PS2Runtime *runtime, int port)
         {
             std::lock_guard<std::mutex> lock(g_tk12Mutex);
@@ -3328,6 +3358,7 @@ namespace ps2_stubs
                 ps2_netsync::onPadRead(state.buttons, guestVsyncTick,
                                        runtime->memory().getRDRAM()); // online-v0-1: no-op unless PS2X_NETSYNC=1
             tk12OnRead(state, guestVsyncTick, runtime, port); // APH1 DEV-ONLY: no-op unless PS2X_TK12_AP_ROUTE set
+            qpPicksOnRead(state, guestVsyncTick, port); // online-stock-2 DEV-ONLY: no-op unless PS2X_NET_QUICKPLAY_PICKS set
             padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
             // split-input-1 #5: the input marker lives in the game module.
             // The runtime keeps only the hook (null = disarmed) plus the

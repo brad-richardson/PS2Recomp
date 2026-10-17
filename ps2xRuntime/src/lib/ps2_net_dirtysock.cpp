@@ -164,6 +164,7 @@ namespace ps2_net
         std::atomic<uint64_t> g_qpRget{0u};
         std::atomic<uint64_t> g_qpQuik{0u};
         std::atomic<uint64_t> g_qpQuikCount{0u};
+        std::atomic<uint64_t> g_qpSes{0u}; // online-stock-2: latest +ses (pairing) tick
         // First sess/disc tick (0 = none), behind the qpNavNote gate.
         std::atomic<uint64_t> g_qpSessDisc{0u};
         // ONL11: navigator arming mode. 0 = off (NAV unset or any other
@@ -963,6 +964,7 @@ namespace ps2_net
         m.rget = g_qpRget.load(std::memory_order_relaxed);
         m.quik = g_qpQuik.load(std::memory_order_relaxed);
         m.quikCount = g_qpQuikCount.load(std::memory_order_relaxed);
+        m.ses = g_qpSes.load(std::memory_order_relaxed);
         return m;
     }
 
@@ -2656,6 +2658,7 @@ namespace ps2_net
                                         }
                                         return {};
                                     };
+                                    g_qpSes.store(tick, std::memory_order_relaxed);
                                     g_sesToken = field("SESSTOK");
                                     if (g_sesToken.empty()) g_sesToken = field("TOKEN");
                                     g_relayToken.clear();

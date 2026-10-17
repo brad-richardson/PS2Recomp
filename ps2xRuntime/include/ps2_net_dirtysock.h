@@ -78,6 +78,7 @@ namespace ps2_net
         uint64_t rget = 0u;
         uint64_t quik = 0u; // filter confirm (must stay 0: user confirms)
         uint64_t quikCount = 0u;
+        uint64_t ses = 0u; // online-stock-2: latest +ses (pairing) tick
     };
     QpNavMilestones qpNavMilestones();
 
