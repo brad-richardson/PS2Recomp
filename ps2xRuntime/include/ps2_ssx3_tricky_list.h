@@ -219,6 +219,8 @@ inline constexpr uint64_t kSettleTicks = 10u;
 inline constexpr uint64_t kBlindTicks = 30u; // screen transitions may pass through non-Map states
 inline constexpr uint64_t kGoneDoneTicks = 60u; // a dead Event widget this long after accept = handed off
 inline constexpr int kPressBudget = 48;
+inline constexpr int kPeakTries = 12; // accept-only fallback attempts (P3: 8 exhausted on walker-messed states)
+inline constexpr int kModeTries = 10; // (P3: 6 exhausted the same way: 6 tries x 4 presses = 24)
 
 enum class NavPhase : uint8_t
 {
@@ -425,6 +427,9 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             {
                 // Fallback accept landed: verify the outcome before driving
                 // the Mode screen (else a wrong peak rides the wrong list).
+                std::fprintf(stderr, "[tklist] tick=%llu nav ToPeak verify screen=%d peakOk=%d peak=%u goal=%u tries=%d sub=%d\n",
+                             static_cast<unsigned long long>(tick), v.screen, v.peakOk ? 1 : 0,
+                             v.peakOk ? v.peak : 0u, n.goal.peak, n.tries, n.sub);
                 if (v.peakOk && v.peak == n.goal.peak)
                 {
                     n.phase = NavPhase::ToMode;
@@ -449,7 +454,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.lastPos = acc;
                     n.anchor = acc;
                 }
-                if (++n.tries >= 8)
+                if (++n.tries >= kPeakTries)
                     return abort(); // never converging (or locked)
                 n.sub = 3;
                 return press(kPadTriangle);
@@ -488,7 +493,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         // Accept-only fallback: the pre-accept word is stale (m4), so step
         // the anchor (top on entry, the accepted word after each attempt),
         // accept, and verify. Each attempt re-anchors on ground truth.
-        if (n.tries >= 8)
+        if (n.tries >= kPeakTries)
             return abort();
         if (n.sub == 3)
             n.sub = 0; // backed out; step from the anchor
@@ -533,6 +538,9 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             {
                 // Fallback accept landed: verify the mode type before
                 // driving the Event screen.
+                std::fprintf(stderr, "[tklist] tick=%llu nav ToMode verify screen=%d typeOk=%d type=%u goal=%u tries=%d sub=%d\n",
+                             static_cast<unsigned long long>(tick), v.screen, v.typeOk ? 1 : 0,
+                             v.typeOk ? v.type : 0u, n.goal.type, n.tries, n.sub);
                 if (v.typeOk && v.type == n.goal.type)
                 {
                     n.phase = NavPhase::ToEvent;
@@ -554,7 +562,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.lastPos = acc;
                     n.anchor = acc;
                 }
-                if (++n.tries >= 6)
+                if (++n.tries >= kModeTries)
                     return abort(); // never converging
                 n.sub = 3;
                 return press(kPadTriangle);
@@ -599,7 +607,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         }
         // Accept-only fallback: same anchor shape as the peak (top on
         // entry = Race, the accepted word after each attempt).
-        if (n.tries >= 6)
+        if (n.tries >= kModeTries)
             return abort();
         if (n.sub == 3)
             n.sub = 0; // backed out; step from the anchor
