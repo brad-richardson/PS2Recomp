@@ -3,6 +3,7 @@
 // name, ELF match and apply function. Table order is application order.
 #include "ps2_ssx3_module.h"
 #include "Ssx3Fh1Clock.h"
+#include "Ssx3Fh1Dispatch.h"
 #include "Ssx3Fh1FixContent.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
@@ -81,7 +82,8 @@ namespace
                                           &ps2_ssx3_fh1::patchAtManagerInit,
                                           &ps2_ssx3_fh1::inputChainPoolFlip,
                                           &ps2_ssx3_fh1::inputChainPoolStep,
-                                          &ps2_ssx3_fh1::fh28PoolOverride};
+                                          &ps2_ssx3_fh1::fh28PoolOverride,
+                                          &ps2_ssx3_fh1::buildHookInterest};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

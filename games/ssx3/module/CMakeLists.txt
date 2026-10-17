@@ -5,6 +5,7 @@ add_library(ssx3_game_module STATIC
     src/ssx3_module.cpp
     src/fh1_fix_content.cpp
     src/fh1_clock.cpp
+    src/fh1_dispatch.cpp
     src/anim_pick_guard.cpp
     src/hle_iop.cpp
     src/copied_payload.cpp

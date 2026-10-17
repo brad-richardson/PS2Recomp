@@ -123,6 +123,21 @@ void register_game_module_none_tests()
             t.Equals(ps2_fh1::stockHalfTicksLegacy(), 0u, "stock legacy half ticks");
             t.Equals(ps2_fh1::stockHalfStepNext(), 2u, "stock half step");
         });
+        // full120 slice 3: the dispatch cold side belongs to the module.
+        // Without one, the interest table is empty (table mode then refuses
+        // every branch: generic no-game-hooks behavior).
+        tc.Run("no dispatch cold side without the module", [](TestCase &t)
+               {
+            ps2_fh1::HookConfig c;
+            c.mode = ps2_fh1::Mode::Events;
+            c.main = ~0ull;
+            c.fix12 = ~0u;
+            c.guestActive = true;
+            const ps2_fh1::HookInterest hi = ps2_fh1::buildHookInterest(c);
+            t.IsTrue(hi.src.empty(), "no src with no module");
+            t.IsTrue(hi.tgt.empty(), "no tgt with no module");
+            t.IsFalse(hi.always, "no always with no module");
+        });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass
         // and with SSX 3's copied payload intact in RAM.

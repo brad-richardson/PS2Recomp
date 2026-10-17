@@ -31,6 +31,15 @@
 #include <cstddef>
 #include <cstdint>
 
+// Dispatch cold-side shapes (full120 slice 3; defined in
+// ps2_fh1_full120.h, which includes this header — forward-declared here
+// so the Module table can name them).
+namespace ps2_fh1
+{
+struct HookConfig;
+struct HookInterest;
+} // namespace ps2_fh1
+
 struct R5900Context;
 // A guest invocation the runtime must queue (defined in
 // runtime/ee_scheduler.h); hooks report one through an out-parameter and
@@ -53,7 +62,8 @@ namespace ps2_game_module
     // 7 (snd-seam-1 Part 5 slice 4): the Tricky-layer VBlank hook below.
     // 8 (full120 slice 1): the FIX-policy content below.
     // 9 (full120 slice 2): the clock policy below.
-    inline constexpr uint32_t kAbiVersion = 9u;
+    // 10 (full120 slice 3): the dispatch cold side below.
+    inline constexpr uint32_t kAbiVersion = 10u;
 
     // FIX-policy content (full120 slice 1). The module owns the group
     // name/bit tables, the "all" composition and the mask-compat predicates;
@@ -185,6 +195,13 @@ namespace ps2_game_module
         void (*fh1InputChainPoolFlip)(uint8_t *ram, bool toActive) = nullptr;
         void (*fh1InputChainPoolStep)(uint8_t *ram, bool odd) = nullptr;
         bool (*fh1Fh28PoolOverride)(uint32_t address, uint64_t mainMask) = nullptr;
+        // Dispatch cold side (full120 slice 3): the hook-interest table
+        // content (which source/target PCs each FIX group lists). The
+        // runtime owns the config gathering, the cache and the filter; the
+        // module fills a caller-owned table. Null (or no module) is an
+        // empty table: table mode then refuses every branch, which is the
+        // generic no-game-hooks behavior.
+        void (*fh1BuildHookInterest)(const ps2_fh1::HookConfig *cfg, ps2_fh1::HookInterest *out) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).
