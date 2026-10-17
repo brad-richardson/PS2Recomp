@@ -4,6 +4,7 @@
 #include "ps2_ssx3_module.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
+#include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
@@ -21,6 +22,7 @@ namespace
         {"ssx3-hle-iop", "SLUS_207.72", kSsx3Entry, 0u, &ps2_ssx3_hle_iop::applySsx3HleIop},
         {"ssx3-copied-payload", "SLUS_207.72", kSsx3Entry, 0u, &ps2_syscalls::applySsx3CopiedPayload},
         {"ssx3-sif-handshake", "SLUS_207.72", kSsx3Entry, 0u, &ps2_syscalls::applySsx3SifHandshake},
+        {"ssx3-tricky-menu", "SLUS_207.72", kSsx3Entry, 0u, &ps2_tricky_menu::applyTrickyMenu},
     };
 
     // K1: the copied GetEntryAddress/TLB payload (Ssx3CopiedPayload.h). Both

@@ -1,11 +1,14 @@
 #include "MiniTest.h"
+#include "Ssx3TrickyMenu.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
 #include "ps2_ssx3_anim_pick_guard.h"
+#include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_module.h"
 #include "runtime/ps2_savestate.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -61,8 +64,8 @@ void register_ps2_ssx3_module_tests()
         tc.Run("override table: the moved families, in order, with their old match", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            const char *kExpected[] = {
-                "ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload", "ssx3-sif-handshake"};
+            const char *kExpected[] = {"ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload",
+                                       "ssx3-sif-handshake", "ssx3-tricky-menu"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {
@@ -73,6 +76,23 @@ void register_ps2_ssx3_module_tests()
                 t.Equals(d.crc32, 0u, "crc");
                 t.IsTrue(d.apply != nullptr, "apply");
             }
+            t.IsTrue(m.overrides[4].apply == &ps2_tricky_menu::applyTrickyMenu, "tricky-menu apply");
+        });
+        tc.Run("tricky-menu apply wraps nothing with the knob off", [](TestCase &t)
+               {
+            // snd-seam-1 Part 5: knob default off (det keys) installs no
+            // bindings — the keys cannot move. Sentinels first (a bare
+            // lookup materializes a function, so absence is unwrappable).
+            unsetenv("PS2X_SSX3_TRICKY_MENU");
+            PS2Runtime runtime;
+            reset_ps2_test_function_table();
+            runtime.replaceFunction(ps2_ssx3_tricky::kMainMenuItemState, &sentinelPick);
+            runtime.replaceFunction(ps2_ssx3_tricky::kMapFill, &sentinelPlay);
+            ps2_game_overrides::applyMatching(runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+            t.IsTrue(runtime.lookupFunction(ps2_ssx3_tricky::kMainMenuItemState) == &sentinelPick,
+                     "menu build unwrapped");
+            t.IsTrue(runtime.lookupFunction(ps2_ssx3_tricky::kMapFill) == &sentinelPlay, "map fill unwrapped");
+            reset_ps2_test_function_table();
         });
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
