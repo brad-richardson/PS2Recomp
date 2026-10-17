@@ -444,17 +444,21 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                // Mismatch: aim from ground truth (P4: the stock cursor
-                // resets on re-entry, so a counted anchor across a back-out
-                // overshoots into the gari5 {2,0} loop). anchor = last
-                // directed step (0 = none): flip only when that step left
-                // us stagnant, else aim goal-ward from the accepted word.
+                // Mismatch: keep aiming across visits (P5: the cursor may
+                // persist with a weird order (p4-gari2 [P1,P3,P2]) or reset
+                // (gari5); fresh-aiming every visit oscillates under both).
+                // anchor = last directed step (0 = none): flip only when
+                // that step left us stagnant; aim fresh only when dir is
+                // unset (first aim); otherwise KEEP dir (verify decides).
                 {
                     const int acc = v.peakOk ? static_cast<int>(v.peak) : 0;
                     if (n.anchor != 0 && v.peakOk && acc == n.lastPos)
                         n.dir = -n.anchor;
-                    else
-                        n.dir = (static_cast<int>(n.goal.peak) > acc) ? 1 : -1;
+                    else if (n.dir == 0)
+                    {
+                        const int d = (static_cast<int>(n.goal.peak) - acc + 3) % 3;
+                        n.dir = (d == 2) ? -1 : 1;
+                    }
                     n.lastPos = acc;
                     n.anchor = 0;
                 }
@@ -576,13 +580,12 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                // Mismatch: same P4 ground-truth shape as the peak (the
-                // mode cursor resets the same way across a back-out).
+                // Mismatch: same P5 keep-shape as the peak.
                 {
                     const int acc = v.typeOk ? static_cast<int>(v.type) : 0;
                     if (n.anchor != 0 && v.typeOk && acc == n.lastPos)
                         n.dir = -n.anchor;
-                    else
+                    else if (n.dir == 0)
                         n.dir = (static_cast<int>(n.goal.type) > acc) ? 1 : -1;
                     n.lastPos = acc;
                     n.anchor = 0;

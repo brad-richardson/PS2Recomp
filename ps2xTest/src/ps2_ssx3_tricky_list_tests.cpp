@@ -66,15 +66,16 @@ FeView evView(uint32_t peak, uint32_t type, uint8_t row)
 }
 
 // P4: scripted guest whose Peak cursor resets to `reset` on every
-// triangle-back (the gari5 stock behavior). Goal Garibaldi Slopestyle
-// {peak 1, type 1, row 0} on donor ev 6; clamps, no wrap (hard model).
+// triangle-back (the gari5 stock behavior), or persists (`persist`:
+// the p4-gari2 shape) . Goal Garibaldi Slopestyle {peak 1, type 1,
+// row 0} on donor ev 6; clamps, no wrap (hard model).
 struct ResetDrive
 {
     int phase = 0;
     bool handedOff = false;
     int acceptedPeak = -1;
 };
-ResetDrive driveResetPeak(int reset)
+ResetDrive driveResetPeak(int reset, bool persist = false)
 {
     int cursorPeak = reset, acceptedPeak = reset;
     int cursorType = 0, acceptedType = 0;
@@ -125,7 +126,8 @@ ResetDrive driveResetPeak(int reset)
         else if (mask == kPadTriangle && screen == 1)
         {
             screen = 0;
-            cursorPeak = reset; // P4: stock re-entry resets the cursor
+            if (!persist)
+                cursorPeak = reset; // P4: stock re-entry resets the cursor
         }
         else if (mask == kPadTriangle && screen == 2)
             screen = 1;
@@ -628,7 +630,10 @@ void register_ps2_ssx3_tricky_list_tests()
                 else if (mask == kPadTriangle && screen > 0)
                     --screen;
             };
-            for (int i = 0; i < 900 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            // P5: the reset-aware fallback spends ~2 extra presses per
+            // back-out cycle (accept-first); the product bounds (tries cap,
+            // press budget) are unchanged, so only this harness cap grows.
+            for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, view(), tick, false, false);
                 if (lastOut != 0 && o.mask == 0)
@@ -710,6 +715,13 @@ void register_ps2_ssx3_tricky_list_tests()
                {
             const ResetDrive d = driveResetPeak(2);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from last row");
+            t.IsTrue(d.handedOff, "handoff");
+            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+
+        tc.Run("P5 persisting cursor from last row still rides Garibaldi Slopestyle", [](TestCase &t)
+               {
+            const ResetDrive d = driveResetPeak(2, true);
+            t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done despite persist");
             t.IsTrue(d.handedOff, "handoff");
             t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
 
