@@ -28,6 +28,7 @@ void register_ps2_ssx3_sif_handshake_tests();
 void register_ps2_snd_tests();
 void register_ps2_ssx3_tricky_song_provider_tests();
 void register_ps2_ssx3_movie_stub_tests();
+void register_ps2_input_marker_tests();
 void register_ps2_fh1_fix_tests();
 void register_ps2_fh1_fh28_tests();
 void register_ps2_fh1_life2_tests();
@@ -135,6 +136,7 @@ int main(int argc, char **argv)
     register_ps2_snd_tests();
     register_ps2_ssx3_tricky_song_provider_tests();
     register_ps2_ssx3_movie_stub_tests();
+    register_ps2_input_marker_tests();
     register_ps2_fh1_fix_tests();
     register_ps2_fh1_fh28_tests();
     register_ps2_fh1_life2_tests();

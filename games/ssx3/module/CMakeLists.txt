@@ -10,6 +10,8 @@ add_library(ssx3_game_module STATIC
     src/anim_pick_guard.cpp
     src/hle_iop.cpp
     src/copied_payload.cpp
+    src/input2.cpp
+    src/input_marker.cpp
     src/sif_handshake.cpp
     src/tricky_song.cpp
     src/tricky_savestate.cpp
@@ -28,7 +30,7 @@ set_target_properties(ssx3_game_module PROPERTIES
     PS2X_GAME_MODULE_ENTRY ps2x_ssx3_game_module
     PS2X_GAME_MODULE_HEADER ps2_ssx3_module.h
     # Product suite sources; ps2xTest adds them to ps2x_tests.
-    PS2X_GAME_MODULE_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_anim_pick_guard_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_module_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_copied_payload_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_sif_handshake_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_snd_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_tricky_song_provider_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_movie_stub_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fix_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fh28_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_life2_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_savestate_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_hooktable_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_flip_tests.cpp"
+    PS2X_GAME_MODULE_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_anim_pick_guard_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_module_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_input_marker_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_copied_payload_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_sif_handshake_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_snd_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_tricky_song_provider_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_movie_stub_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fix_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_fh28_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_life2_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_savestate_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_hooktable_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_fh1_flip_tests.cpp"
 )
 
 # Same release flags as ps2_runtime, where this code compiled before the move.

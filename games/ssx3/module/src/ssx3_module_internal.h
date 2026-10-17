@@ -23,4 +23,8 @@ void applySsx3CopiedPayload(PS2Runtime &runtime);
 void applySsx3SifHandshake(PS2Runtime &runtime);
 }
 
+namespace ps2_ssx3_input2
+{
+void applyInput2(PS2Runtime &runtime); // "ssx3-input2" (split-input-1 #5)
+}
 

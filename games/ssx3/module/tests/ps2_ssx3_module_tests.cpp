@@ -12,6 +12,7 @@
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
+#include "Ssx3InputMarker.h"
 #include "ps2_ssx3_anim_pick_guard.h"
 #include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_menu.h"
@@ -25,6 +26,10 @@
 #include <vector>
 
 void reset_ps2_test_function_table();
+namespace ps2_ssx3_input2
+{
+void applyInput2(PS2Runtime &runtime);
+}
 
 // module-seam-1: the SSX 3 module is the binary's linked module, and the
 // runtime's override pass installs its bindings (product suite only).
@@ -76,7 +81,8 @@ void register_ps2_ssx3_module_tests()
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
             const char *kExpected[] = {"ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload",
                                        "ssx3-sif-handshake", "ssx3-tricky-menu",
-                                       "ssx3-tricky-stock-meter", "ssx3-lod-scale"};
+                                       "ssx3-tricky-stock-meter", "ssx3-lod-scale",
+                                       "ssx3-input2", "ssx3-input-marker"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {
@@ -94,7 +100,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky-layer tick hook points at the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family #5: ABI 14
             t.IsTrue(m.trickyLayerTick == &ps2_tricky_layer::tickHook, "tick hook");
             // The forward matches the inline reducer on the early-out path
             // (layer off / null / empty): no state, no crash.
@@ -146,7 +152,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family #5: ABI 14
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -166,15 +172,23 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family #5: ABI 14
             t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
             t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
             t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
         });
+        tc.Run("the input path points at the moved rows and hook (ABI 7)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family #5: ABI 14
+            t.IsTrue(m.notePadRead == &ps2_stubs::notePadRead, "pad-read tap");
+            t.IsTrue(m.overrides[7].apply == &ps2_ssx3_input2::applyInput2, "input2 row");
+            t.IsTrue(m.overrides[8].apply == &ps2_stubs::lim1Apply, "input-marker row");
+        });
         tc.Run("the TK34 patch-grow providers point at the module (ABI 6)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family #5: ABI 14
             t.IsTrue(m.patchGrowSave == &ps2_tricky_state::patchGrowSave, "save");
             t.IsTrue(m.patchGrowValidate == &ps2_tricky_state::patchGrowValidate, "validate");
             t.IsTrue(m.patchGrowLoad == &ps2_tricky_state::patchGrowLoad, "load");
@@ -189,7 +203,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the FIX-policy content is published by the module (ABI 7)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family : ABI 14
             t.IsTrue(m.fh1FixPolicy != nullptr, "policy published");
             t.IsTrue(m.fh1FixPolicy == &ps2_ssx3_fh1::fixPolicy(), "policy is the moved table");
             const ps2_game_module::Fh1FixPolicy &p = *m.fh1FixPolicy;
@@ -206,7 +220,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the clock policy is published by the module (ABI 8)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family : ABI 14
             t.IsTrue(m.fh1SchedDivisor == &ps2_ssx3_fh1::schedDivisor, "schedDivisor");
             t.IsTrue(m.fh1VblankDivisor == &ps2_ssx3_fh1::vblankDivisor, "vblankDivisor");
             t.IsTrue(m.fh1EeClockShiftNow == &ps2_ssx3_fh1::eeClockShiftNow, "eeClockShiftNow");
@@ -228,7 +242,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the dispatch cold side is published by the module (ABI 10)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family : ABI 14
             t.IsTrue(m.fh1BuildHookInterest == &ps2_ssx3_fh1::buildHookInterest, "table builder");
             // End to end through the runtime wrapper: FIX=all lists the
             // census PCs and misses a bogus pair.
@@ -245,20 +259,20 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the dispatch hot side is published by the module (ABI 11)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family : ABI 14
             t.IsTrue(m.fh1OnBranch == &ps2_ssx3_fh1::onBranch, "chain body");
         });
         tc.Run("the post-call consume side is published by the module (ABI 12)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi"); // full120 slice 6: ABI 13
+            t.Equals(m.abiVersion, 14u, "abi"); // split-input-1 family : ABI 14
             t.IsTrue(m.fh1OnReturn == &ps2_ssx3_fh1::onReturn, "post-call fixups");
             t.IsTrue(m.fh1PostUnwind == &ps2_ssx3_fh1::postUnwindRestore, "unwind restore");
         });
         tc.Run("the tap-target lists are published by the module (ABI 13)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 13u, "abi");
+            t.Equals(m.abiVersion, 14u, "abi");
             t.IsTrue(m.fh1TapTargets == &ps2_ssx3_fh1::tapTargets(), "tap targets");
             const ps2_game_module::Fh1TapTargets &tt = ps2_ssx3_fh1::tapTargets();
             t.Equals(tt.stickTracker, 0x133308u, "stick tracker");

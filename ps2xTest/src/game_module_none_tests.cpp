@@ -19,9 +19,14 @@ void reset_ps2_test_function_table();
 namespace
 {
     void sentinel(uint8_t *, R5900Context *, PS2Runtime *) {}
-    // Guest PCs the SSX 3 module wraps today (its anim pick guard entries
-    // plus the SIF private SendCmd entry the handshake override binds).
-    constexpr uint32_t kModuleOwnedPcs[] = {0x311710u, 0x3128e8u, 0x426078u};
+    // Guest PCs the SSX 3 module wraps today (its anim pick guard entries,
+    // the SIF private SendCmd entry the handshake override binds, and the
+    // input2/input-marker latch sites).
+    // split-input-1 #5: input2 wraps 0x321298/0x114130/0x14dc80, the marker
+    // wraps 0x133308/0x114db8/0x321298/0x111408/0x119708/0x10e098.
+    constexpr uint32_t kModuleOwnedPcs[] = {0x311710u, 0x3128e8u, 0x426078u, 0x321298u, 0x114130u,
+                                            0x14dc80u, 0x133308u, 0x114db8u, 0x111408u, 0x119708u,
+                                            0x10e098u};
 }
 
 void register_game_module_none_tests()

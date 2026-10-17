@@ -15,6 +15,7 @@
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
+#include "Ssx3InputMarker.h"
 #include "ssx3_module_internal.h"
 #include "runtime/ps2_savestate.h"
 
@@ -32,6 +33,8 @@ namespace
         {"ssx3-tricky-menu", "SLUS_207.72", kSsx3Entry, 0u, &ps2_tricky_menu::applyTrickyMenu},
         {"ssx3-tricky-stock-meter", "SLUS_207.72", kSsx3Entry, 0u, &ps2_stock_meter::applyTrickyStockMeter},
         {"ssx3-lod-scale", "SLUS_207.72", kSsx3Entry, 0u, &ps2_lod_scale::applyLodScale},
+        {"ssx3-input2", "SLUS_207.72", kSsx3Entry, 0u, &ps2_ssx3_input2::applyInput2},
+        {"ssx3-input-marker", "SLUS_207.72", kSsx3Entry, 0u, &ps2_stubs::lim1Apply},
     };
 
     // K1: the copied GetEntryAddress/TLB payload (Ssx3CopiedPayload.h). Both
@@ -88,7 +91,8 @@ namespace
                                           &ps2_ssx3_fh1::onBranch,
                                           &ps2_ssx3_fh1::onReturn,
                                           &ps2_ssx3_fh1::postUnwindRestore,
-                                          &ps2_ssx3_fh1::tapTargets()};
+                                          &ps2_ssx3_fh1::tapTargets(),
+                                          &ps2_stubs::notePadRead};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

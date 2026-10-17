@@ -67,7 +67,8 @@ namespace ps2_game_module
     // 11 (full120 slice 4): the dispatch hot side below.
     // 12 (full120 slice 5): the post-call consume side below.
     // 13 (full120 slice 6): the tap-target lists below.
-    inline constexpr uint32_t kAbiVersion = 13u;
+    // 14 (split-input-1 family #5): the input-marker pad-read hook below.
+    inline constexpr uint32_t kAbiVersion = 14u;
 
     // Tap-target lists (full120 slice 6). The tap bodies (srcTap,
     // fh26TapCall, fh9OnBranch, fh10HistBranch, in4NoteRider) stay generic
@@ -244,6 +245,15 @@ namespace ps2_game_module
         void (*fh1PostUnwind)(uint8_t *ram) = nullptr;
         // Tap-target lists (full120 slice 6): see Fh1TapTargets above.
         const Fh1TapTargets *fh1TapTargets = nullptr;
+        // Input-marker hook (split-input-1 family #5). Offered every
+        // pad read after the record tap; scalars only (the pad state
+        // type stays runtime-side). True means the L3+R3 chord fired
+        // and `markMsOut` (always valid) carries the trigger ms for
+        // the runtime's padrec stamp. Null (or no module) skips the
+        // marker: one null check per pad read.
+        bool (*notePadRead)(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                           uint64_t guestVsyncTick, int port, int slot, const uint8_t *rdram,
+                           uint64_t *markMsOut) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).
