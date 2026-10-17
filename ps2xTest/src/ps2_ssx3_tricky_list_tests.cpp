@@ -65,6 +65,82 @@ FeView evView(uint32_t peak, uint32_t type, uint8_t row)
     return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
 }
 
+// P4: scripted guest whose Peak cursor resets to `reset` on every
+// triangle-back (the gari5 stock behavior). Goal Garibaldi Slopestyle
+// {peak 1, type 1, row 0} on donor ev 6; clamps, no wrap (hard model).
+struct ResetDrive
+{
+    int phase = 0;
+    bool handedOff = false;
+    int acceptedPeak = -1;
+};
+ResetDrive driveResetPeak(int reset)
+{
+    int cursorPeak = reset, acceptedPeak = reset;
+    int cursorType = 0, acceptedType = 0;
+    int screen = 0;
+    bool left = false;
+    NavState n;
+    navStart(n, kCourses[0].opts[1], 6, 0);
+    uint64_t tick = 0;
+    uint16_t lastOut = 0;
+    const auto view = [&]() {
+        FeView v;
+        if (left)
+            return v;
+        auto ram = viewRam(static_cast<uint32_t>(screen), static_cast<uint32_t>(acceptedPeak),
+                           static_cast<uint32_t>(acceptedType), 0, 0x600000, 0x601000, 0x602000);
+        return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+    };
+    const auto apply = [&](uint16_t mask) {
+        if (mask == kPadDown)
+        {
+            if (screen == 0)
+                cursorPeak = cursorPeak < 2 ? cursorPeak + 1 : 2;
+            else if (screen == 1)
+                cursorType = cursorType < 1 ? cursorType + 1 : 1;
+        }
+        else if (mask == kPadUp)
+        {
+            if (screen == 0)
+                cursorPeak = cursorPeak > 0 ? cursorPeak - 1 : 0;
+            else if (screen == 1)
+                cursorType = cursorType > 0 ? cursorType - 1 : 0;
+        }
+        else if (mask == kPadCross)
+        {
+            if (screen == 0)
+            {
+                acceptedPeak = cursorPeak;
+                screen = 1;
+            }
+            else if (screen == 1)
+            {
+                acceptedType = cursorType;
+                screen = 2;
+            }
+            else
+                left = true;
+        }
+        else if (mask == kPadTriangle && screen == 1)
+        {
+            screen = 0;
+            cursorPeak = reset; // P4: stock re-entry resets the cursor
+        }
+        else if (mask == kPadTriangle && screen == 2)
+            screen = 1;
+    };
+    for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+    {
+        NavOut o = navStep(n, view(), tick, false, false);
+        if (lastOut != 0 && o.mask == 0)
+            apply(lastOut);
+        lastOut = o.mask;
+        ++tick;
+    }
+    return {static_cast<int>(n.phase), n.handedOff, acceptedPeak};
+}
+
 // A scripted Select Peak/Mode/Event guest: directional presses move the
 // cursor (wrap over the list), Cross accepts one level down, Triangle backs
 // out one level, and Cross on the goal row leaves the Map screens.
@@ -615,6 +691,27 @@ void register_ps2_ssx3_tricky_list_tests()
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "flip completes");
             t.Equals(acceptedPeak, 0, "P1 accepted after flipping to Up"); });
+
+        tc.Run("P4 reset cursor at top still rides Garibaldi Slopestyle", [](TestCase &t)
+               {
+            const ResetDrive d = driveResetPeak(0);
+            t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from top");
+            t.IsTrue(d.handedOff, "handoff");
+            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+
+        tc.Run("P4 reset cursor at Peak 2 still rides Garibaldi Slopestyle", [](TestCase &t)
+               {
+            const ResetDrive d = driveResetPeak(1);
+            t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from reset value");
+            t.IsTrue(d.handedOff, "handoff");
+            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+
+        tc.Run("P4 reset cursor at last row still rides Garibaldi Slopestyle", [](TestCase &t)
+               {
+            const ResetDrive d = driveResetPeak(2);
+            t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from last row");
+            t.IsTrue(d.handedOff, "handoff");
+            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
 
         tc.Run("press budget aborts a stuck drive", [](TestCase &t)
                {

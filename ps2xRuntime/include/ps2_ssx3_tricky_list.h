@@ -251,11 +251,14 @@ struct NavState
     int dir = 0;      // adaptive step direction (+1/-1), 0 = undecided
     int lastPos = -2; // peak/type/row seen at the last evaluation
     int tries = 0;    // accept-only attempts (ToPeak/ToMode fallback)
-    int sub = 0;      // accept-only sub-step (0 step, 1 accept, 2 verify, 3 back)
+    int sub = 0;      // accept-only sub-step (0 step, 1 accept, 2 verify, 3 back,
+                      // 4 give up, 6 post-back-out accept, 7 directed step)
     uint64_t goneSince = 0; // Accept: first tick the Event widget read dead
-    int anchor = 0;   // assumed Peak/Mode cursor (top on entry; the accepted
-                      // word after each attempt). The pre-accept words are
-                      // stale (m4), so the fallback never trusts them.
+    int anchor = 0;   // top on first entry (legacy fast path); after any
+                      // back-out it holds the last directed step (0 = none)
+                      // for stagnation flips. The pre-accept words are stale
+                      // (m4) and the re-entry cursor resets (P4), so the
+                      // fallback never trusts a counted position.
     bool handedOff = false; // Done via Accept (race loading), else backed out
 };
 
@@ -441,22 +444,25 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                // Mismatch: the accepted word is ground truth for where the
-                // cursor was. Re-anchor there and step again. Stagnant (same
-                // accepted twice: a no-wrap edge or a lock): force the step
-                // away from the edge next time instead of the wrap-shortest.
+                // Mismatch: aim from ground truth (P4: the stock cursor
+                // resets on re-entry, so a counted anchor across a back-out
+                // overshoots into the gari5 {2,0} loop). anchor = last
+                // directed step (0 = none): flip only when that step left
+                // us stagnant, else aim goal-ward from the accepted word.
                 {
                     const int acc = v.peakOk ? static_cast<int>(v.peak) : 0;
-                    if (v.peakOk && acc == n.lastPos)
-                        n.dir = (acc == 0) ? 1 : -1;
+                    if (n.anchor != 0 && v.peakOk && acc == n.lastPos)
+                        n.dir = -n.anchor;
                     else
-                        n.dir = 0;
+                        n.dir = (static_cast<int>(n.goal.peak) > acc) ? 1 : -1;
                     n.lastPos = acc;
-                    n.anchor = acc;
+                    n.anchor = 0;
                 }
                 if (++n.tries >= kPeakTries)
                     return abort(); // never converging (or locked)
-                n.sub = 3;
+                // Post-back-out accepts (sub 6) step next (sub 7); first
+                // accepts (sub 2) take the reset value first (sub 3).
+                n.sub = (n.sub == 6) ? 7 : 3;
                 return press(kPadTriangle);
             }
             // Accepted onto Select Mode (live cursor).
@@ -490,13 +496,18 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.lastPos = static_cast<int>(v.peak);
             return press(n.dir > 0 ? kPadDown : kPadUp);
         }
-        // Accept-only fallback: the pre-accept word is stale (m4), so step
-        // the anchor (top on entry, the accepted word after each attempt),
-        // accept, and verify. Each attempt re-anchors on ground truth.
+        // Accept-only fallback: the pre-accept word is stale (m4), and the
+        // re-entry cursor resets (P4), so the first visit steps from the
+        // top anchor but every back-out accepts the reset value first
+        // (sub 3 -> 6), then aims one directed step from ground truth
+        // (sub 7 -> 1). Stagnation flips; the tries cap bounds it all.
         if (n.tries >= kPeakTries)
             return abort();
         if (n.sub == 3)
-            n.sub = 0; // backed out; step from the anchor
+        {
+            n.sub = 6;
+            return press(kPadCross);
+        }
         if (n.sub == 0)
         {
             if (n.anchor == static_cast<int>(n.goal.peak))
@@ -530,6 +541,20 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.sub = 4;
             return press(kPadCross);
         }
+        if (n.sub == 6)
+        {
+            // Still on Peak: the post-back-out accept did not take either.
+            n.sub = 4;
+            return press(kPadCross);
+        }
+        if (n.sub == 7)
+        {
+            // One directed step from the reset position, then accept.
+            const int step = (n.dir != 0) ? n.dir : 1;
+            n.anchor = step;
+            n.sub = 1;
+            return press(step > 0 ? kPadDown : kPadUp);
+        }
         return abort();
     case NavPhase::ToMode:
         if (v.screen == 2)
@@ -551,20 +576,20 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                // Mismatch: re-anchor on the accepted word and step again,
-                // forcing away from the edge on stagnation (same shape).
+                // Mismatch: same P4 ground-truth shape as the peak (the
+                // mode cursor resets the same way across a back-out).
                 {
                     const int acc = v.typeOk ? static_cast<int>(v.type) : 0;
-                    if (v.typeOk && acc == n.lastPos)
-                        n.dir = (acc == 0) ? 1 : -1;
+                    if (n.anchor != 0 && v.typeOk && acc == n.lastPos)
+                        n.dir = -n.anchor;
                     else
-                        n.dir = 0;
+                        n.dir = (static_cast<int>(n.goal.type) > acc) ? 1 : -1;
                     n.lastPos = acc;
-                    n.anchor = acc;
+                    n.anchor = 0;
                 }
                 if (++n.tries >= kModeTries)
                     return abort(); // never converging
-                n.sub = 3;
+                n.sub = (n.sub == 6) ? 7 : 3;
                 return press(kPadTriangle);
             }
             n.phase = NavPhase::ToEvent;
@@ -577,12 +602,13 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         }
         if (v.screen == 0)
         {
-            // Kicked back to Peak (lock?): re-sync.
+            // Kicked back to Peak (lock?): re-sync. Position unknown, so
+            // take the reset value first (sub 3), never the top anchor.
             n.phase = NavPhase::ToPeak;
             n.dir = 0;
             n.lastPos = -2;
             n.tries = 0;
-            n.sub = 0;
+            n.sub = 3;
             n.anchor = 0;
             return navStep(n, v, tick, peakLive, modeLive);
         }
@@ -605,12 +631,15 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.lastPos = static_cast<int>(v.type);
             return press(n.dir > 0 ? kPadDown : kPadUp);
         }
-        // Accept-only fallback: same anchor shape as the peak (top on
-        // entry = Race, the accepted word after each attempt).
+        // Accept-only fallback: same P4 shape as the peak (first visit
+        // steps from the top anchor; back-outs take the reset first).
         if (n.tries >= kModeTries)
             return abort();
         if (n.sub == 3)
-            n.sub = 0; // backed out; step from the anchor
+        {
+            n.sub = 6;
+            return press(kPadCross);
+        }
         if (n.sub == 0)
         {
             if (n.anchor == static_cast<int>(n.goal.type))
@@ -639,6 +668,18 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         {
             n.sub = 4;
             return press(kPadCross);
+        }
+        if (n.sub == 6)
+        {
+            n.sub = 4;
+            return press(kPadCross);
+        }
+        if (n.sub == 7)
+        {
+            const int step = (n.dir != 0) ? n.dir : 1;
+            n.anchor = step;
+            n.sub = 1;
+            return press(step > 0 ? kPadDown : kPadUp);
         }
         return abort();
     case NavPhase::ToEvent:
