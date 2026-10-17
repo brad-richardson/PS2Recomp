@@ -198,21 +198,23 @@ inline bool showTick(const std::vector<Sample> &ring, uint64_t now, uint64_t ide
 }
 
 // Owner-authoritative finish (R1). The race ends (0x113db0 -> state 6)
-// only when 0x12a250 sees every rider's R+0x470 >= 0 (its finish time,
-// float, -1 while racing). Each side reports its own rider's +0x470; when
-// the peer has finished but the local replica has not crossed the line
-// within kFinishGraceTicks of that report, the owner's time is written
-// into the replica's +0x470, so a missed local crossing can never leave
-// the all-riders-finished wait hanging. A natural local crossing comes
-// first in the normal case, so each side's displayed order stays as it
-// was (a canonical order is post-v0).
+// only when 0x12a250 sees every rider's R+0x470 >= 0. +0x470 is the
+// rider's finished timer (float, -1 while racing, counting up from 0 at
+// its crossing; v5r: 0.033 at the crossing edge, ~1.8 two seconds later).
+// Each side reports its own rider's value; when the peer has finished but
+// the local replica has not crossed the line within kFinishGraceTicks of
+// that report, the owner's value is written into the replica's +0x470,
+// so a missed local crossing can never leave the all-riders-finished wait
+// hanging. A natural local crossing comes first in the normal case and is
+// never overwritten, so each side's displayed order stays as it was (a
+// canonical order is post-v0).
 constexpr uint32_t kFinishOff = 0x470u;
 constexpr uint64_t kFinishGraceTicks = 120u;
 inline bool readFinish(const uint8_t *r, uint32_t rider, float &t)
 {
     return ps2_netsync::readF32(r, rider + kFinishOff, t) && std::isfinite(t);
 }
-// Pure (unit-tested): true when the owner's finish was written.
+// Pure (unit-tested): true when the owner's finished state was written.
 inline bool applyOwnerFinish(uint8_t *r, uint32_t replica, float ownerTime)
 {
     float cur = 0.0f;
@@ -343,7 +345,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
             s.peerFtime = smp.ftime;
             s.peerFinSeenRace = s.racing ? tick - s.t0 : 0u;
             s.peerFinLogged = true;
-            std::fprintf(stderr, "[stock120] peer finished peer_tick=%llu time=%.3f t=%llu\n",
+            std::fprintf(stderr, "[stock120] peer finished peer_tick=%llu +0x470=%.3f t=%llu\n",
                          (unsigned long long)smp.tick, (double)smp.ftime, (unsigned long long)tick);
         }
     }
@@ -392,7 +394,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
             if (smp.fin != s.ownFin)
             {
                 s.ownFin = smp.fin;
-                std::fprintf(stderr, "[stock120] own finish edge=%u time=%.3f race=%llu t=%llu\n", smp.fin,
+                std::fprintf(stderr, "[stock120] own finish edge=%u +0x470=%.3f race=%llu t=%llu\n", smp.fin,
                              (double)smp.ftime, (unsigned long long)raceTick, (unsigned long long)tick);
             }
             uint8_t pay[kPayloadLen];
@@ -456,10 +458,10 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
         float cur = -1.0f;
         readFinish(r, ghost, cur);
         if (applyOwnerFinish(r, ghost, s.peerFtime))
-            std::fprintf(stderr, "[stock120] replica finish applied from the owner: %.3f (local was %.3f) t=%llu\n",
+            std::fprintf(stderr, "[stock120] replica finished from the owner's report: +0x470 %.3f (local was %.3f) t=%llu\n",
                          (double)s.peerFtime, (double)cur, (unsigned long long)tick);
         else
-            std::fprintf(stderr, "[stock120] replica already finished locally: %.3f (owner %.3f) t=%llu\n",
+            std::fprintf(stderr, "[stock120] replica already finished locally: +0x470 %.3f (owner %.3f) t=%llu\n",
                          (double)cur, (double)s.peerFtime, (unsigned long long)tick);
     }
     uint64_t show = 0u;

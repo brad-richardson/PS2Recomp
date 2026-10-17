@@ -253,10 +253,10 @@ namespace
             std::vector<uint8_t> ram(ps2_netsync::kRamSize);
             constexpr uint32_t replica = 0x100000u;
             ps2_netsync::writeF32(ram.data(), replica + ps2_net_stock120::kFinishOff, -1.0f);
-            t.IsTrue(ps2_net_stock120::applyOwnerFinish(ram.data(), replica, 191.25f), "unfinished replica gets the owner's time");
+            t.IsTrue(ps2_net_stock120::applyOwnerFinish(ram.data(), replica, 191.25f), "unfinished replica gets the owner's finished state");
             float v = 0.0f;
             ps2_netsync::readF32(ram.data(), replica + ps2_net_stock120::kFinishOff, v);
-            t.IsTrue(v == 191.25f, "+0x470 holds the owner's finish time");
+            t.IsTrue(v == 191.25f, "+0x470 holds the owner's value");
             t.IsFalse(ps2_net_stock120::applyOwnerFinish(ram.data(), replica, 200.0f), "a local crossing is never overwritten");
             ps2_netsync::writeF32(ram.data(), replica + ps2_net_stock120::kFinishOff, -1.0f);
             t.IsFalse(ps2_net_stock120::applyOwnerFinish(ram.data(), replica, -1.0f), "no finish without an owner time");
