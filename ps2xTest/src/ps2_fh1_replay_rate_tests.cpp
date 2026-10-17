@@ -133,25 +133,10 @@ void register_ps2_fh1_replay_rate_tests()
             forget(s, 0x1000u);
             t.IsTrue(track(s, 0x1000u, false) == nullptr, "reset forgets the track");
         });
-        tc.Run("hook interest: replay sites only with the knob, in both phases", [](TestCase &t) {
-            using namespace ps2_fh1;
-            HookConfig c;
-            c.mode = Mode::Events;
-            for (bool active : {false, true})
-            {
-                c.guestActive = active;
-                c.replay = true;
-                auto h = buildHookInterest(c);
-                t.IsTrue(hookTableHit(h, kRecordSite, 1u), "record site");
-                t.IsTrue(hookTableHit(h, kPlaySite, 1u), "play site");
-                t.IsTrue(hookTableHit(h, 1u, kInputReset), "reset");
-                t.IsTrue(hookTableHit(h, 1u, kInputFree), "destroy");
-                c.replay = false;
-                h = buildHookInterest(c);
-                t.IsFalse(hookTableHit(h, kRecordSite, 1u), "off: no record site");
-                t.IsFalse(hookTableHit(h, kPlaySite, 1u), "off: no play site");
-            }
-        });
+        // NOTE (full120 slice 3): the replay hook-interest Run moved with the
+        // table content to games/ssx3/module/tests/ps2_fh1_hooktable_tests.cpp
+        // ("replay sites ride the table in both phases"); the rate logic
+        // below stays shared: it never reads module content.
         tc.Run("query holds clear at an entry flip", [](TestCase &t) {
             using namespace ps2_fh1;
             g_queryHold[0].p = 0x5409b0u;

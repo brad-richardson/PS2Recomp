@@ -276,6 +276,28 @@ void register_ps2_fh1_hooktable_tests()
             t.IsFalse(hookTableHit(hiIdle, dead, kStuntChgUpdate), "idle: stuntchg tgt out");
         });
 
+        // Full120 slice 3: relocated from ps2xTest/src/ps2_fh1_replay_rate_tests.cpp
+        // with the table content (the replay sites are module-owned rows now).
+        tc.Run("replay sites ride the table in both phases", [](TestCase &t)
+        {
+            HookConfig c;
+            c.mode = Mode::Events;
+            for (bool active : {false, true})
+            {
+                c.guestActive = active;
+                c.replay = true;
+                auto h = buildHookInterest(c);
+                t.IsTrue(hookTableHit(h, ps2_fh1_rpl::kRecordSite, 1u), "record site");
+                t.IsTrue(hookTableHit(h, ps2_fh1_rpl::kPlaySite, 1u), "play site");
+                t.IsTrue(hookTableHit(h, 1u, ps2_fh1_rpl::kInputReset), "reset");
+                t.IsTrue(hookTableHit(h, 1u, ps2_fh1_rpl::kInputFree), "destroy");
+                c.replay = false;
+                h = buildHookInterest(c);
+                t.IsFalse(hookTableHit(h, ps2_fh1_rpl::kRecordSite, 1u), "off: no record site");
+                t.IsFalse(hookTableHit(h, ps2_fh1_rpl::kPlaySite, 1u), "off: no play site");
+            }
+        });
+
         tc.Run("knob defaults to table when unset", [](TestCase &t)
         {
             if (std::getenv("PS2X_SSX3_FULL120_HOOKS") == nullptr)
