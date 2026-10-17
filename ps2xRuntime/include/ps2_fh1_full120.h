@@ -1123,26 +1123,6 @@ inline void stock120TrimDelay(uint8_t *ram, uint32_t in) noexcept
     }
 }
 
-// While the local pause menu is open: the local rider's unread inputs
-// become idle (count word kept, every channel 0.0, the idle wire body).
-inline void stock120NeutralLocal(uint8_t *ram, uint32_t in) noexcept
-{
-    uint32_t n = 0u, size = 0u;
-    if (!rd32(ram, in + 0x10u, n) || !rd32(ram, in + 4u, size) || n == 0u || n > 8u || size == 0u || size > 4096u)
-        return;
-    for (uint32_t i = 0u; i < n; ++i)
-    {
-        const uint32_t rec = in + 0x14u + 0x18u * i;
-        uint32_t base = 0u, r = 0u, w = 0u, local = 0u;
-        if (!rd32(ram, rec, base) || !rd32(ram, rec + 4u, r) || !rd32(ram, rec + 8u, w) ||
-            !rd32(ram, rec + 0xcu, local) || local == 0u || w - r > size)
-            continue;
-        for (uint32_t k = r; k != w; ++k)
-            for (uint32_t off = 4u; off < 100u; off += 4u)
-                wr32(ram, base + (k % size) * 100u + off, 0u);
-    }
-}
-
 // Checksum neutralizer (pre-hook at 0x12bdf4 -> 0x258f20): the peer table
 // becomes the local one plus this call's hash, so the compare matches.
 inline void stock120CkHook(uint8_t *ram, R5900Context *ctx) noexcept
@@ -1172,20 +1152,14 @@ inline void stock120CkHook(uint8_t *ram, R5900Context *ctx) noexcept
 // online-stock-2 (Brad 10-17): pause is local-only in a stock120 race.
 // The online pause (0x20ca10 when [0x534b30] is set) asks NetGame to pause
 // both sides (0x258790(ng, 1): [ng+0x3f8] = 1 here, a type-3 code 0 to the
-// peer, whose receive sets its own [ng+0x3f8]) and opens pause menu 6. The
-// app-mode flags word gp-0x6a0 then carries bit 0, which skips the whole
-// race sim block in the app update (0x230b48, 0x230bac, 0x230bf8). While
-// racing: the NetGame pause/resume calls are skipped (neither gate holds),
-// bit 0 is cleared for the sim block only (restored at its end, 0x230e34,
-// before the frontend runs) so the pauser's race keeps going under the
-// menu, and the pauser's rider gets neutral input (menu presses never
-// steer it).
-inline constexpr uint32_t kAppFlags = 0x4a30f0u - 0x6a0u; // gp-0x6a0
+// peer, whose receive sets its own [ng+0x3f8], closing both gates) and
+// opens the full-screen online pause screen (pause menu 6, a separate
+// frontend screen; the race neither renders nor updates behind it, and it
+// auto-returns after [ng+0x64] = 1800 updates). While racing the NetGame
+// pause/resume calls are skipped: the pauser's own race waits behind its
+// pause screen, the peer's never does.
 inline constexpr uint32_t kNetPause = 0x258790u;
-inline constexpr uint32_t kSimEndSite = 0x230e34u, kSimEnd = 0x237948u;
-inline bool g_s120Paused = false;
-inline uint32_t g_s120PauseWord = 0u;
-inline uint64_t g_s120PauseSince = 0u, g_s120NetPauseSkips = 0u;
+inline uint64_t g_s120NetPauseSkips = 0u;
 
 inline bool stock120Racing(const uint8_t *ram) noexcept
 {
@@ -1195,48 +1169,14 @@ inline bool stock120Racing(const uint8_t *ram) noexcept
     return st >= 5 && st < 32;
 }
 
-// Pre-hook at the app-update dispatch.
-inline void stock120PauseBegin(uint8_t *ram) noexcept
-{
-    uint32_t w = 0u;
-    if (g_s120Paused && rd32(ram, kAppFlags, w) && w == g_s120PauseWord)
-        wr32(ram, kAppFlags, w | 1u); // the last update never reached the sim-block end
-    const bool was = g_s120Paused;
-    g_s120Paused = false;
-    if (!stock120Racing(ram) || !rd32(ram, kAppFlags, w) || (w & 1u) == 0u)
-    {
-        if (was)
-            std::fprintf(stderr, "[stock120] local pause off t=%llu after %llu ticks net_pause_skips=%llu\n",
-                         static_cast<unsigned long long>(g_lastTick),
-                         static_cast<unsigned long long>(g_lastTick - g_s120PauseSince),
-                         static_cast<unsigned long long>(g_s120NetPauseSkips));
-        return;
-    }
-    if (!was)
-    {
-        g_s120PauseSince = g_lastTick;
-        std::fprintf(stderr, "[stock120] local pause on t=%llu flags=%08x (race keeps running)\n",
-                     static_cast<unsigned long long>(g_lastTick), w);
-    }
-    g_s120PauseWord = w & ~1u;
-    wr32(ram, kAppFlags, g_s120PauseWord);
-    g_s120Paused = true;
-}
-
-// Pre-hook at the race sim block's end (0x230e34 -> 0x237948).
-inline void stock120PauseEnd(uint8_t *ram) noexcept
-{
-    uint32_t w = 0u;
-    if (g_s120Paused && rd32(ram, kAppFlags, w) && w == g_s120PauseWord)
-        wr32(ram, kAppFlags, w | 1u);
-}
-
 // True = skip this NetGame pause/resume call (any source).
 inline bool stock120NetPauseSkip(const uint8_t *ram, uint32_t targetPc) noexcept
 {
     if (targetPc != kNetPause || !stock120Racing(ram))
         return false;
-    ++g_s120NetPauseSkips;
+    if (g_s120NetPauseSkips++ < 64u)
+        std::fprintf(stderr, "[stock120] net pause call skipped t=%llu (local-only pause)\n",
+                     static_cast<unsigned long long>(g_lastTick));
     return true;
 }
 
@@ -1246,8 +1186,6 @@ inline void lsTraceRaceTick(uint8_t *ram, R5900Context *ctx);
 
 inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
-    if (sourcePc == kAppUpdateSite && netStock120())
-        stock120PauseBegin(ram);
     if (targetPc == kTrickPass && sourcePc == kTrickPassSite && ctx && bonusFlipFix())
         bonusNoteState(getRegU32(ctx, 4), g_lastTick);
     if (replayRateOn() && ctx)
@@ -1262,11 +1200,7 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
         lsGateHook(ram, ctx);
     else if (sourcePc == kCkSite && targetPc == kCkFn && ctx)
         stock120CkHook(ram, ctx);
-    else if (sourcePc == kSimEndSite && targetPc == kSimEnd)
-    {
-        if (netStock120())
-            stock120PauseEnd(ram);
-    }
+
     else if (sourcePc == kRaceTickCallSite && targetPc == kRaceTickCallee)
     {
         g_passRan = true;
@@ -3924,8 +3858,6 @@ inline void lsGateHook(uint8_t *ram, R5900Context *ctx)
         if (st >= 5 && st < 32)
         {
             stock120TrimDelay(ram, in);
-            if (g_s120Paused)
-                stock120NeutralLocal(ram, in);
             stock120GateFeed(ram, in);
         }
     }

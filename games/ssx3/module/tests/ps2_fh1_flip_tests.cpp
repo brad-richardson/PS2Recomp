@@ -86,7 +86,7 @@ void register_ps2_fh1_flip_tests()
             t.Equals(lsGateWhy(ram.data(), in), 0u, "no players: open");
         });
 
-        tc.Run("online-stock-2: input-delay trim and paused-local neutral input", [](TestCase &t)
+        tc.Run("online-stock-2: input-delay trim", [](TestCase &t)
         {
             std::vector<uint8_t> ram(PS2_RAM_SIZE);
             constexpr uint32_t in = 0x3000u, base0 = 0x4000u, base1 = 0x8000u;
@@ -113,13 +113,10 @@ void register_ps2_fh1_flip_tests()
             uint32_t v = 0u;
             rd32(ram.data(), in, v);
             t.Equals(v, 4u, "delay trimmed to N");
-            stock120NeutralLocal(ram.data(), in);
-            rd32(ram.data(), base0 + 3u * 100u + 8u, v);
-            t.Equals(v, 0u, "local unread input zeroed");
-            rd32(ram.data(), base0 + 3u * 100u, v);
-            t.Equals(v, 24u, "count word kept");
-            rd32(ram.data(), base1 + 3u * 100u + 8u, v);
-            t.Equals(v, 0x3f800000u, "remote input untouched");
+            wr32(ram.data(), in, 2u);
+            stock120TrimDelay(ram.data(), in);
+            rd32(ram.data(), in, v);
+            t.Equals(v, 2u, "a target already below N is left alone");
         });
     });
 }

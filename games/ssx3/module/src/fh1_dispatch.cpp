@@ -35,7 +35,6 @@ void buildHookInterest(const ps2_fh1::HookConfig *cfg, ps2_fh1::HookInterest *ou
         addSrc(kAppUpdateSite);
         addSrc(kLsGateSite); // online-stock-2: lockstep gate (no-op without a 120 link)
         addSrc(kCkSite);     // online-stock-2: checksum verdict (no-op unless PS2X_NET_STOCK120)
-        addSrc(kSimEndSite); // online-stock-2: local pause, end of the race sim block
         addTgt(kNetPause);   // online-stock-2: NetGame pause/resume (skipped while racing)
         addTgt(kSelectorDispatch);
         addTgt(kRaceTickCallee);
