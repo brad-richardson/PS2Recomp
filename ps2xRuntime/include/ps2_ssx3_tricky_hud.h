@@ -619,55 +619,6 @@ inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, 
     }
 }
 
-// Label cover (Part 3: replaces the dark panel): each row of [x0,x1) is
-// filled with the horizontal lerp between the sky sampled just outside
-// both edges, feathered 2 px horizontally / 3 px vertically so no rect
-// edge shows. The SSX 3 SUPER UBER label (x545-615 y52-97) sits fully
-// inside; the chrome arch draws over the smear.
-inline void smearCover(uint8_t *frame, int fw, int fh, int x0, int y0, int x1, int y1)
-{
-    if (!frame || fw <= 0 || fh <= 0 || x1 <= x0 || y1 <= y0)
-        return;
-    const int xa = x0 < 0 ? 0 : x0;
-    const int xb = x1 > fw ? fw : x1;
-    const int ya = y0 < 0 ? 0 : y0;
-    const int yb = y1 > fh ? fh : y1;
-    const float span = static_cast<float>(x1 - x0);
-    for (int y = ya; y < yb; ++y)
-    {
-        const int lx = x0 - 2 < 0 ? 0 : x0 - 2;
-        const int rx = x1 + 2 > fw - 1 ? fw - 1 : x1 + 2;
-        const uint8_t *L = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(lx)) * 4u];
-        const uint8_t *R = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(rx)) * 4u];
-        const float lr = L[0], lg = L[1], lb = L[2];
-        const float rr = R[0], rg = R[1], rb = R[2];
-        const float fy0 = static_cast<float>(y - y0) / 3.0f;
-        const float fy1 = static_cast<float>(y1 - y) / 3.0f;
-        for (int x = xa; x < xb; ++x)
-        {
-            const float t = static_cast<float>(x - x0) / span;
-            float a = fy0;
-            if (fy1 < a)
-                a = fy1;
-            const float fx0 = static_cast<float>(x - x0) / 2.0f;
-            const float fx1 = static_cast<float>(x1 - x) / 2.0f;
-            if (fx0 < a)
-                a = fx0;
-            if (fx1 < a)
-                a = fx1;
-            if (a <= 0.0f)
-                continue;
-            if (a > 1.0f)
-                a = 1.0f;
-            uint8_t *d = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4u];
-            const float ia = 1.0f - a;
-            d[0] = static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[0] * ia + 0.5f);
-            d[1] = static_cast<uint8_t>((lg + (rg - lg) * t) * a + d[1] * ia + 0.5f);
-            d[2] = static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[2] * ia + 0.5f);
-        }
-    }
-}
-
 // Layout in 640x480 space (measured off the SSX 3 meter footprint), mapped
 // onto any export size right-anchored and per-axis scaled. The guest score
 // above y=50 is kept; everything else the meter covers is replaced.
