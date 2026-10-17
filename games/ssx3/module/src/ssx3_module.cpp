@@ -4,6 +4,7 @@
 #include "ps2_ssx3_module.h"
 #include "Ssx3Fh1Clock.h"
 #include "Ssx3Fh1Dispatch.h"
+#include "Ssx3Fh1Taps.h"
 #include "Ssx3Fh1FixContent.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
@@ -86,7 +87,8 @@ namespace
                                           &ps2_ssx3_fh1::buildHookInterest,
                                           &ps2_ssx3_fh1::onBranch,
                                           &ps2_ssx3_fh1::onReturn,
-                                          &ps2_ssx3_fh1::postUnwindRestore};
+                                          &ps2_ssx3_fh1::postUnwindRestore,
+                                          &ps2_ssx3_fh1::tapTargets()};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

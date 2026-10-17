@@ -164,6 +164,28 @@ void register_game_module_none_tests()
                 clean = clean && b == 0xA5u;
             t.IsTrue(clean, "RAM untouched");
         });
+        // full120 slice 6: the tap-target lists belong to the module.
+        // Without one, the tap bodies never fire: RAM is untouched and no
+        // tap counter moves.
+        tc.Run("no tap targets without the module", [](TestCase &t)
+               {
+            t.IsTrue(ps2_fh1::fh1TapTargets() == nullptr, "no list");
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0xA5u);
+            R5900Context ctx{};
+            ps2_fh1::fh26TapCall(ram.data(), &ctx, 0x133308u);
+            ps2_fh1::Fh9Tap &fh9 = ps2_fh1::fh9Tap();
+            const uint32_t savedR = fh9.r;
+            fh9.r = 0x1u;
+            ps2_fh1::fh9OnBranch(ram.data(), &ctx, 0x10b8acu, 0x1298c8u, false);
+            ps2_fh1::fh9OnBranch(ram.data(), &ctx, 0x10db3cu, 0x317810u, false);
+            fh9.r = savedR;
+            bool clean = true;
+            for (uint8_t b : ram)
+                clean = clean && b == 0xA5u;
+            t.IsTrue(clean, "RAM untouched");
+            t.Equals(fh9.gateCall[0], 0u, "no gate fire");
+            t.Equals(fh9.rng1[0], 0u, "no rng fire");
+        });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass
         // and with SSX 3's copied payload intact in RAM.

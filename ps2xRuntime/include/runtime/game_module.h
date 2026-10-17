@@ -66,7 +66,31 @@ namespace ps2_game_module
     // 10 (full120 slice 3): the dispatch cold side below.
     // 11 (full120 slice 4): the dispatch hot side below.
     // 12 (full120 slice 5): the post-call consume side below.
-    inline constexpr uint32_t kAbiVersion = 12u;
+    // 13 (full120 slice 6): the tap-target lists below.
+    inline constexpr uint32_t kAbiVersion = 13u;
+
+    // Tap-target lists (full120 slice 6). The tap bodies (srcTap,
+    // fh26TapCall, fh9OnBranch, fh10HistBranch, in4NoteRider) stay generic
+    // env-driven diagnostics; the game branch targets/sites they compare
+    // live here, module-owned. Null (or no module) reads as zeros: no tap
+    // ever fires (generic: no game hooks).
+    struct Fh1TapTargets
+    {
+        uint32_t stickTracker = 0u;  // fh26 stick-angle tracker call
+        uint32_t fh9RngTarget = 0u;  // fh9 stream-1 roll sites target
+        uint32_t fh9GateTarget = 0u; // fh9 race-tick gate target
+        uint32_t fh9GateSite[4] = {};
+        uint32_t fh9RngSite[8] = {};
+        uint32_t fh9WrapTarget = 0u; // fh9 trick-wrap recorder
+        uint32_t fh9StateTarget = 0u; // fh9 control-state site
+        uint32_t fh9WrapSite = 0u;   // fh9 wrap caller
+        uint32_t fh9SubTarget = 0u;  // fh9 sub-state-7 gate call
+        uint32_t fh9SubSite = 0u;    // fh9 sub-state-7 gate caller
+        uint32_t fh9CrossTarget = 0u; // fh9 event-bit crossing setter
+        uint32_t fh9ExactTarget = 0u; // fh9 event-bit exact setter
+        uint32_t fh9EndTarget = 0u;   // fh9 event-bit end setter
+        uint32_t fh9AdvTarget = 0u;   // fh9 per-channel advance
+    };
 
     // FIX-policy content (full120 slice 1). The module owns the group
     // name/bit tables, the "all" composition and the mask-compat predicates;
@@ -218,6 +242,8 @@ namespace ps2_game_module
         // (or no module) is a no-op (generic: no game hooks).
         void (*fh1OnReturn)(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned) = nullptr;
         void (*fh1PostUnwind)(uint8_t *ram) = nullptr;
+        // Tap-target lists (full120 slice 6): see Fh1TapTargets above.
+        const Fh1TapTargets *fh1TapTargets = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

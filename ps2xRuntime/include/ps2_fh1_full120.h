@@ -2014,6 +2014,15 @@ struct Fh26Tap
     uint64_t from = 0u, to = ~0ull;
 };
 
+// Full120 slice 6: game branch targets/sites named by the tap bodies
+// live in the module (Module.fh1TapTargets). Null (or no module) reads
+// as zeros: no tap ever fires (generic: no game hooks).
+inline const ps2_game_module::Fh1TapTargets *fh1TapTargets() noexcept
+{
+    const ps2_game_module::Module *m = ps2_game_module::linkedModule();
+    return (m && m->fh1TapTargets) ? m->fh1TapTargets : nullptr;
+}
+
 inline const Fh26Tap &fh26Tap()
 {
     static const Fh26Tap t = [] {
@@ -2037,7 +2046,8 @@ inline const Fh26Tap &fh26Tap()
 inline void fh26TapCall(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     const Fh26Tap &t = fh26Tap();
-    if (targetPc != 0x133308u || !ctx || getRegU32(ctx, 4) != t.s || g_lastTick < t.from || g_lastTick > t.to)
+    const ps2_game_module::Fh1TapTargets *tt = fh1TapTargets();
+    if (!tt || targetPc != tt->stickTracker || !ctx || getRegU32(ctx, 4) != t.s || g_lastTick < t.from || g_lastTick > t.to)
         return;
     static uint32_t lines = 0u;
     if (lines++ >= 8000u)
@@ -2138,20 +2148,21 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
     Fh9Tap &t = fh9Tap();
     if (!t.r || !ctx)
         return;
-    static const uint32_t gateSite[4] = {0x10b8acu, 0x10bdccu, 0x10da6cu, 0x10dc30u};
+    const ps2_game_module::Fh1TapTargets *tt = fh1TapTargets();
+    if (!tt)
+        return;
     static const uint32_t gateMod[4] = {20u, 12u, 6u, 6u};
-    static const uint32_t rngSite[8] = {0x10db3cu, 0x10b8d0u, 0x10b910u, 0x10c1dcu, 0x115e4cu, 0x115fa4u, 0x10b468u, 0u};
-    if (targetPc == 0x317810u)
+    if (targetPc == tt->fh9RngTarget)
     {
         for (int i = 0; i < 8; ++i)
-            if (sourcePc == rngSite[i])
+            if (sourcePc == tt->fh9RngSite[i])
                 ++t.rng1[i];
         return;
     }
-    if (targetPc == 0x1298c8u)
+    if (targetPc == tt->fh9GateTarget)
     {
         for (int i = 0; i < 4; ++i)
-            if (sourcePc == gateSite[i])
+            if (sourcePc == tt->fh9GateSite[i])
             {
                 uint32_t a = 0u, b = 0u, c = 0u, tick = 0u;
                 if (rd32(ram, 0x4a28a8u, a) && rd32(ram, a + 0x84u, b) && rd32(ram, b + 0xcu, c) &&
@@ -2171,14 +2182,14 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
     uint32_t de0 = 0u, de4 = 0u;
     rd32(ram, p + 0xde0u, de0);
     rd32(ram, p + 0xde4u, de4);
-    if (targetPc == 0x11fec8u && a0 == t.r)
+    if (targetPc == tt->fh9WrapTarget && a0 == t.r)
     {
         t.wrapSrc = sourcePc;
         return;
     }
-    if (targetPc == 0x111538u && a0 == p)
+    if (targetPc == tt->fh9StateTarget && a0 == p)
     {
-        const uint32_t src = sourcePc == 0x11fed0u ? t.wrapSrc : sourcePc;
+        const uint32_t src = sourcePc == tt->fh9WrapSite ? t.wrapSrc : sourcePc;
         t.wrapSrc = 0u;
         if (a1 < 16u)
             ++t.st[a1];
@@ -2189,7 +2200,7 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
                          de0);
         return;
     }
-    if (targetPc == 0x312ae8u && sourcePc == 0x12e8e8u && a0 == ctrl)
+    if (targetPc == tt->fh9SubTarget && sourcePc == tt->fh9SubSite && a0 == ctrl)
     {
         uint32_t base = 0u, track = 0u, flag = 0u;
         rd32(ram, ctrl + 0x50u, base);
@@ -2208,8 +2219,8 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
         }
         return;
     }
-    const bool cross = targetPc == 0x313868u, exact = targetPc == 0x313938u, end = targetPc == 0x3139a8u;
-    const bool adv = targetPc == 0x3135b0u;
+    const bool cross = targetPc == tt->fh9CrossTarget, exact = targetPc == tt->fh9ExactTarget, end = targetPc == tt->fh9EndTarget;
+    const bool adv = targetPc == tt->fh9AdvTarget;
     if (!cross && !exact && !end && !adv)
         return;
     const int ch = fh9Channel(ram, ctrl, a0);
@@ -2286,10 +2297,10 @@ inline void fh9OnVBlank(uint64_t tick)
             if (t.bits[c][b])
                 n += std::snprintf(line + n, sizeof(line) - n, " b%d.%d=%u", c, b, t.bits[c][b]);
     }
-    static const uint32_t rngSite[7] = {0x10db3cu, 0x10b8d0u, 0x10b910u, 0x10c1dcu, 0x115e4cu, 0x115fa4u, 0x10b468u};
-    for (int i = 0; i < 7; ++i)
-        if (t.rng1[i])
-            n += std::snprintf(line + n, sizeof(line) - n, " r%x=%u", rngSite[i], t.rng1[i]);
+    if (const ps2_game_module::Fh1TapTargets *tt = fh1TapTargets())
+        for (int i = 0; i < 7; ++i)
+            if (t.rng1[i])
+                n += std::snprintf(line + n, sizeof(line) - n, " r%x=%u", tt->fh9RngSite[i], t.rng1[i]);
     for (int i = 0; i < 4; ++i)
         if (t.gateCall[i])
             n += std::snprintf(line + n, sizeof(line) - n, " gate%d=%u/%u", i, t.gatePass[i], t.gateCall[i]);
