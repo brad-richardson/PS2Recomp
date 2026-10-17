@@ -30,8 +30,8 @@ namespace ps2_net_stock120
 using ps2_netsync::F32Trip;
 using ps2_netsync::Sample;
 
-constexpr size_t kPayloadLen = 50u; // ver u8 | tick u32 | pos 3f | quat 4f | vel 3f | fin u8 | ftime f32
-constexpr uint8_t kVersion = 1u;
+constexpr size_t kPayloadLen = 51u; // ver u8 | epoch u8 | tick u32 | pos 3f | quat 4f | vel 3f | fin u8 | ftime f32
+constexpr uint8_t kVersion = 2u;
 constexpr uint64_t kTimeoutUs = 3000000u;
 
 struct Knobs
@@ -75,23 +75,26 @@ inline float getF(const uint8_t *p)
     return v;
 }
 
-// Pure (unit-tested): one state payload and its decode.
-inline void encode(uint8_t *o, uint32_t tick, const Sample &s)
+// Pure (unit-tested): one state payload and its decode. `epoch` is the
+// sender's race counter (bumped at each of its race starts), so a tick
+// decrease alone is never read as a new race (R4).
+inline void encode(uint8_t *o, uint8_t epoch, uint32_t tick, const Sample &s)
 {
     o[0] = kVersion;
-    std::memcpy(o + 1, &tick, 4);
-    putF(o + 5, s.pos.x);
-    putF(o + 9, s.pos.y);
-    putF(o + 13, s.pos.z);
-    putF(o + 17, s.qx);
-    putF(o + 21, s.qy);
-    putF(o + 25, s.qz);
-    putF(o + 29, s.qw);
-    putF(o + 33, s.vel.x);
-    putF(o + 37, s.vel.y);
-    putF(o + 41, s.vel.z);
-    o[45] = s.fin;
-    putF(o + 46, s.ftime);
+    o[1] = epoch;
+    std::memcpy(o + 2, &tick, 4);
+    putF(o + 6, s.pos.x);
+    putF(o + 10, s.pos.y);
+    putF(o + 14, s.pos.z);
+    putF(o + 18, s.qx);
+    putF(o + 22, s.qy);
+    putF(o + 26, s.qz);
+    putF(o + 30, s.qw);
+    putF(o + 34, s.vel.x);
+    putF(o + 38, s.vel.y);
+    putF(o + 42, s.vel.z);
+    o[46] = s.fin;
+    putF(o + 47, s.ftime);
 }
 
 // Pure (unit-tested): a sample is written into guest physics only if every
@@ -116,23 +119,60 @@ inline bool saneSample(const Sample &s)
     return s.ftime >= -2.0f && s.ftime <= kTimeLimit;
 }
 
-inline bool decode(const uint8_t *p, size_t n, Sample &s)
+inline bool decode(const uint8_t *p, size_t n, Sample &s, uint8_t &epoch)
 {
     if (n != kPayloadLen || p[0] != kVersion)
         return false;
     uint32_t t = 0u;
-    std::memcpy(&t, p + 1, 4);
+    std::memcpy(&t, p + 2, 4);
     s = Sample{};
+    epoch = p[1];
     s.tick = t;
-    s.pos = {getF(p + 5), getF(p + 9), getF(p + 13)};
-    s.qx = getF(p + 17);
-    s.qy = getF(p + 21);
-    s.qz = getF(p + 25);
-    s.qw = getF(p + 29);
-    s.vel = {getF(p + 33), getF(p + 37), getF(p + 41)};
-    s.fin = p[45];
-    s.ftime = getF(p + 46);
+    s.pos = {getF(p + 6), getF(p + 10), getF(p + 14)};
+    s.qx = getF(p + 18);
+    s.qy = getF(p + 22);
+    s.qz = getF(p + 26);
+    s.qw = getF(p + 30);
+    s.vel = {getF(p + 34), getF(p + 38), getF(p + 42)};
+    s.fin = p[46];
+    s.ftime = getF(p + 47);
     return saneSample(s);
+}
+
+// Pure (unit-tested): one received sample into the tick-ordered ring (R4).
+// A newer epoch (int8 distance > 0) is the peer's next race: the ring
+// restarts. An older epoch, or one the local race has already moved past
+// (`minEpoch`), is stale and dropped. Within an epoch, samples are
+// inserted in tick order (a reordered older tick no longer wipes newer
+// history); duplicates are dropped; the ring keeps the newest 64.
+// Returns false when the sample was dropped.
+struct RingEpoch
+{
+    bool have = false;
+    uint8_t epoch = 0u;
+    bool needNewer = false; // set at a local race start: the old race's samples are stale
+};
+inline bool ringInsert(std::vector<Sample> &ring, RingEpoch &e, uint8_t epoch, const Sample &smp)
+{
+    const int8_t d = static_cast<int8_t>(static_cast<uint8_t>(epoch - e.epoch));
+    if (!e.have || d > 0)
+    {
+        ring.clear();
+        e.have = true;
+        e.epoch = epoch;
+        e.needNewer = false;
+    }
+    else if (d < 0 || e.needNewer)
+        return false;
+    auto it = ring.begin();
+    while (it != ring.end() && it->tick < smp.tick)
+        ++it;
+    if (it != ring.end() && it->tick == smp.tick)
+        return false;
+    ring.insert(it, smp);
+    if (ring.size() > 64u)
+        ring.erase(ring.begin());
+    return true;
 }
 
 // Pure (unit-tested): the peer tick to show at `now`: the newest sample's
@@ -163,11 +203,13 @@ struct State
     std::vector<Sample> ring;
     uint64_t lastRxUs = 0u;
     bool alive = false, mapped = false;
-    uint64_t sent = 0u, recvd = 0u, bad = 0u, shows = 0u, lastLog = 0u;
+    uint64_t sent = 0u, recvd = 0u, bad = 0u, stale = 0u, shows = 0u, lastLog = 0u;
     double errMax = 0.0, errSum = 0.0;
     uint64_t errN = 0u, lagSum = 0u;
     uint8_t ownFin = 0u;
     bool peerFinLogged = false;
+    uint8_t localEpoch = 0u;
+    RingEpoch peerEpoch;
 };
 
 inline State &state()
@@ -237,19 +279,18 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     for (size_t i = 0; i < pays.size(); ++i)
     {
         Sample smp;
-        if (!decode(pays[i].data(), pays[i].size(), smp))
+        uint8_t epoch = 0u;
+        if (!decode(pays[i].data(), pays[i].size(), smp, epoch))
         {
             ++s.bad;
             continue;
         }
         smp.rxUs = rx[i];
-        if (!s.ring.empty() && smp.tick < s.ring.back().tick)
-            s.ring.clear(); // the peer started a new race
-        if (!s.ring.empty() && smp.tick == s.ring.back().tick)
+        if (!ringInsert(s.ring, s.peerEpoch, epoch, smp))
+        {
+            ++s.stale;
             continue;
-        s.ring.push_back(smp);
-        if (s.ring.size() > 64u)
-            s.ring.erase(s.ring.begin());
+        }
         ++s.recvd;
         s.lastRxUs = smp.rxUs;
         s.alive = true;
@@ -270,6 +311,13 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
             s.t0 = tick;
             s.lastSend = -1;
             s.lastLog = tick;
+            ++s.localEpoch;
+            // The peer's samples from an earlier race are stale from here
+            // until its next race epoch arrives (a replay or restart).
+            if (s.peerEpoch.have)
+                s.peerEpoch.needNewer = s.localEpoch > 1u;
+            s.ring.clear();
+            s.alive = false;
         }
         logLine(racing ? "race start" : "race end", tick);
     }
@@ -295,7 +343,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
                              (unsigned long long)raceTick, (unsigned long long)tick);
             }
             uint8_t pay[kPayloadLen];
-            encode(pay, (uint32_t)raceTick, smp);
+            encode(pay, s.localEpoch, (uint32_t)raceTick, smp);
             if (ps2_net::stateSend(pay, sizeof(pay)))
                 ++s.sent;
         }

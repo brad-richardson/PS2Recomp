@@ -194,15 +194,17 @@ namespace
             a.fin = 1u;
             a.ftime = 123.25f;
             uint8_t p[ps2_net_stock120::kPayloadLen];
-            ps2_net_stock120::encode(p, 4321u, a);
+            ps2_net_stock120::encode(p, 9u, 4321u, a);
             ps2_netsync::Sample b;
-            t.IsTrue(ps2_net_stock120::decode(p, sizeof(p), b), "decodes");
+            uint8_t epoch = 0u;
+            t.IsTrue(ps2_net_stock120::decode(p, sizeof(p), b, epoch), "decodes");
+            t.Equals(epoch, (uint8_t)9u, "epoch");
             t.Equals(b.tick, (uint64_t)4321u, "tick");
             t.IsTrue(b.pos.z == 300.0f && b.vel.x == -4.0f && b.qw == 0.9f && b.fin == 1u && b.ftime == 123.25f,
                      "fields");
-            t.IsFalse(ps2_net_stock120::decode(p, sizeof(p) - 1u, b), "short payload refused");
+            t.IsFalse(ps2_net_stock120::decode(p, sizeof(p) - 1u, b, epoch), "short payload refused");
             p[0] = 9u;
-            t.IsFalse(ps2_net_stock120::decode(p, sizeof(p), b), "wrong version refused");
+            t.IsFalse(ps2_net_stock120::decode(p, sizeof(p), b, epoch), "wrong version refused");
         });
 
         tc.Run("online-stock-2: R2 every STATE field is validated on decode and after interpolation",
@@ -214,9 +216,10 @@ namespace
             good.vel = {100.0f, 0.0f, -50.0f};
             auto roundTrip = [&](const ps2_netsync::Sample &in) {
                 uint8_t p[ps2_net_stock120::kPayloadLen];
-                ps2_net_stock120::encode(p, 7u, in);
+                ps2_net_stock120::encode(p, 1u, 7u, in);
                 ps2_netsync::Sample out;
-                return ps2_net_stock120::decode(p, sizeof(p), out);
+                uint8_t epoch = 0u;
+                return ps2_net_stock120::decode(p, sizeof(p), out, epoch);
             };
             t.IsTrue(roundTrip(good), "valid sample accepted");
             ps2_netsync::Sample bad = good;
@@ -243,6 +246,35 @@ namespace
             show.pos.z = 5.0e6f;
             t.IsFalse(ps2_net_stock120::saneSample(show), "out-of-course show sample refused");
             t.IsTrue(ps2_net_stock120::saneSample(good), "in-course show sample written");
+        });
+
+        tc.Run("online-stock-2: R4 STATE ring is tick-ordered within a race epoch", [](TestCase &t)
+        {
+            using ps2_net_stock120::ringInsert;
+            std::vector<ps2_netsync::Sample> ring;
+            ps2_net_stock120::RingEpoch e;
+            auto at = [](uint64_t tick) {
+                ps2_netsync::Sample s;
+                s.tick = tick;
+                return s;
+            };
+            t.IsTrue(ringInsert(ring, e, 1u, at(120)), "first sample");
+            t.IsTrue(ringInsert(ring, e, 1u, at(126)), "next sample");
+            t.IsTrue(ringInsert(ring, e, 1u, at(114)), "reordered older tick inserted");
+            t.Equals(ring.size(), (size_t)3u, "history kept");
+            t.Equals(ring.front().tick, (uint64_t)114u, "ordered front");
+            t.Equals(ring.back().tick, (uint64_t)126u, "newest stays the show anchor");
+            t.IsFalse(ringInsert(ring, e, 1u, at(120)), "duplicate dropped");
+            t.IsFalse(ringInsert(ring, e, 0u, at(500)), "older epoch dropped");
+            t.IsTrue(ringInsert(ring, e, 2u, at(6)), "newer epoch restarts the ring");
+            t.Equals(ring.size(), (size_t)1u, "old race history cleared");
+            e.needNewer = true; // local race restarted
+            t.IsFalse(ringInsert(ring, e, 2u, at(12)), "the old race's samples are stale after a local restart");
+            t.IsTrue(ringInsert(ring, e, 3u, at(6)), "the peer's next race is accepted");
+            ps2_net_stock120::RingEpoch w;
+            w.have = true;
+            w.epoch = 255u;
+            t.IsTrue(ringInsert(ring, w, 0u, at(6)), "epoch wraps forward (255 -> 0)");
         });
 
         tc.Run("online-stock-2: stock120 show tick uses the peer's observed rate", [](TestCase &t)
