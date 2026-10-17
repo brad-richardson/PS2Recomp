@@ -167,6 +167,29 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(std::strcmp(kCourses[2].modeName[1], "Slopestyle"), 0, "Jam mode name");
             t.Equals(kCourses[6].nOpts, 1, "Pipedream single-mode"); });
 
+        tc.Run("Part 3 table: four Slopestyle modes mapped onto ev6", [](TestCase &t)
+               {
+            const int mapped[] = {0, 1, 3, 4};
+            const char *arch[] = {"GARI", "SNOW", "MESA", "MERQ"};
+            const char *names[] = {"Garibaldi", "Snowdream", "Mesablanca", "Merqury City"};
+            for (int k = 0; k < 4; ++k)
+            {
+                const int i = mapped[k];
+                t.Equals(kCourses[i].nOpts, 2, "mapped course dual-mode");
+                t.Equals(std::strcmp(kCourses[i].modeName[1], "Slopestyle"), 0, "second mode label");
+                t.Equals(kCourses[i].opts[1].peak, 1, "donor P2");
+                t.Equals(kCourses[i].opts[1].type, 1, "donor freestyle");
+                t.Equals(kCourses[i].opts[1].row, 0, "donor row 0 (ev6)");
+                t.Equals(kCourses[i].opts[1].map.event, 6, "donor ev6");
+                t.Equals(std::strcmp(kCourses[i].opts[1].map.archive, arch[k]), 0, "world archive");
+                t.Equals(std::strcmp(kCourses[i].opts[1].map.name, names[k]), 0, "world name");
+                t.Equals(kCourses[i].opts[0].map.event, -1, "race row native");
+            }
+            const int native[] = {2, 5, 6, 7, 8, 9};
+            for (int k = 0; k < 6; ++k)
+                for (int m = 0; m < 2; ++m)
+                    t.Equals(kCourses[native[k]].opts[m].map.event, -1, "Jam/single rows unmapped"); });
+
         tc.Run("list nav wraps per step; single-mode cursor stays put", [](TestCase &t)
                {
             ListState s;
@@ -273,6 +296,95 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(toreDown, "teardown simulated");
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "retry rides through teardown");
             t.Equals(g.row, 2, "cursor reached row 2, never the row-3 copy"); });
+
+        tc.Run("Accept edge flags apply for mapped goals, restore for native", [](TestCase &t)
+               {
+            // Garibaldi Slopestyle: donor ev6 at P2 Free row 0.
+            FakeGuest g;
+            g.screen = 2;
+            g.peak = 0;
+            g.type = 0;
+            g.row = 0;
+            g.goal = kCourses[0].opts[1];
+            g.goalEvent = 6;
+            NavState n;
+            navStart(n, g.goal, 0, 0);
+            t.Equals(n.event, 6, "mapped goal verifies the donor event");
+            uint64_t tick = 0;
+            uint16_t lastOut = 0;
+            bool sawApply = false, sawRestore = false;
+            for (int i = 0; i < 900 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            {
+                NavOut o = navStep(n, g.view(), tick, true, true);
+                if (o.mapApply)
+                    sawApply = true;
+                if (o.mapRestore)
+                    sawRestore = true;
+                if (lastOut != 0 && o.mask == 0)
+                    g.applyFinished(lastOut);
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.IsTrue(sawApply, "mapped Accept flags apply");
+            t.IsFalse(sawRestore, "no restore on a mapped drive");
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "mapped drive hands off");
+            // Garibaldi Race: native row restores.
+            FakeGuest h;
+            h.screen = 2;
+            h.peak = 0;
+            h.type = 0;
+            h.row = 0;
+            h.goal = kCourses[0].opts[0];
+            h.goalEvent = 0;
+            NavState m;
+            navStart(m, h.goal, 0, 0);
+            t.Equals(m.event, 0, "native goal verifies the course event");
+            tick = 0;
+            lastOut = 0;
+            sawApply = false;
+            sawRestore = false;
+            for (int i = 0; i < 900 && m.phase != NavPhase::Done && m.phase != NavPhase::Aborted; ++i)
+            {
+                NavOut o = navStep(m, h.view(), tick, true, true);
+                if (o.mapApply)
+                    sawApply = true;
+                if (o.mapRestore)
+                    sawRestore = true;
+                if (lastOut != 0 && o.mask == 0)
+                    h.applyFinished(lastOut);
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.IsFalse(sawApply, "no apply on a native drive");
+            t.IsTrue(sawRestore, "native Accept flags restore");
+            t.Equals(static_cast<int>(m.phase), static_cast<int>(NavPhase::Done), "native drive hands off"); });
+
+        tc.Run("mapper snapshots, applies and restores on synthetic RAM", [](TestCase &t)
+               {
+            // Minimal event table: ev6 archive+name fields live.
+            const uint32_t size = kMapEventBase + 7u * kMapEventStride + kMapArchiveOff + kMapArchiveLen;
+            std::vector<uint8_t> ram(size, 0);
+            auto field = [&](int ev, uint32_t off) -> uint8_t * { return ram.data() + kMapEventBase + ev * kMapEventStride + off; };
+            std::memcpy(field(6, kMapArchiveOff), "ALASKA", 7);
+            std::memcpy(field(6, kMapNameOff), "Alaska", 7);
+            MapSpec spec{6, "SNOW", "Snowdream"};
+            t.IsTrue(applyCourseMap(ram.data(), size, spec), "apply writes");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(6, kMapArchiveOff)), "SNOW"), 0,
+                     "archive mapped");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(6, kMapNameOff)), "Snowdream"), 0,
+                     "name mapped");
+            t.IsTrue(applyCourseMap(ram.data(), size, spec), "re-apply idempotent");
+            t.IsTrue(restoreCourseMap(ram.data(), size), "restore writes back");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(6, kMapArchiveOff)), "ALASKA"), 0,
+                     "archive stock again");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(6, kMapNameOff)), "Alaska"), 0,
+                     "name stock again");
+            t.IsTrue(restoreCourseMap(ram.data(), size), "second restore no-op");
+            MapSpec bad{23, "SNOW", "Snowdream"};
+            t.IsFalse(applyCourseMap(ram.data(), size, bad), "event 23 refused");
+            MapSpec empty{6, "", "Snowdream"};
+            t.IsFalse(applyCourseMap(ram.data(), size, empty), "empty archive refused");
+            t.IsFalse(applyCourseMap(ram.data(), 64, spec), "short RAM refused"); });
 
         tc.Run("navigator aborts with the pad released when the view goes blind", [](TestCase &t)
                {

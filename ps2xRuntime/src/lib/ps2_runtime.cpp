@@ -8860,12 +8860,14 @@ void PS2Runtime::run()
                     // (out of the overlay on step 0). Left/Right do nothing.
                     const auto tkArmRide = [&] {
                         const tkl::Course &c = tkl::kCourses[tkList.sel];
-                        tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                        const tkl::CourseOption &tkGoal = tkl::listGoal(tkList);
+                        tkl::driveArm(tkGoal, c.event, tkTick);
+                        // Part 3: a mapped mode rides the donor event.
+                        const int tkEv = (tkGoal.map.event >= 0) ? tkGoal.map.event : c.event;
                         std::fprintf(stderr, "[tklist] tick=%llu ride %s [%s] (peak %u type %u row %u ev %d)\n",
                                      static_cast<unsigned long long>(tkTick), c.name,
-                                     c.modeName[tkList.step == 1 ? tkList.mode : 0],
-                                     tkl::listGoal(tkList).peak, tkl::listGoal(tkList).type,
-                                     tkl::listGoal(tkList).row, c.event);
+                                     c.modeName[tkList.step == 1 ? tkList.mode : 0], tkGoal.peak,
+                                     tkGoal.type, tkGoal.row, tkEv);
                     };
                     const auto tkCross = [&] {
                         const tkl::Course &c = tkl::kCourses[tkList.sel];

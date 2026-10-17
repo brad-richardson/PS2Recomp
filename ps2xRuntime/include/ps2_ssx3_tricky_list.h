@@ -17,6 +17,7 @@
 #include "ps2_ssx3_tricky_preview.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -52,11 +53,23 @@ inline bool knob()
 // says "Big Air", events 6/7 read 3 "Slopestyle"). `tp` is the TP*.SSH
 // preview code, or null when the overlay ships none (Megaplex: text card,
 // Part 1 Q3).
+// Launch-time world mapping for one mode (Part 3): the navigator drives
+// the donor event's (peak, type, row), and at the ToEvent->Accept edge the
+// game thread points the donor's world archive+name at the course world
+// (design: tk-modes-1 spike 90effd64, TK8 §3a). event < 0 = native row.
+struct MapSpec
+{
+    int8_t event = -1;
+    const char *archive = nullptr;
+    const char *name = nullptr;
+};
+
 struct CourseOption
 {
     uint8_t peak; // 0..2 (P1..P3)
     uint8_t type; // 0 Race list, 1 Freestyle list
     uint8_t row;  // cursor row on the Select Event list
+    MapSpec map;  // world mapping, or none
 };
 
 struct Course
@@ -70,11 +83,15 @@ struct Course
 };
 
 inline constexpr Course kCourses[10] = {
-    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
-    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 0, 0}}, 1, {"Race", nullptr}},
+    // Part 3: Garibaldi/Snowdream/Mesablanca/Merqury gain a Slopestyle mode
+    // via ev6 (native slopestyle, P2 Free row 0); the Jam rows, the native
+    // slopestyles and Pipedream stay unmapped. Archive codes verified live
+    // (preview course() gate); names are display strings (<= 31 chars).
+    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {1, 1, 0, {6, "GARI", "Garibaldi"}}}, 2, {"Race", "Slopestyle"}},
+    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {1, 1, 0, {6, "SNOW", "Snowdream"}}}, 2, {"Race", "Slopestyle"}},
     {"Elysium Alps", "ELYS", 16, {{2, 0, 1}, {2, 1, 3}}, 2, {"Race", "Slopestyle"}},
-    {"Mesablanca", "MESA", 2, {{1, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
-    {"Merqury City", "MERQ", 4, {{2, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
+    {"Mesablanca", "MESA", 2, {{1, 0, 0}, {1, 1, 0, {6, "MESA", "Mesablanca"}}}, 2, {"Race", "Slopestyle"}},
+    {"Merqury City", "MERQ", 4, {{2, 0, 0}, {1, 1, 0, {6, "MERQ", "Merqury City"}}}, 2, {"Race", "Slopestyle"}},
     {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Slopestyle"}},
     {"Pipedream", "PIPE", 11, {{0, 1, 2}, {0, 0, 0}}, 1, {"Super Pipe", nullptr}},
     {"Untracked", "UNTRACK", 7, {{2, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
@@ -220,7 +237,8 @@ struct NavState
 {
     NavPhase phase = NavPhase::Idle;
     CourseOption goal = {};
-    int event = -1;
+    int event = -1; // verified cursor event (donor for mapped goals)
+    MapSpec map;    // world mapping to apply at the Accept edge, or none
     uint16_t hold = 0;       // mask held now
     uint64_t holdUntil = 0;  // guest tick (exclusive)
     uint64_t releaseUntil = 0;
@@ -244,6 +262,8 @@ struct NavOut
     uint16_t mask = 0;
     bool done = false;
     bool aborted = false;
+    bool mapApply = false;   // ToEvent->Accept with a mapped goal: the caller
+    bool mapRestore = false; // writes (or restores) before publishing the mask
 };
 
 inline const char *navPhaseName(NavPhase p)
@@ -287,7 +307,8 @@ inline void navStart(NavState &n, const CourseOption &goal, int event, uint64_t 
     n = NavState{};
     n.phase = NavPhase::Sync;
     n.goal = goal;
-    n.event = event;
+    n.map = goal.map;
+    n.event = (goal.map.event >= 0) ? goal.map.event : event;
     n.releaseUntil = tick; // evaluate immediately
     n.lastTick = tick;
 }
@@ -626,7 +647,17 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         {
             n.phase = NavPhase::Accept;
             n.goneSince = 0u;
-            return press(kPadCross);
+            NavOut accept = press(kPadCross);
+            // Map screens live, overlay open, nothing loading: the caller
+            // applies (or restores) the world mapping before the mask.
+            if (!accept.aborted)
+            {
+                if (n.map.event >= 0)
+                    accept.mapApply = true;
+                else
+                    accept.mapRestore = true;
+            }
+            return accept;
         }
         {
             // Monotonic stepping toward the goal row (no wrap assumption);
@@ -753,6 +784,144 @@ inline int listHit(const ListGeom &g, float x, float y)
     return -1;
 }
 
+// ---- Launch-time world mapping (Part 3) -----------------------------------
+//
+// Design: tk-modes-1 spike 90effd64 (TK8 §3a mechanism). The navigator
+// drives a slopestyle donor event's (peak, type, row); here, at the
+// ToEvent->Accept edge, the game thread points the donor's world archive
+// (+68, 16 B) and name (+4, 32 B) at the course world, and writes the stock
+// fields back on native accepts. Event table base/stride mirror
+// ps2_ssx3_course_manifest.h (kEventBase/kEventStride).
+//
+// Safety: runs only on the game thread at the Accept edge (Map screens
+// live, overlay open: no live event, nothing loading) or not at all;
+// every address is bounds-checked against the RAM size before any write,
+// so validation is all-or-nothing. Snapshot-on-first-apply reads the
+// donor's stock fields from live RAM (nothing could have written before),
+// keeping every combo pure within a session. Game-thread only (driveOnRead
+// holds the drive mutex); knob off: the caller never reaches this.
+inline constexpr uint32_t kMapEventBase = 0x43D950u;
+inline constexpr uint32_t kMapEventStride = 100u;
+inline constexpr uint32_t kMapArchiveOff = 68u;
+inline constexpr uint32_t kMapArchiveLen = 16u;
+inline constexpr uint32_t kMapNameOff = 4u;
+inline constexpr uint32_t kMapNameLen = 32u;
+inline constexpr int kMapDonorMax = 22;
+
+struct MapState
+{
+    bool snapTaken = false;
+    char snapArchive[kMapArchiveLen] = {};
+    char snapName[kMapNameLen] = {};
+    int activeEvent = -1; // donor currently mapped, or -1
+};
+
+inline MapState &mapState()
+{
+    static MapState s;
+    return s;
+}
+
+inline const uint8_t *mapField(const uint8_t *ram, uint32_t size, int event, uint32_t off, uint32_t len)
+{
+    if (!ram || event < 0 || event > kMapDonorMax)
+        return nullptr;
+    const uint32_t addr = kMapEventBase + static_cast<uint32_t>(event) * kMapEventStride + off;
+    if (addr > size || len > size - addr)
+        return nullptr;
+    return ram + addr;
+}
+
+inline bool mapPrintable(const char *s, uint32_t maxLen)
+{
+    if (!s)
+        return false;
+    for (uint32_t i = 0; i < maxLen; ++i)
+    {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c == 0)
+            return true;
+        if (c < 32 || c > 126)
+            return false;
+    }
+    return false; // unterminated within the field
+}
+
+inline void mapRead(char *dst, uint32_t len, const uint8_t *src)
+{
+    std::memcpy(dst, src, len);
+    dst[len - 1] = 0;
+}
+
+inline bool mapWrite(uint8_t *ram, uint32_t size, int event, uint32_t off, uint32_t len, const char *v)
+{
+    const uint8_t *dst = mapField(ram, size, event, off, len);
+    if (!dst || !v || std::strlen(v) == 0 || std::strlen(v) >= len || !mapPrintable(v, len))
+        return false;
+    std::memset(ram + (dst - ram), 0, len);
+    std::memcpy(ram + (dst - ram), v, std::strlen(v));
+    return true;
+}
+
+// Applies (spec.event, spec.archive, spec.name) after snapshotting the
+// donor's stock fields once. True when both fields hold the new values.
+inline bool applyCourseMap(uint8_t *ram, uint32_t size, const MapSpec &spec)
+{
+    if (spec.event < 0 || spec.event > kMapDonorMax || !spec.archive || !spec.name)
+        return false;
+    if (std::strlen(spec.archive) == 0 || std::strlen(spec.archive) >= kMapArchiveLen ||
+        std::strlen(spec.name) == 0 || std::strlen(spec.name) >= kMapNameLen ||
+        !mapPrintable(spec.archive, kMapArchiveLen) || !mapPrintable(spec.name, kMapNameLen))
+        return false;
+    const uint8_t *aSrc = mapField(ram, size, spec.event, kMapArchiveOff, kMapArchiveLen);
+    const uint8_t *nSrc = mapField(ram, size, spec.event, kMapNameOff, kMapNameLen);
+    if (!aSrc || !nSrc)
+        return false;
+    MapState &st = mapState();
+    if (!st.snapTaken)
+    {
+        mapRead(st.snapArchive, kMapArchiveLen, aSrc);
+        mapRead(st.snapName, kMapNameLen, nSrc);
+        st.snapTaken = true;
+        std::fprintf(stderr, "[tklist] map ev%d stock archive=\"%s\" name=\"%s\"\n", spec.event, st.snapArchive,
+                     st.snapName);
+    }
+    if (st.activeEvent == spec.event)
+    {
+        char curA[kMapArchiveLen];
+        char curN[kMapNameLen];
+        mapRead(curA, kMapArchiveLen, aSrc);
+        mapRead(curN, kMapNameLen, nSrc);
+        if (std::strcmp(curA, spec.archive) == 0 && std::strcmp(curN, spec.name) == 0)
+            return true; // already mapped for this course
+    }
+    if (!mapWrite(ram, size, spec.event, kMapArchiveOff, kMapArchiveLen, spec.archive))
+        return false;
+    if (!mapWrite(ram, size, spec.event, kMapNameOff, kMapNameLen, spec.name))
+        return false;
+    st.activeEvent = spec.event;
+    std::fprintf(stderr, "[tklist] map ev%d world -> archive=\"%s\" name=\"%s\"\n", spec.event, spec.archive,
+                 spec.name);
+    return true;
+}
+
+// Writes the snapshot back when a mapping is active. True when the donor
+// holds stock values (or nothing was ever mapped).
+inline bool restoreCourseMap(uint8_t *ram, uint32_t size)
+{
+    MapState &st = mapState();
+    if (!st.snapTaken || st.activeEvent < 0)
+        return true;
+    if (!mapWrite(ram, size, st.activeEvent, kMapArchiveOff, kMapArchiveLen, st.snapArchive))
+        return false;
+    if (!mapWrite(ram, size, st.activeEvent, kMapNameOff, kMapNameLen, st.snapName))
+        return false;
+    std::fprintf(stderr, "[tklist] map ev%d restored archive=\"%s\" name=\"%s\"\n", st.activeEvent, st.snapArchive,
+                 st.snapName);
+    st.activeEvent = -1;
+    return true;
+}
+
 // ---- Cross-thread drive (game-thread merge, ONL10 precedent) -------------
 //
 // The navigator runs at the pad-merge point on the game thread (one call per
@@ -836,7 +1005,7 @@ inline DriveProgress driveProgress()
 // Game thread (pad-merge point): returns the active-high press mask to OR
 // into the pad word, or 0. `tricky` = Tricky mode on (the menu hook's
 // mirror); `controller` = the Map controller (0 = unknown).
-inline uint16_t driveOnRead(const uint8_t *ram, uint32_t size, uint32_t controller, uint64_t tick, bool tricky,
+inline uint16_t driveOnRead(uint8_t *ram, uint32_t size, uint32_t controller, uint64_t tick, bool tricky,
                             bool peakLive, bool modeLive, bool &done, bool &handedOff, bool &aborted)
 {
     done = false;
@@ -855,6 +1024,22 @@ inline uint16_t driveOnRead(const uint8_t *ram, uint32_t size, uint32_t controll
     }
     const FeView v = readView(ram, size, controller);
     const NavOut o = navStep(d.nav, v, tick, peakLive, modeLive);
+    // Part 3: world mapping at the Accept edge, before the mask publishes.
+    // A refused write disarms (overlay stays open, user retries) instead of
+    // riding the wrong world.
+    if ((o.mapApply || o.mapRestore) && !o.done && !o.aborted)
+    {
+        const bool ok = o.mapApply ? applyCourseMap(ram, size, d.nav.map) : restoreCourseMap(ram, size);
+        if (!ok)
+        {
+            std::fprintf(stderr, "[tklist] tick=%llu map %s refused; drive disarmed\n",
+                         static_cast<unsigned long long>(tick), o.mapApply ? "apply" : "restore");
+            d.armed = false;
+            navReset(d.nav);
+            aborted = true;
+            return 0u;
+        }
+    }
     if (o.done)
     {
         d.armed = false;
