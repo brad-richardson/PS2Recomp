@@ -158,17 +158,28 @@ inline float scaleFor(const Metrics &m, float targetH)
     return (m.anyInk && band > 0 && targetH > 0) ? targetH / band : 0.0f;
 }
 
-// Full-font ink band (string-independent): min yoff .. max yoff+h over the
-// baked inked glyphs. scaleUniform gives every string the SAME glyph size —
-// use it for list rows so a descender ('y' in "Elysium Alps") cannot shrink
-// its row next to descender-free neighbours ("Garibaldi").
-inline void fullBand(const Baked &b, float &top, float &bot)
+// Reference band for the uniform row scale: the caps band ('H' when baked,
+// else min..max over ASCII letters, else 0..10). Every row shares one scale
+// so a descender ('y' in "Elysium Alps") cannot shrink its row next to
+// descender-free neighbours ("Garibaldi"); descenders overshoot the band
+// bottom by design. (The full min..max over all 143 baked glyphs is 137
+// SFN units vs 20 for caps — outlier cells, unusable as a reference.)
+inline void refBand(const Baked &b, float &top, float &bot)
 {
+    top = 0.0f;
+    bot = 10.0f;
+    const Glyph *h = findGlyph(b, static_cast<uint32_t>('H'));
+    if (h && h->w > 1)
+    {
+        top = h->yoff;
+        bot = h->yoff + h->h;
+        return;
+    }
     top = 1e9f;
     bot = -1e9f;
     for (const Glyph &g : b.glyphs)
     {
-        if (g.w <= 1)
+        if (g.code < 65 || (g.code > 90 && g.code < 97) || g.code > 122 || g.w <= 1)
             continue;
         if (g.yoff < top)
             top = g.yoff;
@@ -185,7 +196,7 @@ inline void fullBand(const Baked &b, float &top, float &bot)
 inline float scaleUniform(const Baked &b, float targetH)
 {
     float top = 0.0f, bot = 10.0f;
-    fullBand(b, top, bot);
+    refBand(b, top, bot);
     const float band = bot - top;
     return (b.ok && band > 0 && targetH > 0) ? targetH / band : 0.0f;
 }

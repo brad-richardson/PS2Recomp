@@ -9279,7 +9279,7 @@ void PS2Runtime::run()
                 if (tkUseUp)
                 {
                     float tkRowBot = 10.0f;
-                    tkf::fullBand(tkFontBaked, tkRowTop, tkRowBot);
+                    tkf::refBand(tkFontBaked, tkRowTop, tkRowBot);
                 }
                 for (int pass = 0; pass < 2; ++pass)
                 {
