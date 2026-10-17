@@ -512,6 +512,92 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done on sustained death");
             t.IsTrue(n.handedOff, "counts as a handoff"); });
 
+        tc.Run("a slow accept transition is waited out, not aborted", [](TestCase &t)
+               {
+            // P6 Garibaldi shape (diag nav2): the fallback Cross lands, but
+            // the old Peak screen keeps reading for dozens of ticks (+48
+            // observed) before the Mode screen appears. An accept must
+            // stretch the blind window over the whole transition: a retry
+            // mid-flight only restarts the change, while the old short blind
+            // evaluated the stale screen, retried once, then gave up
+            // (sub==4 abort, "aborted after 2 presses").
+            const CourseOption goal = kCourses[0].opts[0]; // Garibaldi P1 Race
+            NavState n;
+            navStart(n, goal, 0, 0);
+            int screen = 0, peak = 0, type = 0, row = 0;
+            bool left = false;
+            int pending = -1;
+            uint64_t flipAt = 0;
+            const auto view = [&]() {
+                FeView v;
+                if (left)
+                {
+                    v.mapLive = false;
+                    return v;
+                }
+                auto ram = viewRam(static_cast<uint32_t>(screen), static_cast<uint32_t>(peak),
+                                   static_cast<uint32_t>(type), static_cast<uint8_t>(row), 0x600000, 0x601000,
+                                   0x602000);
+                return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            };
+            const auto apply = [&](uint16_t mask, uint64_t tick) {
+                if (left)
+                    return;
+                if (mask == kPadDown || mask == kPadUp)
+                {
+                    const int d = (mask == kPadDown) ? 1 : -1;
+                    if (screen == 0)
+                        peak = (peak + d + 3) % 3;
+                    else if (screen == 1)
+                        type = (type + d + 3) % 3;
+                    else
+                        row = (row + d + 4) % 4;
+                }
+                else if (mask == kPadCross)
+                {
+                    if (screen == 2 && row == goal.row)
+                    {
+                        left = true;
+                        pending = -1;
+                    }
+                    else if (screen < 2)
+                    {
+                        // The screen change takes 60 ticks; a Cross caught
+                        // mid-transition restarts it (the retry never lands).
+                        pending = screen + 1;
+                        flipAt = tick + 60;
+                    }
+                }
+                else if (mask == kPadTriangle && pending < 0)
+                {
+                    if (screen > 0)
+                        --screen;
+                    else
+                        left = true;
+                }
+            };
+            uint64_t tick = 0;
+            uint16_t lastOut = 0;
+            for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            {
+                if (pending >= 0 && tick >= flipAt)
+                {
+                    screen = pending;
+                    pending = -1;
+                    if (screen == 1)
+                        type = 0;
+                    if (screen == 2)
+                        row = 0;
+                }
+                NavOut o = navStep(n, view(), tick, false, false);
+                if (lastOut != 0 && o.mask == 0)
+                    apply(lastOut, tick);
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done, not Aborted");
+            t.IsTrue(n.handedOff, "slow transitions still hand off"); });
+
         tc.Run("back-out Triangles until the Map screens are left", [](TestCase &t)
                {
             NavState n;

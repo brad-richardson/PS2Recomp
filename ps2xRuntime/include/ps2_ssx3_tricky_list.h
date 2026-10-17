@@ -221,6 +221,7 @@ inline constexpr uint64_t kHoldTicks = 12u; // human-like holds (ONL10 uses 15);
 inline constexpr uint64_t kGapTicks = 6u;
 inline constexpr uint64_t kSettleTicks = 10u;
 inline constexpr uint64_t kBlindTicks = 30u; // screen transitions may pass through non-Map states
+inline constexpr uint64_t kAcceptBlindTicks = 150u; // accept-driven screen changes (Peak->Mode, Mode->Event) outlast the press blind: the old screen still reads at +48 (P6 Garibaldi), so a fallback accept that is still in flight looks exactly like one that did not take
 inline constexpr uint64_t kGoneDoneTicks = 60u; // a dead Event widget this long after accept = handed off
 inline constexpr int kPressBudget = 48;
 inline constexpr int kPeakTries = 12; // accept-only fallback attempts (P3: 8 exhausted on walker-messed states)
@@ -390,6 +391,15 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         out.mask = mask;
         return out;
     };
+    // An accept press changes screens: stretch the blind window over the
+    // whole transition so a still-in-flight accept is waited out, not
+    // retried mid-transition and then given up on (sub==4 abort).
+    const auto pressAccept = [&](uint16_t mask) -> NavOut {
+        NavOut o = press(mask);
+        if (!o.aborted)
+            n.blindUntil = tick + kAcceptBlindTicks;
+        return o;
+    };
     if (!v.mapLive)
     {
         // Screen transitions may pass through non-Map states; only a
@@ -493,7 +503,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             {
                 n.tries = 0;
                 n.sub = 0;
-                return press(kPadCross);
+                return pressAccept(kPadCross);
             }
             // Adaptive: first step Down; keep the direction while the peak
             // moves, flip when it does not (3 peaks: bounded either way).
@@ -514,7 +524,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         if (n.sub == 3)
         {
             n.sub = 6;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 0)
         {
@@ -541,19 +551,21 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         if (n.sub == 1)
         {
             n.sub = 2;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 2)
         {
-            // Still on Peak: the accept did not take; retry once, then give up.
+            // Still on Peak: the accept may still be in flight (the retry
+            // below carries the long blind); retry once, then give up.
             n.sub = 4;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 6)
         {
-            // Still on Peak: the post-back-out accept did not take either.
+            // Still on Peak: the post-back-out accept may still be in
+            // flight; retry once with the long blind, then give up.
             n.sub = 4;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 7)
         {
@@ -627,7 +639,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         {
             n.tries = 0;
             n.sub = 0;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (modeLive)
         {
@@ -645,7 +657,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         if (n.sub == 3)
         {
             n.sub = 6;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 0)
         {
@@ -669,17 +681,17 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         if (n.sub == 1)
         {
             n.sub = 2;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 2)
         {
             n.sub = 4;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 6)
         {
             n.sub = 4;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         if (n.sub == 7)
         {
@@ -703,7 +715,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         {
             n.phase = NavPhase::Accept;
             n.goneSince = 0u;
-            NavOut accept = press(kPadCross);
+            NavOut accept = pressAccept(kPadCross);
             // Map screens live, overlay open, nothing loading: the caller
             // applies (or restores) the world mapping before the mask.
             if (!accept.aborted)
@@ -756,7 +768,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             }
             else
                 n.goneSince = 0u;
-            return press(kPadCross);
+            return pressAccept(kPadCross);
         }
         n.phase = NavPhase::ToEvent; // knocked elsewhere; re-drive
         return navStep(n, v, tick, peakLive, modeLive);
