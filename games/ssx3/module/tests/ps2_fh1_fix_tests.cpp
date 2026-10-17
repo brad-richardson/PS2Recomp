@@ -715,23 +715,23 @@ void register_ps2_fh1_fix_tests()
         tc.Run("SVL1 classifyFixDelta same/allow/refuse", [](TestCase &t)
         {
             const uint64_t all = allMain();
-            const uint32_t all12 = all12();
-            FixDeltaVerdict v = classifyFixDelta(all, all12, all, all12);
+            const uint32_t a12 = all12();
+            FixDeltaVerdict v = classifyFixDelta(all, a12, all, a12);
             t.IsTrue(v.allow && v.same && v.detail.empty(), "same mask allows empty");
-            v = classifyFixDelta(all, all12, all | kFixQuery, all12);
+            v = classifyFixDelta(all, a12, all | kFixQuery, a12);
             t.IsTrue(v.allow && !v.same, "+query allows");
             t.Equals(v.detail, std::string("+query"), "+query render");
-            v = classifyFixDelta(all, all12, all, all12 | kFix12Flare);
+            v = classifyFixDelta(all, a12, all, a12 | kFix12Flare);
             t.IsTrue(v.allow, "+flare allows");
-            v = classifyFixDelta(all, all12, all & ~kFixBonusFlip, all12);
+            v = classifyFixDelta(all, a12, all & ~kFixBonusFlip, a12);
             t.IsTrue(!v.allow, "-bonusflip refuses");
             t.IsTrue(v.detail.find("bonusflip") != std::string::npos, "names bonusflip");
-            v = classifyFixDelta(all & ~kFixBonusFlip, all12, all, all12);
+            v = classifyFixDelta(all & ~kFixBonusFlip, a12, all, a12);
             t.IsTrue(!v.allow, "+bonusflip refuses too (both directions)");
-            v = classifyFixDelta(all, all12, all & ~kFixInput2, all12);
+            v = classifyFixDelta(all, a12, all & ~kFixInput2, a12);
             t.IsTrue(!v.allow, "input2 ON->OFF refuses");
             t.IsTrue(v.detail.find("input2") != std::string::npos, "names input2");
-            v = classifyFixDelta(all, all12, all | kFixInputChain, all12);
+            v = classifyFixDelta(all, a12, all | kFixInputChain, a12);
             t.IsTrue(v.allow, "inputchain OFF->ON allows (self-converting)");
             t.Equals(v.detail, std::string("+inputchain"), "inputchain render");
             v = classifyFixDelta(kFixLife2, 0u, 0u, 0u);
@@ -739,10 +739,10 @@ void register_ps2_fh1_fix_tests()
             t.IsTrue(v.detail.find("life2") != std::string::npos, "names life2");
             v = classifyFixDelta(0u, 0u, kFixLife2, 0u);
             t.IsTrue(v.allow, "life2 OFF->ON allows through to the section gate");
-            v = classifyFixDelta(all, all12, all | (1ull << 63), all12);
+            v = classifyFixDelta(all, a12, all | (1ull << 63), a12);
             t.IsTrue(!v.allow, "unknown main bit refuses");
             t.IsTrue(v.detail.find("0x8000000000000000") != std::string::npos, "names the hex");
-            v = classifyFixDelta(all, all12, all, all12 | (1u << 31));
+            v = classifyFixDelta(all, a12, all, a12 | (1u << 31));
             t.IsTrue(!v.allow, "unknown mask12 bit refuses");
             v = classifyFixDelta(1ull << 14, 0u, 0u, 0u);
             t.IsTrue(!v.allow, "internal ramp bit refuses as unknown");
