@@ -23,7 +23,6 @@ public:
         CallScope(const CallScope &) = delete;
         CallScope &operator=(const CallScope &) = delete;
         CallScope(CallScope &&other) noexcept;
-        CallScope &operator=(CallScope &&other) noexcept;
 
         [[nodiscard]] uint64_t token() const { return m_token; }
 

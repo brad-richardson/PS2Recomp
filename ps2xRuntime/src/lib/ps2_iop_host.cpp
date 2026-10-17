@@ -51,21 +51,6 @@ PS2IopHostAdapter::CallScope::CallScope(CallScope &&other) noexcept
 {
 }
 
-PS2IopHostAdapter::CallScope &PS2IopHostAdapter::CallScope::operator=(CallScope &&other) noexcept
-{
-    if (this != &other)
-    {
-        release();
-        m_lock = std::move(other.m_lock);
-        m_owner = std::exchange(other.m_owner, nullptr);
-        m_previousContext = other.m_previousContext;
-        m_previousRdram = other.m_previousRdram;
-        m_previousToken = other.m_previousToken;
-        m_token = other.m_token;
-    }
-    return *this;
-}
-
 void PS2IopHostAdapter::CallScope::release()
 {
     if (m_owner)

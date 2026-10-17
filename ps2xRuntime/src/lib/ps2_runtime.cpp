@@ -1835,33 +1835,6 @@ namespace
         return paths;
     }
 
-    std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
-    {
-        std::string out;
-        if (!rdram || maxLen == 0)
-        {
-            return out;
-        }
-
-        out.reserve(std::min<size_t>(maxLen, 64));
-        for (size_t i = 0; i < maxLen; ++i)
-        {
-            const char ch = static_cast<char>(rdram[(addr + static_cast<uint32_t>(i)) & PS2_RAM_MASK]);
-            if (ch == '\0')
-            {
-                break;
-            }
-            if (ch >= 0x20 && ch < 0x7F)
-            {
-                out.push_back(ch);
-            }
-            else
-            {
-                out.push_back('.');
-            }
-        }
-        return out;
-    }
 }
 
 // VZ1: VU0 lean entry (PS2X_VU0_LEAN_ENTRY=0 restores the exact path;
