@@ -12,8 +12,9 @@
 
 namespace ps2_ssx3_fh1
 {
-// Bit enumerators (kFix*) stay in ps2_fh1_fix.h with the consumers;
-// only the name/bit tables moved here.
+// Bit enumerators (kFix*) stay in ps2_fh1_fix.h with the consumers; only the
+// name/bit tables moved here. The "all" composition below is read through
+// allMain()/all12(), never snapshotted: see ps2_fh1_fix.h.
 using namespace ps2_fh1;
 namespace
 {
@@ -154,9 +155,10 @@ bool normcapMaskSuppressed(uint64_t mask) noexcept
     return normcapMaskRequested(mask) && asymkMaskOk(mask);
 }
 
-// constexpr so kPolicy is constant-initialized: kFixAll/kFix12All in
-// ps2_fh1_fix.h read the policy from namespace-scope initializers, and
-// dynamic-init order across TUs would otherwise leave them empty.
+// constexpr so kPolicy is constant-initialized: allMain()/all12() in
+// ps2_fh1_fix.h read the policy on every call, and nothing snapshots it at
+// namespace scope (the module table itself is not constant-initialized, so
+// any snapshot would race it and stick at empty).
 constexpr uint64_t fixAllMain() noexcept
 {
     return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers |

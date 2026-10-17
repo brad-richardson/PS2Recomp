@@ -10,8 +10,8 @@ static ps2_fh1::HookConfig hk1AllActive()
 {
     ps2_fh1::HookConfig c;
     c.mode = ps2_fh1::Mode::Events;
-    c.main = ps2_fh1::kFixAll | ps2_fh1::kFixLift; // all plus the opt-in lift (covers every census hook)
-    c.fix12 = ps2_fh1::kFix12All;
+    c.main = ps2_fh1::allMain() | ps2_fh1::kFixLift; // all plus the opt-in lift (covers every census hook)
+    c.fix12 = ps2_fh1::all12();
     c.guestActive = true;
     c.draw = true;
     c.tapOn = true;

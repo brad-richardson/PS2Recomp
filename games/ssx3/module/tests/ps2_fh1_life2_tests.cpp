@@ -7,9 +7,9 @@ void register_ps2_fh1_life2_tests()
     using namespace ps2_fh1;
     MiniTest::Case("Ps2Fh1Life2",[](TestCase &tc){
         tc.Run("opt-in and dispatch in both menu and event phases",[](TestCase &t){
-            t.Equals(kFixAll&kFixLife2,uint64_t{0},"outside all");
-            t.Equals(parseFix("all,life2,-life2").main,kFixAll,"off");
-            t.Equals(parseFix("all,life2").main,kFixAll|kFixLife2,"on");
+            t.Equals(allMain()&kFixLife2,uint64_t{0},"outside all");
+            t.Equals(parseFix("all,life2,-life2").main,allMain(),"off");
+            t.Equals(parseFix("all,life2").main,allMain()|kFixLife2,"on");
             HookConfig c;c.mode=Mode::Events;c.main=kFixLife2;
             for(bool active:{false,true}) {c.guestActive=active;auto h=buildHookInterest(c);
                 for(auto pc:kLife2Targets)t.IsTrue(hookTableHit(h,1u,pc),"target");

@@ -74,8 +74,8 @@ void register_ps2_fh1_fix_tests()
         });
         tc.Run("INP2 four-stock-frame guard and 24/12 repeats", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixInput2) != 0u, "input2 in all (PRM1, Brad 10-11)");
-            t.Equals(parseFix("all,input2,-input2").main, kFixAll & ~static_cast<uint64_t>(kFixInput2), "input2 parses and opts out");
+            t.IsTrue((allMain() & kFixInput2) != 0u, "input2 in all (PRM1, Brad 10-11)");
+            t.Equals(parseFix("all,input2,-input2").main, allMain() & ~static_cast<uint64_t>(kFixInput2), "input2 parses and opts out");
             for (unsigned step : {1u, 2u})
             {
                 Input2Record r{}; r.guard = 3u;
@@ -125,8 +125,8 @@ void register_ps2_fh1_fix_tests()
         });
         tc.Run("INP3 phase parking survives a guest-memory checkpoint", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixInputChain) == 0u, "prototype excluded from all");
-            t.Equals(parseFix("all,inputchain,-inputchain").main, kFixAll, "separate chain opt-in");
+            t.IsTrue((allMain() & kFixInputChain) == 0u, "prototype excluded from all");
+            t.Equals(parseFix("all,inputchain,-inputchain").main, allMain(), "separate chain opt-in");
             for (uint32_t phase = 0; phase <= 3; ++phase)
             {
                 const uint32_t saved = inputChainPark(phase);
@@ -162,9 +162,9 @@ void register_ps2_fh1_fix_tests()
 
         tc.Run("FH33 ground2 is opt-in and squares to the bounded stock map", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixGround2) == 0u, "excluded from all");
-            t.Equals(parseFix("all,ground2").main, kFixAll | kFixGround2, "opt-in");
-            t.Equals(parseFix("all,ground2,-ground2").main, kFixAll, "opt-out");
+            t.IsTrue((allMain() & kFixGround2) == 0u, "excluded from all");
+            t.Equals(parseFix("all,ground2").main, allMain() | kFixGround2, "opt-in");
+            t.Equals(parseFix("all,ground2,-ground2").main, allMain(), "opt-out");
             for (double multiplier : {1.0, 0.5, 2.0})
             {
                 const double a = .2*multiplier, b = (.1/60)*multiplier, c = (14.0/60)*multiplier;
@@ -184,19 +184,19 @@ void register_ps2_fh1_fix_tests()
         });
         tc.Run("GRD1 ground is opt-in and all minus ground is unchanged", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixGround) == 0u, "ground excluded from all");
-            t.Equals(parseFix("all,-ground").main, kFixAll, "old play layer remains equivalent");
-            t.Equals(parseFix("all,ground").main, kFixAll | kFixGround, "ground remains selectable");
-            t.Equals(parseFix("all,ground,-ground").main, kFixAll, "opt-in can be removed");
-            t.IsTrue((kFixAll & kFixGround2) == 0u, "ground2 remains separate");
+            t.IsTrue((allMain() & kFixGround) == 0u, "ground excluded from all");
+            t.Equals(parseFix("all,-ground").main, allMain(), "old play layer remains equivalent");
+            t.Equals(parseFix("all,ground").main, allMain() | kFixGround, "ground remains selectable");
+            t.Equals(parseFix("all,ground,-ground").main, allMain(), "opt-in can be removed");
+            t.IsTrue((allMain() & kFixGround2) == 0u, "ground2 remains separate");
         });
 
         tc.Run("JMP3 query is opt-in at bit 50", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixQuery), 1ull << 50, "query uses bit 50");
-            t.IsTrue((kFixAll & kFixQuery) == 0u, "excluded from all");
-            t.Equals(parseFix("all,query").main, kFixAll | kFixQuery, "opt-in");
-            t.Equals(parseFix("all,query,-query").main, kFixAll, "opt-out");
+            t.IsTrue((allMain() & kFixQuery) == 0u, "excluded from all");
+            t.Equals(parseFix("all,query").main, allMain() | kFixQuery, "opt-in");
+            t.Equals(parseFix("all,query,-query").main, allMain(), "opt-out");
             t.Equals(parseFix("query").main, static_cast<uint64_t>(kFixQuery), "query alone");
         });
 
@@ -217,9 +217,9 @@ void register_ps2_fh1_fix_tests()
         tc.Run("JDR2 shadowpub is opt-in at bit 53", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixShadowPub), 1ull << 53, "shadowpub uses bit 53");
-            t.IsTrue((kFixAll & kFixShadowPub) == 0u, "excluded from all");
-            t.Equals(parseFix("all,query,shadowpub").main, kFixAll | kFixQuery | kFixShadowPub, "opt-in");
-            t.Equals(parseFix("all,query,shadowpub,-shadowpub").main, kFixAll | kFixQuery, "opt-out");
+            t.IsTrue((allMain() & kFixShadowPub) == 0u, "excluded from all");
+            t.Equals(parseFix("all,query,shadowpub").main, allMain() | kFixQuery | kFixShadowPub, "opt-in");
+            t.Equals(parseFix("all,query,shadowpub,-shadowpub").main, allMain() | kFixQuery, "opt-out");
         });
 
         tc.Run("JDR2 shadowpub publishes only after two even samples with the live frame held", [](TestCase &t)
@@ -243,18 +243,18 @@ void register_ps2_fh1_fix_tests()
         tc.Run("JMP6 vnret is opt-in at bit 52", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixVnRet), 1ull << 52, "vnret uses bit 52");
-            t.IsTrue((kFixAll & kFixVnRet) == 0u, "excluded from all");
-            t.Equals(parseFix("all,vnret").main, kFixAll | kFixVnRet, "opt-in");
-            t.Equals(parseFix("all,vnret,-vnret").main, kFixAll, "opt-out");
+            t.IsTrue((allMain() & kFixVnRet) == 0u, "excluded from all");
+            t.Equals(parseFix("all,vnret").main, allMain() | kFixVnRet, "opt-in");
+            t.Equals(parseFix("all,vnret,-vnret").main, allMain(), "opt-out");
             t.Equals(parseFix("vnret").main, static_cast<uint64_t>(kFixVnRet), "vnret alone");
         });
 
         tc.Run("NRM1 normcap is opt-in at bit 56 and pairs to the bounded stock map", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixNormcap), 1ull << 56, "normcap uses bit 56");
-            t.IsTrue((kFixAll & kFixNormcap) == 0u, "excluded from all");
-            t.Equals(parseFix("all,query,vnret,normcap").main, kFixAll | kFixQuery | kFixVnRet | kFixNormcap, "opt-in");
-            t.Equals(parseFix("all,query,vnret,normcap,-normcap").main, kFixAll | kFixQuery | kFixVnRet, "opt-out");
+            t.IsTrue((allMain() & kFixNormcap) == 0u, "excluded from all");
+            t.Equals(parseFix("all,query,vnret,normcap").main, allMain() | kFixQuery | kFixVnRet | kFixNormcap, "opt-in");
+            t.Equals(parseFix("all,query,vnret,normcap,-normcap").main, allMain() | kFixQuery | kFixVnRet, "opt-out");
             t.Equals(parseFix("normcap").main, static_cast<uint64_t>(kFixNormcap), "normcap alone");
             const double kh = std::sqrt(0.6) - 1.0;
             auto pair = [&](const double w[3], const double n[3], double out[3], bool &binds) {
@@ -313,9 +313,9 @@ void register_ps2_fh1_fix_tests()
         tc.Run("SEL2 sel5b is opt-in at bit 58 and needs sel5", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixSel5b), 1ull << 58, "sel5b uses bit 58");
-            t.IsTrue((kFixAll & kFixSel5b) == 0u, "excluded from all");
-            t.Equals(parseFix("all,sel5,sel5b").main, kFixAll | kFixSel5 | kFixSel5b, "opt-in");
-            t.Equals(parseFix("all,sel5,sel5b,-sel5b").main, kFixAll | kFixSel5, "opt-out");
+            t.IsTrue((allMain() & kFixSel5b) == 0u, "excluded from all");
+            t.Equals(parseFix("all,sel5,sel5b").main, allMain() | kFixSel5 | kFixSel5b, "opt-in");
+            t.Equals(parseFix("all,sel5,sel5b,-sel5b").main, allMain() | kFixSel5, "opt-out");
             // The charge word flips only with sel5 alongside: sel5b alone is stripped.
             std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
             const uint32_t a = 0x1000u;
@@ -352,9 +352,9 @@ void register_ps2_fh1_fix_tests()
         tc.Run("BST1 boostfill is opt-in at bit 59 and halves the consume step", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixBoostFill), 1ull << 59, "boostfill uses bit 59");
-            t.IsTrue((kFixAll & kFixBoostFill) == 0u, "excluded from all");
-            t.Equals(parseFix("all,boostfill").main, kFixAll | kFixBoostFill, "opt-in");
-            t.Equals(parseFix("all,boostfill,-boostfill").main, kFixAll, "opt-out");
+            t.IsTrue((allMain() & kFixBoostFill) == 0u, "excluded from all");
+            t.Equals(parseFix("all,boostfill").main, allMain() | kFixBoostFill, "opt-in");
+            t.Equals(parseFix("all,boostfill,-boostfill").main, allMain(), "opt-out");
             std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
             const uint32_t a = 0x1000u;
             auto poke = [&](uint32_t addr, uint32_t v) {
@@ -388,9 +388,9 @@ void register_ps2_fh1_fix_tests()
         tc.Run("FLP2 stuntchg is opt-in at bit 60", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixStuntChg), 1ull << 60, "stuntchg uses bit 60");
-            t.IsTrue((kFixAll & kFixStuntChg) == 0u, "excluded from all");
-            t.Equals(parseFix("all,stuntchg").main, kFixAll | kFixStuntChg, "opt-in");
-            t.Equals(parseFix("all,stuntchg,-stuntchg").main, kFixAll, "opt-out");
+            t.IsTrue((allMain() & kFixStuntChg) == 0u, "excluded from all");
+            t.Equals(parseFix("all,stuntchg").main, allMain() | kFixStuntChg, "opt-in");
+            t.Equals(parseFix("all,stuntchg,-stuntchg").main, allMain(), "opt-out");
         });
 
         tc.Run("REV1: asymk requires vnret so 0x49c124 always has an owner", [](TestCase &t)
@@ -513,7 +513,7 @@ void register_ps2_fh1_fix_tests()
 
         tc.Run("KNC6 bit 51 stays reserved; retired springhold name refuses", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & (1ull << 51)) == 0u, "reserved bit excluded from all");
+            t.IsTrue((allMain() & (1ull << 51)) == 0u, "reserved bit excluded from all");
             t.IsTrue(fixMainBitName(51u) == nullptr, "reserved bit has no name");
             t.IsTrue(!parseFix("all,springhold").ok, "retired name refuses");
         });
@@ -522,8 +522,8 @@ void register_ps2_fh1_fix_tests()
         {
             const FixMasks f = parseFix("all");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll, "main = kFixAll");
-            t.Equals(f.fh12, kFix12All, "fh12 = kFix12All");
+            t.Equals(f.main, allMain(), "main = allMain()");
+            t.Equals(f.fh12, all12(), "fh12 = all12()");
             t.IsTrue((f.main & kFixStick2) != 0u, "stick2 in all");
             t.IsTrue((f.main & kFixClockSign) != 0u, "clocksign in all");
             t.IsTrue((f.main & kFixLift) == 0u, "lift stays opt-in");
@@ -534,15 +534,15 @@ void register_ps2_fh1_fix_tests()
         {
             const FixMasks a = parseFix("all,-stick2");
             t.IsTrue(a.ok, "parses");
-            t.Equals(a.main, kFixAll & ~static_cast<uint64_t>(kFixStick2), "all minus stick2");
-            t.Equals(a.fh12, kFix12All, "fh12 untouched");
+            t.Equals(a.main, allMain() & ~static_cast<uint64_t>(kFixStick2), "all minus stick2");
+            t.Equals(a.fh12, all12(), "fh12 untouched");
             const FixMasks b = parseFix("all,-stick2,-clocksign");
-            t.Equals(b.main, kFixAll & ~static_cast<uint64_t>(kFixStick2 | kFixClockSign), "pre-FH26 all");
+            t.Equals(b.main, allMain() & ~static_cast<uint64_t>(kFixStick2 | kFixClockSign), "pre-FH26 all");
             const FixMasks c = parseFix("all,-particles");
-            t.Equals(c.fh12, kFix12All & ~kFix12Particles, "fh12 opt-out");
-            t.Equals(c.main, kFixAll, "main untouched");
+            t.Equals(c.fh12, all12() & ~kFix12Particles, "fh12 opt-out");
+            t.Equals(c.main, allMain(), "main untouched");
             const FixMasks d = parseFix("-stick2,all");
-            t.Equals(d.main, kFixAll, "order matters: a later all re-adds");
+            t.Equals(d.main, allMain(), "order matters: a later all re-adds");
             const FixMasks e = parseFix("all,-all,stick");
             t.Equals(e.main, static_cast<uint64_t>(kFixStick), "-all clears");
             t.Equals(e.fh12, 0u, "-all clears fh12");
@@ -551,7 +551,7 @@ void register_ps2_fh1_fix_tests()
         tc.Run("single items, lift opt-in, empty items", [](TestCase &t)
         {
             t.Equals(parseFix("stick2").main, static_cast<uint64_t>(kFixStick2), "stick2 alone");
-            t.Equals(parseFix("all,lift").main, kFixAll | kFixLift, "all plus lift");
+            t.Equals(parseFix("all,lift").main, allMain() | kFixLift, "all plus lift");
             t.Equals(parseFix("spin,clock").fh12, static_cast<uint32_t>(kFix12Spin), "fh12 item");
             t.Equals(parseFix("spin,clock").main, static_cast<uint64_t>(kFixClock), "main item");
             t.IsTrue(parseFix("all,").ok, "trailing comma");
@@ -559,34 +559,34 @@ void register_ps2_fh1_fix_tests()
 
         tc.Run("FH27 bonusflip and loops2 are in all (DEF1, Brad 10-03)", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixBonusFlip) != 0u, "bonusflip in all");
-            t.IsTrue((kFix12All & kFix12Loops2) != 0u, "loops2 in all");
+            t.IsTrue((allMain() & kFixBonusFlip) != 0u, "bonusflip in all");
+            t.IsTrue((all12() & kFix12Loops2) != 0u, "loops2 in all");
             const FixMasks f = parseFix("all,-bonusflip,-loops2");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll & ~static_cast<uint64_t>(kFixBonusFlip), "main drops bonusflip");
-            t.Equals(f.fh12, kFix12All & ~kFix12Loops2, "fh12 drops loops2");
+            t.Equals(f.main, allMain() & ~static_cast<uint64_t>(kFixBonusFlip), "main drops bonusflip");
+            t.Equals(f.fh12, all12() & ~kFix12Loops2, "fh12 drops loops2");
         });
 
         tc.Run("FLK2 flare is opt-in", [](TestCase &t)
         {
-            t.IsTrue((kFix12All & kFix12Flare) == 0u, "flare not in all");
+            t.IsTrue((all12() & kFix12Flare) == 0u, "flare not in all");
             const FixMasks f = parseFix("all,flare");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll, "main untouched");
-            t.Equals(f.fh12, kFix12All | kFix12Flare, "fh12 adds flare");
-            t.Equals(parseFix("all,flare,-flare").fh12, kFix12All, "opt-out");
+            t.Equals(f.main, allMain(), "main untouched");
+            t.Equals(f.fh12, all12() | kFix12Flare, "fh12 adds flare");
+            t.Equals(parseFix("all,flare,-flare").fh12, all12(), "opt-out");
         });
 
         tc.Run("FH28 jcam/pid stay opt-in; pose/c2cap/spawn in all (PRM1, Brad 10-11)", [](TestCase &t)
         {
             const uint64_t out = static_cast<uint64_t>(kFixJcam | kFixPid);
             const uint64_t in = static_cast<uint64_t>(kFixPose | kFixC2Cap | kFixSpawn);
-            t.IsTrue((kFixAll & out) == 0u, "jcam/pid stay opt-in");
-            t.IsTrue((kFixAll & in) == in, "pose/c2cap/spawn in all");
+            t.IsTrue((allMain() & out) == 0u, "jcam/pid stay opt-in");
+            t.IsTrue((allMain() & in) == in, "pose/c2cap/spawn in all");
             const FixMasks f = parseFix("all,-ground,jcam,pose,pid,c2cap,spawn");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll | out, "all minus ground plus jcam/pid");
-            t.Equals(f.fh12, kFix12All, "fh12 untouched");
+            t.Equals(f.main, allMain() | out, "all minus ground plus jcam/pid");
+            t.Equals(f.fh12, all12(), "fh12 untouched");
             t.Equals(parseFix("jcam").main, static_cast<uint64_t>(kFixJcam), "jcam alone");
             t.Equals(parseFix("pose").main, static_cast<uint64_t>(kFixPose), "pose alone");
             t.Equals(parseFix("pid").main, static_cast<uint64_t>(kFixPid), "pid alone");
@@ -600,10 +600,10 @@ void register_ps2_fh1_fix_tests()
             t.Equals(static_cast<uint64_t>(kFixTrails), 1ull << 48, "trails uses bit 48");
             t.Equals(static_cast<uint64_t>(kFixChase2), 1ull << 49, "chase2 uses bit 49");
             t.IsTrue(((kFixTrails|kFixChase2) & ((1ull << 46)|(1ull << 47)))==0u,"INP2 bits reserved");
-            t.IsTrue((kFixAll & kFixTrails)==0u,"trails stays opt-in");
-            t.IsTrue((kFixAll & kFixChase2)!=0u,"chase2 in all (PRM1, Brad 10-11)");
-            t.Equals(parseFix("all,trails,chase2").main,kFixAll|kFixTrails,"adds trails (chase2 already in)");
-            t.Equals(parseFix("all,trails,chase2,-trails,-chase2").main,kFixAll & ~static_cast<uint64_t>(kFixChase2),"removes both");
+            t.IsTrue((allMain() & kFixTrails)==0u,"trails stays opt-in");
+            t.IsTrue((allMain() & kFixChase2)!=0u,"chase2 in all (PRM1, Brad 10-11)");
+            t.Equals(parseFix("all,trails,chase2").main,allMain()|kFixTrails,"adds trails (chase2 already in)");
+            t.Equals(parseFix("all,trails,chase2,-trails,-chase2").main,allMain() & ~static_cast<uint64_t>(kFixChase2),"removes both");
             const float half=fh35Float(0x3c088889u), stock=fh35Float(0x3c888889u);
             for (uint32_t pc : {0x345e4cu,0x345fdcu,0x34600cu,0x346028u})
             {
@@ -714,8 +714,8 @@ void register_ps2_fh1_fix_tests()
 
         tc.Run("SVL1 classifyFixDelta same/allow/refuse", [](TestCase &t)
         {
-            const uint64_t all = kFixAll;
-            const uint32_t all12 = kFix12All;
+            const uint64_t all = allMain();
+            const uint32_t all12 = all12();
             FixDeltaVerdict v = classifyFixDelta(all, all12, all, all12);
             t.IsTrue(v.allow && v.same && v.detail.empty(), "same mask allows empty");
             v = classifyFixDelta(all, all12, all | kFixQuery, all12);

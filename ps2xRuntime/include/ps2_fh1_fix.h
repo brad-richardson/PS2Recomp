@@ -133,11 +133,18 @@ inline uint64_t fixItem(const std::string &item) noexcept
 }
 
 // "all": the module's composition (see fh1_fix_content.cpp for the member
-// list and its history). Same names, now read through the policy: identical
-// with the module linked, empty without one. Not constexpr anymore — the
-// composition is game content, and no caller needs it at compile time.
-inline const uint64_t kFixAll = fixPolicy().allMain;
-inline const uint32_t kFix12All = fixPolicy().all12;
+// list and its history). Read lazily through the policy on every call: a
+// namespace-scope snapshot would race the module table's own dynamic init
+// (the table is not constant-initialized) and stick at empty. Identical
+// with the module linked, empty without one.
+inline uint64_t allMain() noexcept
+{
+    return fixPolicy().allMain;
+}
+inline uint32_t all12() noexcept
+{
+    return fixPolicy().all12;
+}
 
 struct FixMasks
 {
@@ -164,8 +171,8 @@ inline FixMasks parseFix(const std::string &s)
         {
             // "all" is always known (empty under an empty policy, so a
             // no-module binary parses to empty masks instead of refusing).
-            m = kFixAll;
-            m12 = kFix12All;
+            m = allMain();
+            m12 = all12();
         }
         else
         {
