@@ -33,6 +33,7 @@ using ps2_netsync::Sample;
 constexpr size_t kPayloadLen = 51u; // ver u8 | epoch u8 | tick u32 | pos 3f | quat 4f | vel 3f | fin u8 | ftime f32
 constexpr uint8_t kVersion = 2u;
 constexpr uint64_t kTimeoutUs = 3000000u;
+constexpr uint64_t kFirstGraceUs = 10000000u; // R3: until the first valid STATE of a race
 
 struct Knobs
 {
@@ -223,14 +224,19 @@ inline bool applyOwnerFinish(uint8_t *r, uint32_t replica, float ownerTime)
     return ps2_netsync::writeF32(r, replica + kFinishOff, ownerTime);
 }
 
-// Pure (unit-tested): STATE liveness while racing (R3). Stale when no
-// valid sample arrived for longer than `timeout` since the later of the
-// local race start and the last valid sample, so a link that never
-// delivered one counts too.
-inline bool stateStale(uint64_t now, uint64_t raceStartUs, uint64_t lastValidUs, uint64_t timeoutUs)
+// Pure (unit-tested): STATE liveness while racing (R3). Before the first
+// valid sample of this race the peer gets `firstGrace` from the local race
+// start: the stock barrier releases both sides into the 180-update
+// countdown together, but a slower peer reaches racing later in wall time
+// (iPad r2 vs a det Mac: ~4.5 s), and it sends STATE only once racing.
+// After a valid sample, stale means none for longer than `timeout`. A link
+// that never delivers one still counts.
+inline bool stateStale(uint64_t now, uint64_t raceStartUs, uint64_t lastValidUs, uint64_t timeoutUs,
+                       uint64_t firstGraceUs)
 {
-    const uint64_t base = lastValidUs > raceStartUs ? lastValidUs : raceStartUs;
-    return now > base && now - base > timeoutUs;
+    if (lastValidUs <= raceStartUs)
+        return now > raceStartUs && now - raceStartUs > firstGraceUs;
+    return now > lastValidUs && now - lastValidUs > timeoutUs;
 }
 
 // Peer-silence counter (pause leg p2). The NetGame pump (0x257b6c) counts
@@ -246,7 +252,7 @@ constexpr uint32_t kNgSilenceOff = 0x5cu;
 inline bool holdPeerSilence(uint8_t *ram, uint64_t now, uint64_t raceStartUs, uint64_t lastValidUs,
                             uint64_t timeoutUs)
 {
-    if (lastValidUs <= raceStartUs || stateStale(now, raceStartUs, lastValidUs, timeoutUs))
+    if (lastValidUs <= raceStartUs || stateStale(now, raceStartUs, lastValidUs, timeoutUs, kFirstGraceUs))
         return false;
     uint32_t ng = 0u, n = 0u;
     if (!ps2_fh1::rd32(ram, ps2_fh1::kNetGamePtr, ng) || ng == 0u || !ps2_fh1::rd32(ram, ng + kNgSilenceOff, n) ||
@@ -447,7 +453,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     // STATE for kTimeoutUs (or none at all since the race start) -> report
     // the P2P link closed so the guest takes its stock peer-loss path,
     // instead of racing on held input with the checksum neutralized.
-    if (!s.raceOver && !s.forcedDown && stateStale(now, s.raceStartUs, s.lastValidUs, kTimeoutUs))
+    if (!s.raceOver && !s.forcedDown && stateStale(now, s.raceStartUs, s.lastValidUs, kTimeoutUs, kFirstGraceUs))
     {
         s.forcedDown = true;
         ps2_net::forceLinkDown();

@@ -313,15 +313,16 @@ namespace
                       "a NaN time is refused");
         });
 
-        tc.Run("online-stock-2: R3 STATE liveness counts from the race start", [](TestCase &t)
+        tc.Run("online-stock-2: R3 STATE liveness: first-sample grace, then 3 s", [](TestCase &t)
         {
             using ps2_net_stock120::stateStale;
-            const uint64_t timeout = 3000000u, start = 10000000u;
-            t.IsFalse(stateStale(start + 2000000u, start, 0u, timeout), "no STATE yet, inside the grace");
-            t.IsTrue(stateStale(start + 3500000u, start, 0u, timeout), "no STATE at all since the race start");
-            t.IsFalse(stateStale(start + 9000000u, start, start + 8000000u, timeout), "fresh STATE");
-            t.IsTrue(stateStale(start + 12000000u, start, start + 8000000u, timeout), "STATE stopped for 4 s");
-            t.IsFalse(stateStale(start, start, start + 100u, timeout), "clock never runs backwards");
+            const uint64_t timeout = 3000000u, grace = 10000000u, start = 10000000u;
+            t.IsFalse(stateStale(start + 4500000u, start, 0u, timeout, grace),
+                      "slower peer not racing yet (iPad r2: ~4.5 s): inside the first-sample grace");
+            t.IsTrue(stateStale(start + 10500000u, start, 0u, timeout, grace), "no STATE at all since the race start");
+            t.IsFalse(stateStale(start + 9000000u, start, start + 8000000u, timeout, grace), "fresh STATE");
+            t.IsTrue(stateStale(start + 12000000u, start, start + 8000000u, timeout, grace), "STATE stopped for 4 s");
+            t.IsFalse(stateStale(start, start, start + 100u, timeout, grace), "clock never runs backwards");
         });
 
         tc.Run("online-stock-2: fresh STATE holds the stock peer-silence count", [](TestCase &t)
