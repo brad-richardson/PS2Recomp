@@ -36,6 +36,7 @@ void buildHookInterest(const ps2_fh1::HookConfig *cfg, ps2_fh1::HookInterest *ou
         addSrc(kLsGateSite); // online-stock-2: lockstep gate (no-op without a 120 link)
         addSrc(kCkSite);     // online-stock-2: checksum verdict (no-op unless PS2X_NET_STOCK120)
         addTgt(kNetPause);   // online-stock-2: NetGame pause/resume (skipped while racing)
+        addTgt(kTimedSend);  // online-stock-2: quik search window (no-op unless PS2X_NET_STOCK120)
         addTgt(kSelectorDispatch);
         addTgt(kRaceTickCallee);
         addTgt(kRaceTick2Callee);
@@ -247,6 +248,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
     if (Fast ? bf->events : mode() == Mode::Events)
         skip = stock120NetPauseSkip(ram, targetPc) || skip; // online-stock-2: local-only pause
+    if (Fast ? bf->events : mode() == Mode::Events)
+        stock120QuikWindowHook(ram, ctx, targetPc); // online-stock-2: 120 s quick-match search
     bool queryWasSkipped = false;
     if (on && flag(&BranchFlags::query, queryFix))
     {

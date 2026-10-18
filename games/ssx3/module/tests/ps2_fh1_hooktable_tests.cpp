@@ -190,6 +190,7 @@ void register_ps2_fh1_hooktable_tests()
             srcOnly(kLsGateSite); // online-stock-2 lockstep gate
             srcOnly(kCkSite);     // online-stock-2 checksum verdict
             tgtOnly(kNetPause);   // online-stock-2 NetGame pause skip
+            tgtOnly(kTimedSend);  // online-stock-2 quik search window
             pair(kRaceTickCallSite, kRaceTickCallee);
             pair(kRaceTick2CallSite, kRaceTick2Callee);
             tgtOnly(kSelectorDispatch);

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 // full120 slice 2: guestFlip's enter path converts the manager word table,
@@ -85,6 +86,33 @@ void register_ps2_fh1_flip_tests()
             t.Equals(lsGateWhy(ram.data(), in), 5u, "player 1 queue empty closes");
             wr32(ram.data(), in + 0x10u, 0u);
             t.Equals(lsGateWhy(ram.data(), in), 0u, "no players: open");
+        });
+
+        tc.Run("online-stock-2: the quik search timer becomes 120 s", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            constexpr uint32_t obj = 0x5000u, msg = 0x6000u;
+            auto put = [&](const char *text) { std::memcpy(ram.data() + msg, text, std::strlen(text) + 1u); };
+            auto timer = [&]() {
+                uint32_t v = 0u;
+                rd32(ram.data(), obj + kMgrTimerOff, v);
+                return v;
+            };
+            put("KIND=0 PERS=stocka");
+            wr32(ram.data(), obj + kMgrTimerOff, kStockSearchSecs);
+            t.IsFalse(quikSearchWindow(ram.data(), 0x63686174u, msg, obj), "other tag: untouched");
+            t.IsFalse(quikSearchWindow(ram.data(), kQuikTag, msg, 0u), "no object: untouched");
+            t.IsTrue(quikSearchWindow(ram.data(), kQuikTag, 0x20000000u | msg, 0x20000000u | obj),
+                     "quik search (uncached addresses): raised");
+            t.Equals(timer(), kQuikSearchSecs, "timer holds 120.0");
+            t.IsFalse(quikSearchWindow(ram.data(), kQuikTag, msg, obj), "already raised: untouched");
+            wr32(ram.data(), obj + kMgrTimerOff, kStockSearchSecs);
+            put("PERS=stocka KIND=*");
+            t.IsFalse(quikSearchWindow(ram.data(), kQuikTag, msg, obj), "KIND=* give-up keeps its timer");
+            t.Equals(timer(), kStockSearchSecs, "give-up timer stays 20.0");
+            wr32(ram.data(), obj + kMgrTimerOff, 0x41f00000u); // 30.0: another state's timer
+            put("KIND=0");
+            t.IsFalse(quikSearchWindow(ram.data(), kQuikTag, msg, obj), "non-20 s timer: untouched");
         });
 
         tc.Run("online-stock-2: R5 local backlog trim keeps the stock sampling cadence", [](TestCase &t)

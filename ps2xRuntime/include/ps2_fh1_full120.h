@@ -1191,6 +1191,53 @@ inline bool stock120NetPauseSkip(const uint8_t *ram, uint32_t targetPc) noexcept
     return true;
 }
 
+// Quick-match search window (online-stock-2 Part 4, Brad 10-17). The
+// online manager keeps a per-state timer in seconds at [obj+0xe0]
+// (0x25b52c subtracts the frame dt each update); when it runs out the
+// state machine gives up the search (stock "Sorry, no users were found",
+// then quik KIND=*). Both quik senders load 20.0 into it before the timed
+// send 0x3e8b10 (a0=[obj+0x54], a1=tag, a2=message, t0=obj): 0x25ef6c
+// directly, 0x25eeb8 through 0x25b608 (0x25b628). With STOCK120 the quik
+// search timer becomes 120 s, so one Accept keeps searching for two
+// minutes; the KIND=* give-up message and every other tag keep theirs.
+inline constexpr uint32_t kTimedSend = 0x3e8b10u;
+inline constexpr uint32_t kQuikTag = 0x7175696bu;       // 'quik'
+inline constexpr uint32_t kMgrTimerOff = 0xe0u;         // float seconds
+inline constexpr uint32_t kStockSearchSecs = 0x41a00000u; // 20.0f
+inline constexpr uint32_t kQuikSearchSecs = 0x42f00000u;  // 120.0f
+
+// Pure (unit-tested): true when the quik search timer was raised.
+inline bool quikSearchWindow(uint8_t *ram, uint32_t tag, uint32_t msg, uint32_t obj) noexcept
+{
+    if (tag != kQuikTag || obj == 0u)
+        return false;
+    const uint32_t timer = (obj & 0x1fffffffu) + kMgrTimerOff;
+    uint32_t secs = 0u;
+    if (!rd32(ram, timer, secs) || secs != kStockSearchSecs)
+        return false;
+    const uint32_t m = msg & 0x1fffffffu;
+    if (m == 0u || m >= PS2_RAM_SIZE)
+        return false;
+    const size_t n = std::min<size_t>(256u, PS2_RAM_SIZE - m);
+    const char *text = reinterpret_cast<const char *>(ram + m);
+    const size_t len = strnlen(text, n);
+    static constexpr char kGiveUp[] = "KIND=*";
+    for (size_t i = 0u; i + sizeof(kGiveUp) - 1u <= len; ++i)
+        if (std::memcmp(text + i, kGiveUp, sizeof(kGiveUp) - 1u) == 0)
+            return false;
+    return wr32(ram, timer, kQuikSearchSecs);
+}
+
+inline void stock120QuikWindowHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc) noexcept
+{
+    if (targetPc != kTimedSend || !netStock120())
+        return;
+    static uint32_t logged = 0u;
+    if (quikSearchWindow(ram, getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 8)) && logged++ < 16u)
+        std::fprintf(stderr, "[stock120] quick-match search window 20 s -> 120 s t=%llu obj=0x%x\n",
+                     static_cast<unsigned long long>(g_lastTick), getRegU32(ctx, 8));
+}
+
 inline void parityStep(uint8_t *ram);
 inline void lsGateHook(uint8_t *ram, R5900Context *ctx);
 inline void lsTraceRaceTick(uint8_t *ram, R5900Context *ctx);
