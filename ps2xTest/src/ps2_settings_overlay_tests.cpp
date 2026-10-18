@@ -3,8 +3,10 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <utility>
+#include <vector>
 
 // SET2: chord hold-back, panel nav, hit test, settings file (pure parts; the
 // render loop owns pause/draw/restart).
@@ -55,15 +57,42 @@ void register_ps2_settings_overlay_tests()
             auto again = ps2x::set2::chordStep(st, true, false, 3000);
             t.IsTrue(again.stripSelect && !again.openEdge, "next Select holds again"); });
 
-        tc.Run("Start-first-then-Select is two presses, never the chord", [](TestCase &t)
+        tc.Run("Start-first-then-Select inside the window is the chord (symmetric hold)", [](TestCase &t)
                {
             ps2x::set2::ChordState st;
             auto s0 = ps2x::set2::chordStep(st, false, true, 1000);
-            t.IsTrue(!s0.openEdge && !s0.stripStart, "lone Start passes through");
+            t.IsTrue(!s0.openEdge && s0.stripStart && !s0.stripSelect, "first Start held back, Select untouched");
             auto s1 = ps2x::set2::chordStep(st, true, true, 1050);
-            t.IsTrue(!s1.openEdge && s1.stripSelect && !s1.stripStart, "Select holds, Start keeps passing");
-            auto s2 = ps2x::set2::chordStep(st, true, true, 1050 + ps2x::set2::kChordWindowMs);
-            t.IsTrue(!s2.openEdge && !s2.stripSelect, "Select forwards after the window"); });
+            t.IsTrue(s1.openEdge && s1.stripSelect && s1.stripStart, "Select completes the chord");
+            auto hold = ps2x::set2::chordStep(st, true, true, 2000);
+            t.IsTrue(!hold.openEdge && hold.stripSelect && hold.stripStart, "stays stripped");
+            auto free = ps2x::set2::chordStep(st, false, false, 2010);
+            t.IsTrue(!free.stripSelect && !free.stripStart, "released"); });
+
+        tc.Run("lone Start tap forwards a short Start pulse, never the chord", [](TestCase &t)
+               {
+            ps2x::set2::ChordState st;
+            auto s0 = ps2x::set2::chordStep(st, false, true, 1000);
+            t.IsTrue(!s0.openEdge && s0.stripStart, "held back in-window");
+            auto s1 = ps2x::set2::chordStep(st, false, false, 1060); // release: arms the pulse
+            t.IsTrue(!s1.openEdge && !s1.addStart, "release frame only arms");
+            for (int i = 0; i < ps2x::set2::kSelectPulseFrames; ++i)
+            {
+                auto o = ps2x::set2::chordStep(st, false, false, 1070 + i);
+                t.IsTrue(o.addStart && !o.addSelect && !o.openEdge, "Start pulse frame");
+            }
+            auto done = ps2x::set2::chordStep(st, false, false, 1100);
+            t.IsTrue(!done.addStart && !done.addSelect, "pulse ends"); });
+
+        tc.Run("lone Start held past the window forwards (pause keeps working)", [](TestCase &t)
+               {
+            ps2x::set2::ChordState st;
+            auto s0 = ps2x::set2::chordStep(st, false, true, 1000);
+            t.IsTrue(s0.stripStart && !s0.openEdge, "held in-window");
+            auto s1 = ps2x::set2::chordStep(st, false, true, 1000 + ps2x::set2::kChordWindowMs);
+            t.IsTrue(!s1.stripStart && !s1.openEdge, "forwarded at window expiry");
+            auto s2 = ps2x::set2::chordStep(st, false, false, 2000);
+            t.IsTrue(!s2.addStart, "no pulse after a forwarded hold"); });
 
         tc.Run("slow Start after the window is a plain Start (no chord)", [](TestCase &t)
                {
@@ -71,6 +100,97 @@ void register_ps2_settings_overlay_tests()
             (void)ps2x::set2::chordStep(st, true, false, 1000);
             auto o = ps2x::set2::chordStep(st, true, true, 1000 + ps2x::set2::kChordWindowMs + 50);
             t.IsTrue(!o.openEdge && !o.stripSelect && !o.stripStart, "both pass through"); }); });
+
+    // chord-sym-1: frame-quantized driver (60 Hz host polls, 17 ms steps)
+    // with realistic two-thumb timings. Events are (timeMs, select, start)
+    // levels held until the next event; every 17 ms frame steps chordStep.
+    struct ChordDrive
+    {
+        int openCount = 0;
+        int64_t firstOpenMs = -1;
+        bool sawStripStart = false;
+        bool sawAddStart = false;
+        bool sawAddSelect = false;
+        bool sawStripSelect = false;
+    };
+    auto driveChord = [](std::vector<std::pair<int64_t, uint8_t>> events, int64_t endMs)
+    {
+        ChordDrive d;
+        ps2x::set2::ChordState st;
+        size_t ei = 0;
+        bool sel = false, start = false;
+        for (int64_t ms = 0; ms <= endMs; ms += 17)
+        {
+            while (ei < events.size() && events[ei].first <= ms)
+            {
+                sel = (events[ei].second & 1u) != 0u;
+                start = (events[ei].second & 2u) != 0u;
+                ++ei;
+            }
+            auto o = ps2x::set2::chordStep(st, sel, start, ms);
+            if (o.openEdge)
+            {
+                ++d.openCount;
+                if (d.firstOpenMs < 0)
+                    d.firstOpenMs = ms;
+            }
+            d.sawStripStart = d.sawStripStart || o.stripStart;
+            d.sawAddStart = d.sawAddStart || o.addStart;
+            d.sawAddSelect = d.sawAddSelect || o.addSelect;
+            d.sawStripSelect = d.sawStripSelect || o.stripSelect;
+        }
+        return d;
+    };
+    MiniTest::Case("Set2ChordTiming", [&driveChord](TestCase &tc)
+                   {
+        tc.Run("two-thumb skews in either order all open the panel", [&driveChord](TestCase &t)
+               {
+            // (firstMs, skewMs, firstIsStart): first button down, second
+            // joins skewMs later, both held 250 ms, then released.
+            for (int skew : {0, 17, 34, 51, 100, 140})
+            {
+                for (bool startFirst : {false, true})
+                {
+                    const uint8_t first = startFirst ? 2u : 1u;
+                    const uint8_t both = 3u;
+                    auto d = driveChord({{100, first}, {100 + skew, both}, {400, 0u}}, 600);
+                    char msg[128];
+                    std::snprintf(msg, sizeof(msg), "skew=%dms %s-first opens exactly once",
+                                  skew, startFirst ? "start" : "select");
+                    t.IsTrue(d.openCount == 1, msg);
+                }
+            } });
+
+        tc.Run("skew past the window never chords", [&driveChord](TestCase &t)
+               {
+            for (bool startFirst : {false, true})
+            {
+                const uint8_t first = startFirst ? 2u : 1u;
+                auto d = driveChord({{100, first}, {400, 3u}, {600, 0u}}, 800);
+                t.IsTrue(d.openCount == 0, startFirst ? "start-first 300ms skew stays shut"
+                                                     : "select-first 300ms skew stays shut");
+            } });
+
+        tc.Run("quick simultaneous tap opens once and strips until release", [&driveChord](TestCase &t)
+               {
+            auto d = driveChord({{100, 3u}, {160, 0u}}, 400);
+            t.IsTrue(d.openCount == 1, "one open edge");
+            t.IsTrue(d.sawStripSelect && d.sawStripStart, "both stripped while down");
+            t.IsTrue(!d.sawAddSelect && !d.sawAddStart, "no forward pulse after a chord"); });
+
+        tc.Run("lone taps of either button pulse, never open", [&driveChord](TestCase &t)
+               {
+            auto selTap = driveChord({{100, 1u}, {160, 0u}}, 400);
+            t.IsTrue(selTap.openCount == 0 && selTap.sawAddSelect && !selTap.sawAddStart,
+                     "lone Select pulses Select only");
+            auto startTap = driveChord({{100, 2u}, {160, 0u}}, 400);
+            t.IsTrue(startTap.openCount == 0 && startTap.sawAddStart && !startTap.sawAddSelect,
+                     "lone Start pulses Start only"); });
+
+        tc.Run("second chord works after a full release", [&driveChord](TestCase &t)
+               {
+            auto d = driveChord({{100, 3u}, {200, 0u}, {400, 2u}, {450, 3u}, {600, 0u}}, 800);
+            t.IsTrue(d.openCount == 2, "re-arms after both release"); }); });
 
     MiniTest::Case("Set2Nav", [](TestCase &tc)
                    {

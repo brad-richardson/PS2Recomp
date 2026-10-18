@@ -8584,13 +8584,17 @@ void PS2Runtime::run()
                     raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kStart);
                 if (set2ChordOut.addSelect)
                     raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kSelect);
+                if (set2ChordOut.addStart)
+                    raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kStart);
                 // set2-polish-1: carry the same hold-back for the touch
                 // path (applied at the vpad publish below, like the
                 // close-press mask, so a touch Select never leaks ahead).
                 set2VpadStrip = static_cast<uint16_t>(
                     (set2ChordOut.stripSelect ? ps2x::vpad::kSelect : 0u) |
                     (set2ChordOut.stripStart ? ps2x::vpad::kStart : 0u));
-                set2VpadAdd = set2ChordOut.addSelect ? ps2x::vpad::kSelect : static_cast<uint16_t>(0u);
+                set2VpadAdd = static_cast<uint16_t>(
+                    (set2ChordOut.addSelect ? ps2x::vpad::kSelect : 0u) |
+                    (set2ChordOut.addStart ? ps2x::vpad::kStart : 0u));
                 // The close-press overhang drops out button by button as each
                 // releases; new presses pass (they were never in the mask).
                 const uint16_t set2Swallowed = ps2x::set2::swallowStep(set2Swallow, set2Union);

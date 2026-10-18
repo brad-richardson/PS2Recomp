@@ -27,21 +27,29 @@ namespace ps2x::set2
 // Brad 10-12: "select does reset the character" (SET1's probe missed it). A
 // Select press is held for kChordWindowMs: if a Start edge arrives inside the
 // window it is the chord (open the panel, neither button reaches the game);
-// otherwise the Select forwards (the rider reset keeps working, ~150 ms
-// later). A Select released inside the window with no Start forwards a short
-// pulse so the guest still sees it. Start-first-then-Select is two separate
-// presses, never the chord (Start already reached the game).
-constexpr int kChordWindowMs = 150;
+// otherwise the first button forwards (a lone Select keeps the rider reset
+// working, ~200 ms later when held; a lone Start keeps pause working the
+// same way; quick taps of either forward on release, undelayed).
+// A first button released inside the window with no second forwards a short
+// pulse so the guest still sees it. Either order arms the window
+// (chord-sym-1, Brad 10-17: a physical two-thumb Select+Start lands
+// Start-first about half the time, and Start-first could never complete
+// the old Select-only hold, so the panel opened unreliably). The window is
+// 200 ms, not 150: the 60 Hz poll quantizes each edge by up to a frame, so
+// a true 140 ms two-thumb skew could already miss a 150 ms window.
+constexpr int kChordWindowMs = 200;
 constexpr int kSelectPulseFrames = 3;
 
 struct ChordState
 {
     bool selectWas = false;
     bool startWas = false;
-    bool holding = false;    // Select edge seen, window open
+    bool holding = false;    // first edge seen, window open
+    bool heldStart = false;  // which button opened the window (else Select)
     int64_t holdSinceMs = 0; // window start (wall ms)
     bool consumed = false;   // chord fired; strip both until both released
     int pulseLeft = 0;       // early-release forward pulse (host frames)
+    bool pulseStart = false; // the pulse is for Start (else Select)
 };
 
 struct ChordOut
@@ -50,6 +58,7 @@ struct ChordOut
     bool stripSelect = false; // strip the Select bit from the game mask
     bool stripStart = false;  // strip the Start bit from the game mask
     bool addSelect = false;   // OR the Select bit into the game mask (pulse)
+    bool addStart = false;    // OR the Start bit into the game mask (pulse)
 };
 
 inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64_t nowMs)
@@ -71,28 +80,36 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
     }
     const bool selectEdge = selectDown && !st.selectWas;
     const bool startEdge = startDown && !st.startWas;
-    if (selectEdge)
+    if (!st.holding && (selectEdge || startEdge))
     {
+        // Idle: either edge opens the hold (Select wins exact ties, the
+        // old path). The other edge inside the window completes the chord.
         st.holding = true;
+        st.heldStart = startEdge && !selectEdge;
         st.holdSinceMs = nowMs;
         st.pulseLeft = 0;
     }
     if (st.holding)
     {
-        if (!selectDown)
+        const bool heldDown = st.heldStart ? startDown : selectDown;
+        const bool otherDown = st.heldStart ? selectDown : startDown;
+        const bool otherWas = st.heldStart ? st.selectWas : st.startWas;
+        if (!heldDown)
         {
-            // Released inside the window with no Start: forward a short
-            // pulse so the guest still sees the press.
+            // First button released inside the window with no second:
+            // forward a short pulse so the guest still sees the press.
             st.holding = false;
             st.pulseLeft = kSelectPulseFrames;
+            st.pulseStart = st.heldStart;
         }
         else if (nowMs - st.holdSinceMs >= kChordWindowMs)
         {
-            // Window expired first: a lone Select, forwarded from here on
-            // (a Start edge on this frame is a plain Start, not the chord).
+            // Window expired first: a lone press, forwarded from here on
+            // (a second-button edge on this frame is plain input, not the
+            // chord).
             st.holding = false;
         }
-        else if (startEdge)
+        else if (otherDown && !otherWas)
         {
             st.holding = false;
             st.consumed = true;
@@ -100,14 +117,21 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
             out.stripSelect = true;
             out.stripStart = true;
         }
+        else if (st.heldStart)
+        {
+            out.stripStart = true;
+        }
         else
         {
             out.stripSelect = true;
         }
     }
-    else if (!selectDown && st.pulseLeft > 0)
+    else if (st.pulseLeft > 0 && (st.pulseStart ? !startDown : !selectDown))
     {
-        out.addSelect = true;
+        if (st.pulseStart)
+            out.addStart = true;
+        else
+            out.addSelect = true;
         --st.pulseLeft;
     }
     st.selectWas = selectDown;
