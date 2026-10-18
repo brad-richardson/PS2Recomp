@@ -63,6 +63,7 @@
 #include <vector>
 
 #include "ps2_cd_overlay.h"
+#include "ps2_ssx3_banner_scope.h"
 
 namespace ps2_ssx3_course
 {
@@ -986,6 +987,10 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
     }
     else
         ps2_cd_overlay::clearModeAlias();
+    // tk-banner-2: the cached banner titles/artists/brand follow the mode
+    // too (menu time, knob-gated inside; silent when writes is null).
+    if (banner::knob())
+        banner::syncForMode(ram, target, writes);
     char buf[192];
     for (const ModeField &f : ms.fields)
     {
@@ -1034,6 +1039,13 @@ inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std:
     Modes &ms = courseModes();
     if ((!p.armed && !ms.armed) || !ram || !pad) // armed is set once in loadELF, before the EE runs
         return false;
+    // tk-banner-2: lazy post-parse banner sync. The guest parses MUSIC.INF
+    // after loadELF, so the boot window's first sync can only run once the
+    // tables exist; afterwards this fast-paths (record-0 match) and only
+    // re-syncs on a real change (mode switch writes go through modeNext,
+    // a savestate load shows up as a mismatch).
+    if (ms.armed)
+        banner::ensureSynced(ram, ms, vsyncTick);
     static std::mutex mu; // pad reads come from the EE thread; the lock only guards chordWas
     std::lock_guard<std::mutex> lock(mu);
     const uint16_t buttons = static_cast<uint16_t>(pad[2] | (pad[3] << 8));
@@ -1078,34 +1090,24 @@ inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std:
     return fired && confirm;
 }
 
-// tk-banner-1: boot-scoped race-banner data. The guest parses
+// tk-banner-1: boot-served race-banner data. The guest parses
 // DATA/CONFIG/MUSIC.INF once at boot (before the first menu, so before any
 // mode-scoped alias installs) and caches TITLE/ARTIST per song for the
-// race-start banner; the banner's brand line is the rodata string
-// "EA RADIO BIG" (SLUS_207.72 file offset 3603176 = EE 0x46EAE8, the only
-// EA RADIO string on the disc). When PS2X_SSX3_TRICKY_MENU=1 and
+// race-start banner. When PS2X_SSX3_TRICKY_MENU=1 and
 // PS2X_SSX3_TRICKY_MUSIC_INF names the host composite: serve the disc file
-// from it starting now, and blank the brand line (Tricky's disc carries no
-// station branding: zero RADIO strings on the Tricky ISO). A manifest poke
-// cannot spell the blank (the parser trims trailing spaces), hence the
-// memset here. The manifest Tricky mode's own alias row (same file)
-// re-installs the alias at menu entry and Stock clears it; the rodata
-// blank persists (nothing rewrites it). Either knob unset (stock): no
-// reads, no writes. Returns true when installed (alias pending even if the
-// brand line already reads blank or the blank is refused).
+// from it starting now. The boot no longer blanks the brand line (that was
+// tk-banner-2's stock regression: the blank hit every course); the brand
+// plus the cached titles/artists are rewritten per course mode by the
+// banner scope (ps2_ssx3_banner_scope.h) at mode-switch time and at a lazy
+// post-parse sync. The manifest Tricky mode's own alias row (same file)
+// re-installs the alias at menu entry and Stock clears it. Either knob
+// unset (stock): no reads, no writes. Returns true when installed.
 inline bool bootBannerFromEnv(uint8_t *ram)
 {
-    static constexpr uint32_t kBrandAddr = 0x46EAE8u;
-    static constexpr char kBrand[] = "EA RADIO BIG";
     const char *menu = std::getenv("PS2X_SSX3_TRICKY_MENU");
     const char *host = std::getenv("PS2X_SSX3_TRICKY_MUSIC_INF");
     if (!menu || std::strcmp(menu, "1") != 0 || !host || !*host || !ram)
         return false;
-    if (ramHas(ram, kBrandAddr, kBrand))
-        std::memset(ram + kBrandAddr, ' ', sizeof(kBrand) - 1);
-    else
-        std::fprintf(stderr, "[ssx3-course] boot banner brand not blanked (0x%06x holds no \"%s\")\n",
-                     kBrandAddr, kBrand);
     ps2_cd_overlay::setModeAliases({{"/DATA/CONFIG/MUSIC.INF", host}});
     std::fprintf(stderr, "[ssx3-course] boot alias /DATA/CONFIG/MUSIC.INF -> %s\n", host);
     return true;
