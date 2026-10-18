@@ -555,7 +555,7 @@ void register_ps2_ssx3_tricky_layer_tests()
 
     MiniTest::Case("Ps2Ssx3TrickyLayerLoad", [](TestCase &tc)
                    {
-        tc.Run("F1: load rebuilds aliases from restored mode", [](TestCase &t)
+        tc.Run("F1: load rebuilds aliases from explicit owner despite a mapped donor", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_layer;
             resetLayerForTest();
@@ -565,6 +565,8 @@ void register_ps2_ssx3_tricky_layer_tests()
             // Tricky rows restored, pending list cleared (the F1 desync):
             // the load rebuilds the mode's aliases before any CD read.
             ramToMode(ram, true);
+            ps2_ssx3_course::courseModes().owner = 1; // restored v2 owner
+            wstr(ram, ps2_ssx3_course::kEventBase + 68, 16, "ELYS"); // mapped archive defeats modeCurrent
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "desync set up");
             ps2_ssx3_tricky::state().tricky = false; // stale the other way
             const uint64_t e = epoch();
@@ -578,6 +580,7 @@ void register_ps2_ssx3_tricky_layer_tests()
             ps2_cd_overlay::setModeAliases({{"/DISC", "/HOST"}});
             ps2_ssx3_tricky::state().tricky = true; // stale the other way
             ramToMode(ram, false);
+            ps2_ssx3_course::courseModes().owner = 0; // restored stock owner
             onStateLoaded(ram.data(), ram.size(), 5001u);
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "stock clears");
             t.IsTrue(!ps2_ssx3_tricky::state().tricky, "menu flag follows restored Stock");

@@ -26,6 +26,7 @@
 #include "ps2_ssx3_tricky_gems.h"
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_menu.h"
+#include "ps2_ssx3_tricky_list.h"
 #include "ps2_ssx3_tricky_song.h"
 
 #include <atomic>
@@ -616,7 +617,7 @@ inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
     ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
     if (ms.armed)
     {
-        const size_t cur = ps2_ssx3_course::modeCurrent(ms, rdram);
+        const size_t cur = ms.owner; // restored explicit owner survives mapped donor substitutions
         // TKL1 merge: the menu wrapper's Tricky flag means "modeSet(true)
         // is in effect" (Tricky rows + aliases); reconcile it with the
         // restored mode so a later menu exit cleans up correctly (F5 tail).
@@ -639,6 +640,7 @@ inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
                          static_cast<unsigned long long>(tick));
         }
     }
+    ps2_ssx3_tricky_list::driveDisarm(); // discard the previous timeline's host navigator
     if (!active())
         return;
     detail::liveEpoch().fetch_add(1u, std::memory_order_acq_rel);

@@ -813,6 +813,7 @@ struct ModeField
 struct Modes
 {
     bool armed = false;
+    uint32_t owner = 0; // authoritative mode; mapped donor rows cannot infer it
     std::vector<Mode> modes;
     std::vector<ModeField> fields; // every (event, field) any mode touches, with its stock value
     std::vector<Poke> sites;       // every poke address once, with its stock (old) string
@@ -976,6 +977,7 @@ inline int modeApply(Modes &ms, uint8_t *ram, size_t next, std::string &msg, std
     const Mode *target = next ? &ms.modes[next - 1u] : nullptr;
     if (!ps2_ssx3_file_table::transition(ram, 32u * 1024u * 1024u, target != nullptr, msg))
         return -1;
+    ms.owner = static_cast<uint32_t>(next);
     // TKP4b: the aliases follow the mode (off on Stock and on modes without
     // any). Set after the refusal checks above, with the RAM writes.
     if (target && !target->aliases.empty())

@@ -2,8 +2,8 @@
 // The "trickygems" section (name, version, registration) lives here in the
 // K1 static-registration pattern, and the TK34 patch-grow kernel-section
 // field is provided here (save/validate/load at the exact field position).
-// Bodies moved verbatim; serialized bytes are unchanged, so old saves keep
-// loading. Without a module the gems section is absent and the kernel
+// Course ownership was added in section v2 (preserve-fix-1); v1 remains
+// loadable with the Tricky layer off. Without a module the gems section is absent and the kernel
 // patch-grow field fails closed (a no-module binary never round-trips
 // game state; the suites prove it).
 #include "Ssx3TrickyState.h"
@@ -21,6 +21,115 @@ namespace
 {
 using ps2_savestate::Reader;
 using ps2_savestate::Writer;
+
+void courseSave(Writer &w)
+{
+    const auto &modes = ps2_ssx3_course::courseModes();
+    const auto &menu = ps2_ssx3_tricky::state();
+    const auto &files = ps2_ssx3_file_table::state();
+    const auto &map = ps2_ssx3_tricky_list::mapState();
+    w.b(modes.armed); w.u32(modes.owner);
+    w.b(menu.tricky); w.u32(menu.mapController); w.u64(menu.mapEntries);
+    w.b(files.enabled); w.b(files.active);
+    w.u32(files.base); w.u32(files.stride); w.u32(files.seed); w.u32(files.count);
+    w.blob(files.stock); w.u32(static_cast<uint32_t>(files.names.size()));
+    for (const auto &name : files.names) w.str(name);
+    for (bool have : map.snapHave) w.b(have);
+    w.bytes(map.snapArchive, sizeof(map.snapArchive));
+    w.bytes(map.snapName, sizeof(map.snapName));
+    w.u32(static_cast<uint32_t>(map.activeEvent));
+}
+
+bool courseLoad(Reader &r)
+{
+    namespace ft = ps2_ssx3_file_table;
+    namespace list = ps2_ssx3_tricky_list;
+    auto &modes = ps2_ssx3_course::courseModes();
+    auto &menu = ps2_ssx3_tricky::state();
+    if (ps2_savestate::loadingSectionVersion() == 1)
+    {
+        // A legacy Tricky save has no restore image or mapper owner. Do
+        // not infer either from possibly substituted donor rows.
+        if (modes.armed || ft::state().enabled || ps2_ssx3_tricky::knob())
+            return r.fail("trickycourse: legacy Tricky ownership cannot be recovered");
+        if (!r.validationOnly())
+        {
+            ft::state() = {}; list::mapState() = {}; modes.owner = 0;
+            menu.tricky = false; menu.mapController = 0; menu.mapEntries = 0;
+        }
+        return true;
+    }
+    const bool armed = r.b(); const uint32_t owner = r.u32();
+    const bool tricky = r.b(); const uint32_t controller = r.u32(); const uint64_t entries = r.u64();
+    ft::State files;
+    files.enabled = r.b(); files.active = r.b();
+    files.base = r.u32(); files.stride = r.u32(); files.seed = r.u32(); files.count = r.u32();
+    const auto bytes = r.count(ft::kCapacity * 268u);
+    files.stock.resize(static_cast<size_t>(bytes));
+    r.bytes(files.stock.data(), files.stock.size());
+    const uint32_t names = r.u32();
+    if (names > ft::kCapacity) return r.fail("trickycourse: too many overlay IDs");
+    for (uint32_t i = 0; i < names; ++i)
+    {
+        const auto n = r.count(255);
+        std::string name(static_cast<size_t>(n), '\0');
+        r.bytes(name.data(), name.size()); files.names.push_back(std::move(name));
+    }
+    list::MapState map;
+    for (bool &have : map.snapHave) have = r.b();
+    r.bytes(map.snapArchive, sizeof(map.snapArchive));
+    r.bytes(map.snapName, sizeof(map.snapName));
+    const uint32_t active = r.u32();
+    if (!r.ok()) return false;
+    if (armed != modes.armed || owner > modes.modes.size() || (!armed && owner) ||
+        (armed && tricky != (owner != 0)) || controller >= PS2_RAM_SIZE || (controller & 3u) ||
+        files.enabled != ft::state().enabled || (files.active && (!files.enabled || !owner)))
+        return r.fail("trickycourse: incompatible owner/configuration");
+    if (files.stock.empty())
+    {
+        if (files.active || files.base || files.stride || files.seed || files.count || !files.names.empty())
+            return r.fail("trickycourse: missing stock restore image");
+    }
+    else
+    {
+        if (!files.enabled || files.stride != 268 || files.stock.size() != ft::kCapacity * 268u ||
+            files.base < 0x100000u || (files.base & 3u) ||
+            uint64_t(files.base) + files.stock.size() > PS2_RAM_SIZE || !files.count ||
+            files.count > ft::kCapacity || files.names.size() > ft::kCapacity - files.count)
+            return r.fail("trickycourse: invalid file-table restore layout");
+        for (uint32_t i = 1; i < files.count; ++i)
+            if (ft::read32(files.stock.data() + (i - 1) * 268) >= ft::read32(files.stock.data() + i * 268))
+                return r.fail("trickycourse: stock file IDs not unique/unsigned sorted");
+        const auto *overlay = ps2_cd_overlay::runtimeOverlay();
+        if (!overlay || files.names.size() != overlay->files.size())
+            return r.fail("trickycourse: overlay ID set differs");
+        for (size_t i = 0; i < files.names.size(); ++i)
+            if (files.names[i] != ft::normalized(overlay->files[i].isoPath))
+                return r.fail("trickycourse: overlay ID order differs");
+    }
+    if (active != 0xffffffffu && active > list::kMapDonorMax)
+        return r.fail("trickycourse: invalid mapped donor");
+    map.activeEvent = active == 0xffffffffu ? -1 : static_cast<int>(active);
+    if (map.activeEvent >= 0 && !map.snapHave[map.activeEvent])
+        return r.fail("trickycourse: mapped donor has no restore image");
+    for (int i = 0; i <= list::kMapDonorMax; ++i)
+        if (!std::memchr(map.snapArchive[i], 0, list::kMapArchiveLen) ||
+            !std::memchr(map.snapName[i], 0, list::kMapNameLen))
+            return r.fail("trickycourse: unterminated donor restore field");
+    if (!r.validationOnly())
+    {
+        ft::state() = std::move(files); list::mapState() = map; modes.owner = owner;
+        menu.tricky = tricky; menu.mapController = controller; menu.mapEntries = entries;
+    }
+    return true;
+}
+
+std::string courseReady()
+{
+    if (ps2_ssx3_tricky::state().redirect) return "Tricky list refresh pending";
+    if (ps2_ssx3_tricky_list::driveProgress().driving) return "Tricky navigator driving";
+    return {};
+}
 } // namespace
 
 namespace ps2_tricky_state
@@ -38,6 +147,7 @@ void trickyGemsSave(Writer &w)
     w.u32(s.raceClock.last); w.u64(s.raceClock.lastTick); w.u64(s.raceClock.adoptUntil);
     w.bytes(s.collected, sizeof(s.collected));
     w.bytes(s.spinSeen, sizeof(s.spinSeen));
+    courseSave(w);
 }
 
 bool trickyGemsLoad(Reader &r)
@@ -64,6 +174,7 @@ bool trickyGemsLoad(Reader &r)
         return r.fail("trickygems: invalid scan cursor");
     for (float x : next.prev)
         if (!std::isfinite(x)) return r.fail("trickygems: invalid segment");
+    if (!courseLoad(r)) return false;
     if (!r.validationOnly())
         ps2_tk45c::state() = next; // derived lookup is rebuilt from restored RAM after all sections.
     return true;
@@ -129,10 +240,10 @@ namespace
 {
 // K1 pattern: static registration in the family TU (this TU is always
 // linked — it defines the module entry — and section order is key-sorted,
-// so registration timing is inert). Version stays 1: old saves keep
-// loading through the unchanged provider bodies.
+// so registration timing is inert). v2 owns course/mapper restore data;
+// v1 remains readable for default-off stock saves.
 const bool kTrickyGemsRegistered = ps2_savestate::registerSection(
     "trickygems",
-    {1u, &ps2_tricky_state::trickyGemsSave, &ps2_tricky_state::trickyGemsLoad, nullptr, 0u, false,
+    {2u, &ps2_tricky_state::trickyGemsSave, &ps2_tricky_state::trickyGemsLoad, &courseReady, 1u, false,
      &ps2_tricky_state::trickyGemsLoad});
 } // namespace

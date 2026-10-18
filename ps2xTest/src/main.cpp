@@ -24,6 +24,7 @@ void register_ps2_native_world_tests();
 #if PS2X_TEST_GAME_MODULE_SSX3
 void register_ps2_ssx3_anim_pick_guard_tests();
 void register_ps2_ssx3_module_tests();
+void register_ps2_ssx3_tricky_state_tests();
 void register_ps2_ssx3_copied_payload_tests();
 void register_ps2_ssx3_sif_handshake_tests();
 void register_ps2_snd_tests();
@@ -138,6 +139,7 @@ int main(int argc, char **argv)
 #if PS2X_TEST_GAME_MODULE_SSX3
     register_ps2_ssx3_anim_pick_guard_tests();
     register_ps2_ssx3_module_tests();
+    register_ps2_ssx3_tricky_state_tests();
     register_ps2_ssx3_copied_payload_tests();
     register_ps2_ssx3_sif_handshake_tests();
     register_ps2_snd_tests();

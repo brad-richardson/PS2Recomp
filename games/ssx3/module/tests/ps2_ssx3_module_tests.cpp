@@ -218,7 +218,8 @@ void register_ps2_ssx3_module_tests()
             const auto &sections = ps2_savestate::registeredSections();
             const auto gems = sections.find("trickygems");
             t.IsTrue(gems != sections.end(), "trickygems section registered by the module");
-            t.Equals(gems->second.version, 1u, "trickygems version frozen for old saves");
+            t.Equals(gems->second.version, 2u, "trickygems owns course restore state");
+            t.Equals(gems->second.minLoadVersion, 1u, "legacy default-off stock saves supported");
             t.IsTrue(gems->second.save == &ps2_tricky_state::trickyGemsSave, "gems save hook");
             t.IsTrue(gems->second.load == &ps2_tricky_state::trickyGemsLoad, "gems load hook");
             t.IsTrue(gems->second.validate == &ps2_tricky_state::trickyGemsLoad, "gems validate hook");
