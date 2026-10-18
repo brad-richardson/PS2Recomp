@@ -48,6 +48,10 @@ struct State
     std::FILE *ses_f = nullptr;
     bool sesWriteFailed = false;
     bool covWriteFailed = false;
+    // F3 (appsec-fix-1): hard byte ceiling for the opt-in session log.
+    uint64_t sesBytes = 0u;
+    bool sesCapped = false;
+    static constexpr uint64_t kSesMaxBytes = 8u * 1024u * 1024u;
     std::atomic<uint8_t> *bytes = nullptr;
     uint32_t base = 0u, slots = 0u;
     std::vector<uint32_t> overrides;
@@ -140,14 +144,24 @@ std::string makeSessionId()
 }
 
 // Caller holds s.mu. One flushed line; failures are swallowed (one note).
+// F3: the session log stops past its byte ceiling (one note, then silent).
 void sesLineLocked(State &s, const std::string &body)
 {
     if (!s.ses || !s.ses_f)
+        return;
+    if (s.sesCapped)
         return;
     char head[64];
     std::snprintf(head, sizeof(head), "t=%.1f tick=%llu ", nowS(s),
                   static_cast<unsigned long long>(s.lastTick.load(std::memory_order_relaxed)));
     const std::string line = std::string(head) + body + "\n";
+    if (s.sesBytes + line.size() > State::kSesMaxBytes)
+    {
+        s.sesCapped = true;
+        std::fprintf(stderr, "[tel] session log capped at %llu bytes (%s); further lines dropped\n",
+                     static_cast<unsigned long long>(State::kSesMaxBytes), s.sesPath.c_str());
+        return;
+    }
     if (std::fwrite(line.data(), 1, line.size(), s.ses_f) != line.size() || std::fflush(s.ses_f) != 0)
     {
         if (!s.sesWriteFailed)
@@ -156,6 +170,10 @@ void sesLineLocked(State &s, const std::string &body)
             std::fprintf(stderr, "[tel] session log write failed (%s); further lines may be lost\n",
                          s.sesPath.c_str());
         }
+    }
+    else
+    {
+        s.sesBytes += line.size();
     }
 }
 

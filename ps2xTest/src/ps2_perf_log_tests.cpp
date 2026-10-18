@@ -124,6 +124,15 @@ void register_ps2_perf_log_tests()
             t.Equals(dead.size(), static_cast<size_t>(1), "one pruned");
             t.IsTrue(dead[0] == "perf-20260927-160301.log", "oldest by name pruned"); });
 
+        tc.Run("F3: active perf file rotates past 8 MiB", [](TestCase &t)
+               {
+            t.Equals(ps2x::perflog::kPerfFileMaxBytes, 8u * 1024u * 1024u, "8 MiB active cap");
+            t.IsTrue(!ps2x::perflog::shouldRotateActiveFile(0u), "empty keeps file");
+            t.IsTrue(!ps2x::perflog::shouldRotateActiveFile(ps2x::perflog::kPerfFileMaxBytes),
+                     "at cap keeps file");
+            t.IsTrue(ps2x::perflog::shouldRotateActiveFile(ps2x::perflog::kPerfFileMaxBytes + 1u),
+                     "past cap rotates"); });
+
         tc.Run("parseProcTaskStat reads comm, utime, stime", [](TestCase &t)
                {
             ps2x::perflog::ProcTaskCpu cpu;

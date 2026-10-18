@@ -27,11 +27,13 @@
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #include <random>
 #include <string>
+#include <system_error>
 #include <thread>
 
 #if defined(__APPLE__) || defined(__linux__)
@@ -1051,15 +1053,36 @@ namespace ps2_net
                           ps2_net_protocol::kOnlineRequires120);
     }
 
+    // F3 (appsec-fix-1): hard byte ceiling for the opt-in packet capture.
+    constexpr uint64_t kCaptureMaxBytes = 8u * 1024u * 1024u;
+    bool g_captureCapped = false;
     void capture(const char *direction, uint64_t hostTick, uint64_t guestTick,
                  const uint8_t *data, uint32_t length)
     {
         const std::string &path = capturePath();
-        if (path.empty() || !direction)
+        if (path.empty() || !direction || g_captureCapped)
         {
             return;
         }
         std::lock_guard<std::mutex> lock(g_captureMutex);
+        if (g_captureCapped)
+        {
+            return;
+        }
+        {
+            std::error_code capEc;
+            const uint64_t size =
+                std::filesystem::is_regular_file(path, capEc) && !capEc
+                    ? std::filesystem::file_size(path, capEc)
+                    : 0u;
+            if (!capEc && size > kCaptureMaxBytes)
+            {
+                g_captureCapped = true;
+                std::fprintf(stderr, "[net] capture capped at %llu bytes (%s); further packets dropped\n",
+                             static_cast<unsigned long long>(kCaptureMaxBytes), path.c_str());
+                return;
+            }
+        }
         std::ofstream out(path, std::ios::app | std::ios::binary);
         if (!out)
         {

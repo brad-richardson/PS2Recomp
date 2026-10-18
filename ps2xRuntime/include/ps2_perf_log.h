@@ -42,6 +42,18 @@ namespace ps2x::perflog
 {
 constexpr uint64_t kMaxDirBytes = 5u * 1024u * 1024u;
 constexpr size_t kMaxFiles = 5u;
+// F3 (appsec-fix-1): hard active-session byte ceiling for the default perf
+// log, matching the tail family (8 MiB per file, 24 MiB / 3 files per dir).
+// The per-second writer rotates past the cap; opt-in diagnostics use the
+// same file budget (see ps2_input_diag / session telemetry / net capture).
+constexpr uint64_t kPerfFileMaxBytes = 8u * 1024u * 1024u;
+constexpr uint64_t kPerfDirMaxBytes = 3u * kPerfFileMaxBytes;
+constexpr size_t kPerfMaxFiles = 3u;
+
+inline bool shouldRotateActiveFile(uint64_t bytes)
+{
+    return bytes > kPerfFileMaxBytes;
+}
 
 inline bool enabledFromEnv(const char *value)
 {

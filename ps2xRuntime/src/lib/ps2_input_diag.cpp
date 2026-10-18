@@ -7,6 +7,7 @@
 #include "ps2_host_backend.h" // raylib.h (IsGamepadAvailable)
 #include "ps2_touch_events.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -110,6 +111,49 @@ Sink &sink()
     return s;
 }
 
+// F3 (appsec-fix-1): same 8 MiB active / 24 MiB dir budget as the perf log.
+constexpr uint64_t kInputFileMaxBytes = 8u * 1024u * 1024u;
+constexpr uint64_t kInputDirMaxBytes = 3u * kInputFileMaxBytes;
+constexpr size_t kInputMaxFiles = 3u;
+
+bool isInputFile(const std::string &name)
+{
+    if (name.size() < 12 || name.compare(0, 6, "input-") != 0)
+        return false;
+    return name.compare(name.size() - 4, 4, ".log") == 0;
+}
+
+void pruneInputFiles(const std::string &dir)
+{
+    std::error_code ec;
+    std::vector<std::pair<std::string, uint64_t>> entries;
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+    {
+        if (ec)
+            break;
+        const std::string name = entry.path().filename().string();
+        if (!isInputFile(name))
+            continue;
+        uint64_t size = 0;
+        if (entry.is_regular_file(ec) && !ec)
+            size = entry.file_size(ec);
+        entries.emplace_back(name, size);
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+    uint64_t bytes = 0;
+    for (const auto &e : entries)
+        bytes += e.second;
+    size_t i = 0;
+    while (i < entries.size() && (entries.size() - i > kInputMaxFiles || bytes > kInputDirMaxBytes))
+    {
+        std::filesystem::remove(std::filesystem::path(dir) / entries[i].first, ec);
+        ec.clear();
+        bytes -= entries[i].second;
+        ++i;
+    }
+}
+
 void ensureSink()
 {
     Sink &s = sink();
@@ -180,6 +224,33 @@ void flushWrite(const char *reason)
                  static_cast<unsigned long long>(dropTotal()));
     std::fflush(out);
     std::fclose(out);
+    // F3: rotate the active input log past the byte ceiling so opt-in
+    // diagnostics cannot accumulate without bound.
+    {
+        std::error_code ec;
+        const uint64_t size = std::filesystem::is_regular_file(s.path, ec) && !ec
+                                  ? std::filesystem::file_size(s.path, ec)
+                                  : 0u;
+        if (!ec && size > kInputFileMaxBytes)
+        {
+            const std::string dir = diagDir();
+            s.path = dir + "/" + inputStamp() + ".log";
+            if (std::FILE *probe = std::fopen(s.path.c_str(), "a"))
+            {
+                std::fclose(probe);
+                std::fprintf(stderr, "[input] rotated past %llu bytes to %s\n",
+                             static_cast<unsigned long long>(size), s.path.c_str());
+            }
+            else
+            {
+                std::fprintf(stderr, "[input] cannot rotate; disabled\n");
+                s.openFailed = true;
+                s.path.clear();
+                return;
+            }
+            pruneInputFiles(dir);
+        }
+    }
 }
 
 void flushSync(const char *reason)

@@ -517,6 +517,7 @@ struct Logger
     bool tried = false; // main thread only (poll/dumpTail/tryOpen)
     std::atomic<bool> active{false}; // read by notePresent from any thread
     std::FILE *file = nullptr;
+    std::string currentPath; // F3: active perf file for the byte ceiling
     std::chrono::steady_clock::time_point t0{};
     std::chrono::steady_clock::time_point windowStart{};
     uint64_t windowTick = 0;
@@ -630,7 +631,9 @@ struct Logger
             std::fprintf(stderr, "[perf] cannot open %s; disabled\n", path.c_str());
             return;
         }
+        currentPath = path;
         // Ring-cap with the new file included (it sorts newest, never pruned).
+        // F3: the active-session budget matches the tail family.
         std::vector<FileEntry> entries;
         for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
         {
@@ -644,7 +647,7 @@ struct Logger
                 size = entry.file_size(ec);
             entries.push_back({name, size});
         }
-        for (const std::string &dead : planPrune(std::move(entries)))
+        for (const std::string &dead : planPrune(std::move(entries), kPerfDirMaxBytes, kPerfMaxFiles))
         {
             std::filesystem::remove(std::filesystem::path(dir) / dead, ec);
             ec.clear();
@@ -673,6 +676,79 @@ struct Logger
 #endif
         active.store(true, std::memory_order_release);
         std::fprintf(stderr, "[perf] logging to %s\n", path.c_str());
+    }
+
+    // F3: rotate the active perf file past the byte ceiling (main thread
+    // only, called after the per-second flush). Keeps the window cursors;
+    // only the file handle + name change. Prunes the dir to the same
+    // budget the open path uses.
+    void rotateIfCapped()
+    {
+        if (!file || currentPath.empty())
+        {
+            return;
+        }
+        std::error_code ec;
+        const uint64_t size = std::filesystem::is_regular_file(currentPath, ec) && !ec
+                                  ? std::filesystem::file_size(currentPath, ec)
+                                  : 0u;
+        if (ec || !shouldRotateActiveFile(size))
+        {
+            return;
+        }
+        std::fclose(file);
+        file = nullptr;
+        const std::string dir = defaultDir();
+        std::string path;
+        for (int attempt = 0; attempt < 100; ++attempt)
+        {
+            std::string candidate = dir + "/" + launchStamp();
+            if (attempt > 0)
+            {
+                candidate += "-" + std::to_string(attempt + 1);
+            }
+            candidate += ".log";
+            if (candidate != currentPath && !std::filesystem::exists(candidate, ec))
+            {
+                path = candidate;
+                break;
+            }
+        }
+        if (path.empty())
+        {
+            std::fprintf(stderr, "[perf] active file capped at %llu bytes, no free name; disabled\n",
+                         static_cast<unsigned long long>(size));
+            active.store(false, std::memory_order_release);
+            return;
+        }
+        file = std::fopen(path.c_str(), "w");
+        if (!file)
+        {
+            std::fprintf(stderr, "[perf] cannot rotate to %s; disabled\n", path.c_str());
+            active.store(false, std::memory_order_release);
+            return;
+        }
+        currentPath = path;
+        std::vector<FileEntry> entries;
+        for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+        {
+            if (ec)
+                break;
+            const std::string name = entry.path().filename().string();
+            if (!hasPrefixSuffix(name))
+                continue;
+            uint64_t entrySize = 0;
+            if (entry.is_regular_file(ec) && !ec)
+                entrySize = entry.file_size(ec);
+            entries.push_back({name, entrySize});
+        }
+        for (const std::string &dead : planPrune(std::move(entries), kPerfDirMaxBytes, kPerfMaxFiles))
+        {
+            std::filesystem::remove(std::filesystem::path(dir) / dead, ec);
+            ec.clear();
+        }
+        std::fprintf(stderr, "[perf] rotated past %llu bytes to %s\n",
+                     static_cast<unsigned long long>(size), path.c_str());
     }
 };
 
@@ -1076,6 +1152,7 @@ void poll(uint64_t vsyncTick)
         stageMax[i] = {stageName(static_cast<Stage>(i)), st.n ? st.max : -1.0, st};
     }
     std::fflush(log.file);
+    log.rotateIfCapped();
     // TEL2: session-log hitch/race-window accounting (no-op when off). Not
     // while the BG1 gate holds the game thread (a paused window is no hitch).
     if (!ps2x::hostPause::pausedFlag().load(std::memory_order_relaxed))
