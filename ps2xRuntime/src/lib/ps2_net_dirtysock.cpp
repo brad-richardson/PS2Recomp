@@ -51,6 +51,7 @@
 #if defined(__ANDROID__)
 #include "ps2_android_env.h" // ONL11: files-dir login path accessor
 #endif
+#include "ps2_login_paths.h" // F2: non-shared secret locations + migration
 
 namespace ps2_net
 {
@@ -210,10 +211,10 @@ namespace ps2_net
         }
 
         // ONL11: login-file path. Explicit PS2X_NET_QUICKPLAY_FILE wins;
-        // otherwise the app's own data dir, resolved like other app-dir
-        // paths (Android files dir via the boot-ELF sibling accessor, iOS
-        // Documents via PS2X_IOS_DOCUMENTS), falling back to the
-        // Mac/desktop dotfile. Empty when no location resolves.
+        // otherwise the app's non-shared data dir (F2: iOS Application
+        // Support via PS2X_IOS_SUPPORT, Android internal files dir via the
+        // boot-ELF sibling accessor), falling back to the Mac/desktop
+        // dotfile. Empty when no location resolves.
         std::string quickplayLoginPath()
         {
             if (const char *env = std::getenv("PS2X_NET_QUICKPLAY_FILE"))
@@ -226,6 +227,22 @@ namespace ps2_net
 #if defined(__ANDROID__)
             return ps2x::quickplayLoginFilePath();
 #else
+            // F2: prefer Application Support; lazily migrate any Documents
+            // leftovers (covers a net entry before prepareEnvironment ran).
+            if (const char *support = std::getenv("PS2X_IOS_SUPPORT"))
+            {
+                if (*support)
+                {
+                    if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"))
+                    {
+                        if (*docs && std::string(docs) != std::string(support))
+                        {
+                            ps2x::loginpaths::migrateLoginFiles(docs, support);
+                        }
+                    }
+                    return ps2x::loginpaths::loginPathForDir(support);
+                }
+            }
             if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"))
             {
                 if (*docs)

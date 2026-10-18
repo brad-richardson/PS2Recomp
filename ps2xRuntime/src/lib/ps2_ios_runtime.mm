@@ -2,6 +2,7 @@
 // for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"
 #include "ps2_env_file.h"
+#include "ps2_login_paths.h"
 #include "ps2_input_diag.h"
 #include "ps2_touch_events.h"
 #include "ps2_knobs.h"
@@ -178,6 +179,30 @@ void prepareEnvironment(const char *argv0)
     // ASV1: publish Documents for the autosave slot dir (PS2X_IOS_DOCUMENTS/states).
     if (!documents.empty())
         setenv("PS2X_IOS_DOCUMENTS", documents.string().c_str(), 1);
+    // F2 (appsec-fix-1): online secrets live in Application Support (not the
+    // shared Documents tree). Publish PS2X_IOS_SUPPORT and migrate the three
+    // login files once; cards are never touched.
+    if (home && *home)
+    {
+        const std::filesystem::path support =
+            std::filesystem::path(home) / "Library" / "Application Support";
+        std::error_code supportEc;
+        std::filesystem::create_directories(support, supportEc);
+        if (!supportEc)
+        {
+            setenv("PS2X_IOS_SUPPORT", support.string().c_str(), 1);
+            if (!documents.empty())
+            {
+                const size_t moved =
+                    ps2x::loginpaths::migrateLoginFiles(documents.string(), support.string());
+                if (moved > 0)
+                {
+                    std::fprintf(stderr, "[login] migrated %zu file(s) Documents -> Application Support\n",
+                                 moved);
+                }
+            }
+        }
+    }
     const std::map<std::string, std::string> vars{
         {"BUNDLE", bundle.string()},
         {"DOCUMENTS", documents.string()},

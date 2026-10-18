@@ -3,6 +3,7 @@
 
 #include "ps2_android_env.h"
 #include "ps2_knobs.h"
+#include "ps2_login_paths.h"
 #include "ps2_record_env.h"
 
 #include <android/log.h>
@@ -208,13 +209,33 @@ std::string settingsEnvFilePath()
 #endif
 }
 
-// ONL11: files-dir Quick Play login path (read, created on first Online
-// entry when missing). Same boot-ELF sibling shape as settings.env.
+// ONL11: Quick Play login path (read, created on first Online entry when
+// missing). F2 (appsec-fix-1): the internal files dir
+// (PS2X_ANDROID_INTERNAL_DIR, set by RunnerApplication before native load),
+// not the shared external files tree. Migrates the three login files once
+// from the boot-ELF sibling dir; cards are never touched.
 std::string quickplayLoginFilePath()
 {
 #if defined(PS2X_DEFAULT_BOOT_ELF)
-    return siblingFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF, "quickplay.login");
+    const std::string legacy = siblingFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF, "quickplay.login");
+    const char *internal = std::getenv("PS2X_ANDROID_INTERNAL_DIR");
+    if (internal && *internal)
+    {
+        const std::string internalDir(internal);
+        const std::string legacyDir = legacy.substr(0, legacy.find_last_of('/'));
+        if (!legacyDir.empty() && legacyDir != internalDir)
+        {
+            ps2x::loginpaths::migrateLoginFiles(legacyDir, internalDir);
+        }
+        return ps2x::loginpaths::loginPathForDir(internalDir);
+    }
+    return legacy;
 #else
+    const char *internal = std::getenv("PS2X_ANDROID_INTERNAL_DIR");
+    if (internal && *internal)
+    {
+        return ps2x::loginpaths::loginPathForDir(internal);
+    }
     return std::string();
 #endif
 }
