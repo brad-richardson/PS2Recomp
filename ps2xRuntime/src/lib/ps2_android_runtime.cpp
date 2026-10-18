@@ -2,6 +2,7 @@
 #if defined(__ANDROID__)
 
 #include "ps2_android_env.h"
+#include "ps2_diag_gate.h"
 #include "ps2_knobs.h"
 #include "ps2_login_paths.h"
 #include "ps2_record_env.h"
@@ -37,7 +38,21 @@ bool readWholeFile(const std::string &path, std::string *out)
 
 void setEnvEntries(const std::string &content, const char *layer)
 {
-    for (const auto &entry : ps2x::parseEnvFileContent(content))
+    const auto parsed = ps2x::parseEnvFileContent(content);
+    // F4 (appsec-fix-1): public builds ignore diag-class file knobs unless
+    // PS2X_DEV=1 (process env or this same file). One log line names them.
+    const bool devOpen = ps2x::diaggate::devModeOpenIn(parsed);
+    std::vector<std::pair<std::string, std::string>> kept;
+    std::vector<std::string> ignored;
+    ps2x::diaggate::splitDiagEntries(parsed, devOpen, &kept, &ignored);
+    if (!ignored.empty())
+    {
+        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
+                            (std::string(layer) + ": ignored diag knobs (PS2X_DEV=1 to allow): " +
+                             ps2x::diaggate::joinIgnored(ignored))
+                                .c_str());
+    }
+    for (const auto &entry : kept)
     {
         // The Application prepares the bundled pack before NativeActivity
         // loads this library. Explicit filesystem paths still pass through.

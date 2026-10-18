@@ -1,6 +1,7 @@
 // I25: iOS env-file loader + SDL/UIKit glue (Objective-C++). Compiled only
 // for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"
+#include "ps2_diag_gate.h"
 #include "ps2_env_file.h"
 #include "ps2_login_paths.h"
 #include "ps2_input_diag.h"
@@ -232,8 +233,33 @@ void prepareEnvironment(const char *argv0)
             both += '\0' + presetRaw;
         ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(both));
     }
+    // F4 (appsec-fix-1): public builds ignore diag-class file knobs unless
+    // PS2X_DEV=1 (launcher env or one of the merged layers). One line names
+    // the ignored keys; values never reach the log (F1).
+    const bool devOpen = ps2x::diaggate::devModeOpen() ||
+                         (merged.count("PS2X_DEV") != 0 && merged.at("PS2X_DEV") == "1");
+    {
+        std::vector<std::string> ignored;
+        for (const auto &[key, value] : merged)
+        {
+            (void)value;
+            if (!devOpen && ps2x::diaggate::knobIsDiagGated(key))
+            {
+                ignored.push_back(key);
+            }
+        }
+        if (!ignored.empty())
+        {
+            std::fprintf(stderr, "[ios-env] ignored diag knobs (PS2X_DEV=1 to allow): %s\n",
+                         ps2x::diaggate::joinIgnored(ignored).c_str());
+        }
+    }
     for (const auto &[key, value] : merged)
     {
+        if (!devOpen && ps2x::diaggate::knobIsDiagGated(key))
+        {
+            continue;
+        }
         setenv(key.c_str(), value.c_str(), 1);
         // F1 (appsec-fix-1): keys only, mirroring Android; values (notably
         // credentials) never reach the log.

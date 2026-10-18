@@ -53,6 +53,7 @@ void register_ps2_cd_dirpatch_tests();
 void register_ps2_android_env_tests();
 void register_ps2_knobs_tests();
 void register_ps2_login_paths_tests();
+void register_ps2_diag_gate_tests();
 void register_ps2_settings_overlay_tests();
 void register_ps2_log_tests();
 void register_ps2_perf_log_tests();
@@ -166,6 +167,7 @@ int main(int argc, char **argv)
     register_ps2_android_env_tests();
     register_ps2_knobs_tests();
     register_ps2_login_paths_tests();
+    register_ps2_diag_gate_tests();
     register_ps2_settings_overlay_tests();
     register_ps2_log_tests();
     register_ps2_perf_log_tests();
