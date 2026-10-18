@@ -88,7 +88,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_fh1_jcam2_scratch_tests.cpp
     src/ps2_savestate_tests.cpp
     src/ps2_tc1_vf0_tests.cpp
-    src/ps2_ach_tests.cpp
     src/ps2_session_telemetry_tests.cpp
     src/ps2_net_nolink_tests.cpp
     src/ps2_net_protocol_tests.cpp

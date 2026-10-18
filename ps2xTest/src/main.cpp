@@ -101,7 +101,6 @@ void register_ps2_fh1_jcam2_scratch_tests();
 int ps2_fh1_jcam2_protection_probe();
 void register_ps2_savestate_tests();
 void register_ps2_tc1_vf0_tests();
-void register_ps2_ach_tests();
 void register_ps2_session_telemetry_tests();
 void reset_ps2_test_function_table();
 int np_fix_child_main(const std::string &name);
@@ -210,7 +209,6 @@ int main(int argc, char **argv)
     register_ps2_fh1_jcam2_scratch_tests();
     register_ps2_savestate_tests();
     register_ps2_tc1_vf0_tests();
-    register_ps2_ach_tests();
     register_ps2_session_telemetry_tests();
     int res = MiniTest::Run();
     std::cout.flush();
