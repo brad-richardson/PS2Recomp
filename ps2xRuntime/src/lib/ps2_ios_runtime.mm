@@ -210,7 +210,9 @@ void prepareEnvironment(const char *argv0)
     for (const auto &[key, value] : merged)
     {
         setenv(key.c_str(), value.c_str(), 1);
-        std::fprintf(stderr, "[ios-env] set %s=%s\n", key.c_str(), value.c_str());
+        // F1 (appsec-fix-1): keys only, mirroring Android; values (notably
+        // credentials) never reach the log.
+        std::fprintf(stderr, "[ios-env] set %s\n", key.c_str());
     }
     // SET2: the user settings layer (<Documents>/settings.env, written by
     // the in-game panel) reads last, over every layer above. Allowlisted to
@@ -231,7 +233,8 @@ void prepareEnvironment(const char *argv0)
             if (!owned || launcherKeys.count(key) != 0)
                 continue;
             setenv(key.c_str(), value.c_str(), 1);
-            std::fprintf(stderr, "[ios-env] settings set %s=%s\n", key.c_str(), value.c_str());
+            // F1 (appsec-fix-1): keys only here as well.
+            std::fprintf(stderr, "[ios-env] settings set %s\n", key.c_str());
         }
     }
     for (const auto &key : launcherKeys)

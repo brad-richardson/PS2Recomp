@@ -58,5 +58,18 @@ void register_ps2_env_file_tests()
             ps2x::setRecordedEnvFileHash("0123456789abcdef");
             t.IsTrue(std::string(ps2x::recordedEnvFileHash()) == "0123456789abcdef", "stash reads back");
             ps2x::setRecordedEnvFileHash("");
-            t.IsTrue(std::string(ps2x::recordedEnvFileHash()) == "none", "reset reads none"); }); });
+            t.IsTrue(std::string(ps2x::recordedEnvFileHash()) == "none", "reset reads none"); });
+
+        tc.Run("F1: credential-adjacent keys are sensitive, others are not", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::envKeyIsSensitive("PS2X_NET_LOGIN"), "login sensitive");
+            t.IsTrue(ps2x::envKeyIsSensitive("PS2X_NET_SERVER"), "net sensitive");
+            t.IsTrue(ps2x::envKeyIsSensitive("PS2X_NET_QUICKPLAY_FILE"), "net file sensitive");
+            t.IsTrue(ps2x::envKeyIsSensitive("MY_TOKEN"), "token sensitive");
+            t.IsTrue(ps2x::envKeyIsSensitive("db_pass"), "pass sensitive");
+            t.IsTrue(ps2x::envKeyIsSensitive("API_KEY"), "key sensitive");
+            t.IsTrue(ps2x::envKeyIsSensitive("my-secret"), "secret sensitive");
+            t.IsTrue(!ps2x::envKeyIsSensitive("PS2X_SOUND"), "sound not sensitive");
+            t.IsTrue(!ps2x::envKeyIsSensitive("PS2X_CD_IMAGE"), "image not sensitive");
+            t.IsTrue(!ps2x::envKeyIsSensitive("GE1_UPSCALE"), "upscale not sensitive"); }); });
 }

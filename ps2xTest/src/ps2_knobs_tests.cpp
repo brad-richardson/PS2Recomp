@@ -312,6 +312,24 @@ void register_ps2_knobs_tests()
             t.IsTrue(clean.find(" PS2X_CD_IMAGE=a_b_c") != std::string::npos, "newlines sanitized");
         });
 
+        tc.Run("F1: sensitive knob values are redacted from the dump line", [](TestCase &t)
+               {
+            EnvSet g;
+            g.track("PS2X_NET_LOGIN");
+            g.track("PS2X_NET_SERVER");
+            g.track("PS2X_SOUND");
+            ::setenv("PS2X_NET_LOGIN", "rider-x:super-secret-pass", 1);
+            ::setenv("PS2X_NET_SERVER", "ssx.bradr.dev", 1);
+            ::setenv("PS2X_SOUND", "1", 1);
+            const std::string line = ps2x::cf2BuildKnobsLine();
+            t.IsTrue(line.find("rider-x") == std::string::npos, "login name never in dump");
+            t.IsTrue(line.find("super-secret-pass") == std::string::npos, "login pass never in dump");
+            t.IsTrue(line.find("ssx.bradr.dev") == std::string::npos, "server never in dump");
+            t.IsTrue(line.find("PS2X_NET_LOGIN=<redacted>") != std::string::npos, "login redacted");
+            t.IsTrue(line.find("PS2X_NET_SERVER=<redacted>") != std::string::npos, "server redacted");
+            t.IsTrue(line.find(" PS2X_SOUND=1") != std::string::npos, "non-sensitive still shown");
+        });
+
         tc.Run("PB7-play-env dump stays under the logcat cap", [](TestCase &t)
                {
             EnvSet g;

@@ -52,6 +52,8 @@
 #include <string>
 #include <vector>
 
+#include "ps2_env_file.h"
+
 // The environ scan + sysconf need POSIX; Vita and Windows skip them (diag
 // extras omitted from the dump there, nproc reads unknown → pins allowed).
 #if !defined(_WIN32) && !defined(PLATFORM_VITA) && !defined(__vita__)
@@ -497,7 +499,18 @@ inline std::string cf2BuildKnobsLine()
         line += ' ';
         line += knobs[i];
         line += '=';
-        line += (value != nullptr) ? cf2SanitizeKnobValue(value) : "unset";
+        if (value == nullptr)
+        {
+            line += "unset";
+        }
+        else if (envKeyIsSensitive(knobs[i]))
+        {
+            line += "<redacted>";
+        }
+        else
+        {
+            line += cf2SanitizeKnobValue(value);
+        }
     }
 #if CF2_HAS_POSIX_ENV
     // Set diag (or future) knobs not in the curated list, sorted.
@@ -511,7 +524,14 @@ inline std::string cf2BuildKnobsLine()
         const std::string key(entry, static_cast<size_t>(eq - entry));
         if (!cf2KnobExtraPrefix(key.c_str()) || cf2KnobIsCurated(key.c_str()))
             continue;
-        extras.push_back(key + "=" + cf2SanitizeKnobValue(eq + 1));
+        if (envKeyIsSensitive(key))
+        {
+            extras.push_back(key + "=<redacted>");
+        }
+        else
+        {
+            extras.push_back(key + "=" + cf2SanitizeKnobValue(eq + 1));
+        }
     }
     std::sort(extras.begin(), extras.end());
     for (const std::string &extra : extras)
