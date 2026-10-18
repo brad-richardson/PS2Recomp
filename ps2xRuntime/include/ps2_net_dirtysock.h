@@ -22,6 +22,7 @@ namespace ps2_net
     // lobby socket is open or a P2P match link is up). Configured-but-idle
     // (NET=1 + server, no session) returns false so offline autosave and
     // launch-resume keep working on the public presets.
+    bool sessionActive();
 
     // True from gmlk/crea until the last gmlk/dest. Events mode holds
     // stock 60 while true unless the post-v0 LOCKSTEP120 knob is set.
