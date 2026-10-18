@@ -8382,6 +8382,11 @@ void PS2Runtime::run()
         // DS1: quick-save/load chord, edge-triggered. The chord is stripped from the guest
         // mask while engaged, so the game never sees it. Inert without a
         // physical gamepad (det boots unaffected: no buttons, no edges).
+        // config-fix-1 item 7 (Brad: quick save hidden, no lingering
+        // shortcuts): dev-only behind PS2X_DEV=1. The default path keeps
+        // Select+Start only; no new knob (no lab tool needs the chords).
+        if (const char *ds1Dev = std::getenv("PS2X_DEV");
+            ds1Dev && std::strcmp(ds1Dev, "1") == 0)
         {
             bool ds1SaveEdge = false, ds1LoadEdge = false;
             psChordStep(ds1Chord, (ds1RawPressed & ps2x::vpad::kSelect) != 0u,
