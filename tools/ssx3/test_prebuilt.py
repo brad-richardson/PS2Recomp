@@ -233,6 +233,8 @@ class ContractInputsTests(unittest.TestCase):
     # Every in-repo source linked into the shipped archives and shims.
     ARCHIVED_TUS = frozenset((
         'android/hwcompat/hwcompat.c',
+        'games/ssx3/module/src/movie.cpp',
+        'games/ssx3/module/src/vis_native.cpp',
         'ps2xIOP/src/emulator/core/iop_cpu.cpp',
         'ps2xIOP/src/emulator/core/iop_kernel.cpp',
         'ps2xIOP/src/emulator/core/iop_memory.cpp',
@@ -274,7 +276,6 @@ class ContractInputsTests(unittest.TestCase):
         'ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp',
         'ps2xRuntime/src/lib/Kernel/Stubs/RPC.cpp',
         'ps2xRuntime/src/lib/Kernel/Stubs/SIF.cpp',
-        'ps2xRuntime/src/lib/Kernel/Stubs/Ssx3Movie.cpp',
         'ps2xRuntime/src/lib/Kernel/Stubs/System.cpp',
         'ps2xRuntime/src/lib/Kernel/Stubs/TTY.cpp',
         'ps2xRuntime/src/lib/Kernel/Stubs/Unimplemented.cpp',
@@ -325,7 +326,6 @@ class ContractInputsTests(unittest.TestCase):
         'ps2xRuntime/src/lib/ps2_savestate.cpp',
         'ps2xRuntime/src/lib/ps2_session_telemetry.cpp',
         'ps2xRuntime/src/lib/ps2_snd_audio_output.cpp',
-        'ps2xRuntime/src/lib/ps2_ssx3_vis_native.cpp',
         'ps2xRuntime/src/lib/ps2_telemetry.cpp',
         'ps2xRuntime/src/lib/ps2_vfs.cpp',
         'ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp',
