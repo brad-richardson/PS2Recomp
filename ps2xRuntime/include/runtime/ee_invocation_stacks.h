@@ -19,27 +19,11 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <optional>
 #include <unordered_map>
 #include <vector>
 
 namespace ps2_ee_invocation_stacks
 {
-// Interrupt-context nesting (iPad r5): the scheduler stacked every pending
-// invocation onto the running thread, also inside an interrupt or alarm
-// handler. On a real-time device 120 Hz vblank and timer interrupts arrive
-// while slow race-load handlers run, so one dispatcher reached depth 9
-// (alarm 0x3e5290, then interrupts 0x3c1980 -> 0x3825c0 -> 0x3f4410 ...)
-// and the next level found no stack. The EE masks interrupts while a
-// handler runs: a pending interrupt or alarm now waits until the running
-// interrupt or alarm handler returns. Other kinds nest as before.
-template <typename Kind>
-inline bool deferNested(std::optional<Kind> runningTop, Kind pending)
-{
-    const auto handler = [](Kind k) { return k == Kind::Interrupt || k == Kind::Alarm; };
-    return runningTop && handler(*runningTop) && handler(pending);
-}
-
 using Map = std::unordered_map<uint64_t, uint32_t>;
 
 inline constexpr uint32_t kFreeThreadWord = 0x7FFFFFFFu;

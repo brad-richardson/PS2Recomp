@@ -871,11 +871,7 @@ void EeScheduler::run()
             continue;
         }
 
-        if (!m_pendingInvocations.empty() &&
-            !ps2_ee_invocation_stacks::deferNested(running->invocations.empty()
-                                                       ? std::nullopt
-                                                       : std::optional(running->invocations.back().kind),
-                                                   m_pendingInvocations.front().kind))
+        if (!m_pendingInvocations.empty())
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
