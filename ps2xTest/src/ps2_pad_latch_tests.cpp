@@ -120,19 +120,35 @@ void register_ps2_pad_latch_tests()
             t.Equals(static_cast<uint32_t>(buttons()), 0xFFFFu, "then up");
             sharedLatch().resetForTest(); });
 
-        tc.Run("port 1 follows live without consuming the latch", [](TestCase &t)
+        // ctrl-harden-1 (Brad 10-17: one controller drove both riders):
+        // port 1 reads its OWN latch, fed only by the second controller. A
+        // pad-1 press never reaches pad 2; each port consumes independently.
+        tc.Run("port 1 reads its own latch, never pad 1's", [](TestCase &t)
                {
             sharedLatch().resetForTest();
+            sharedLatchPort1().resetForTest();
             PSPadBackend backend;
             uint8_t data[32]{};
-            sharedLatch().publish(kCross);
-            t.IsTrue(backend.readState(1, 0, data, sizeof(data)), "port 1 readState ok");
-            t.Equals(static_cast<uint32_t>(~static_cast<uint16_t>(data[2] | (data[3] << 8)) & 0xFFFFu),
-                     static_cast<uint32_t>(kCross), "port 1 sees the held button");
-            t.IsTrue(backend.readState(0, 0, data, sizeof(data)), "port 0 readState ok");
-            t.Equals(static_cast<uint32_t>(~static_cast<uint16_t>(data[2] | (data[3] << 8)) & 0xFFFFu),
-                     static_cast<uint32_t>(kCross), "port 0 still consumes the press");
-            sharedLatch().resetForTest(); });
+            auto buttons = [&](int port)
+            {
+                t.IsTrue(backend.readState(port, 0, data, sizeof(data)), "readState ok");
+                return static_cast<uint16_t>(data[2] | (data[3] << 8));
+            };
+            sharedLatch().publish(kCross); // pad 1's controller holds cross
+            t.Equals(static_cast<uint32_t>(buttons(1)), 0xFFFFu, "pad 2 silent with one controller");
+            t.Equals(static_cast<uint32_t>(~buttons(0) & 0xFFFFu), static_cast<uint32_t>(kCross),
+                     "pad 1 consumes its press");
+            sharedLatchPort1().publish(kCircle); // second controller holds circle
+            t.Equals(static_cast<uint32_t>(~buttons(1) & 0xFFFFu), static_cast<uint32_t>(kCircle),
+                     "pad 2 shows its own press");
+            t.Equals(static_cast<uint32_t>(~buttons(0) & 0xFFFFu), static_cast<uint32_t>(kCross),
+                     "pad 1 still holds cross");
+            sharedLatch().publish(0u);
+            sharedLatchPort1().publish(0u);
+            t.Equals(static_cast<uint32_t>(buttons(0)), 0xFFFFu, "pad 1 released");
+            t.Equals(static_cast<uint32_t>(buttons(1)), 0xFFFFu, "pad 2 released");
+            sharedLatch().resetForTest();
+            sharedLatchPort1().resetForTest(); });
 
         tc.Run("panel gate discards queued and in-panel edges", [](TestCase &t)
                {
