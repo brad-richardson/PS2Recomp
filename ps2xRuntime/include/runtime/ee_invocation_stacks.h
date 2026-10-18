@@ -19,11 +19,41 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
 namespace ps2_ee_invocation_stacks
 {
+// Interrupt-context nesting (credit online-stock-2, REPORT P4.3 r5 dump:
+// alarm 0x3e5290, then interrupts 0x3c1980 -> 0x3825c0 -> 0x3f4410 ...,
+// one dispatcher reaching depth 9 while slow race-load handlers run under
+// 120 Hz vblank + timer interrupts on a real-time device). The EE masks
+// interrupts while a handler runs: when enabled, a pending interrupt or
+// alarm waits until the running interrupt or alarm handler returns. Other
+// kinds nest as before. Guest-affecting and online-only: PS2X_EE_DEFER_NESTED
+// forces it on (=1) or off (=0); default is on under PS2X_NET_STOCK120=1,
+// off otherwise — det boots (STOCK120 off) never take the path.
+template <typename Kind>
+inline bool deferNested(std::optional<Kind> runningTop, Kind pending)
+{
+    const auto handler = [](Kind k) { return k == Kind::Interrupt || k == Kind::Alarm; };
+    return runningTop && handler(*runningTop) && handler(pending);
+}
+
+inline bool deferNestedEnabled() noexcept
+{
+    static const bool on = [] {
+        if (const char *e = std::getenv("PS2X_EE_DEFER_NESTED"); e && *e)
+            return std::strcmp(e, "0") != 0;
+        const char *s = std::getenv("PS2X_NET_STOCK120");
+        return s && *s && std::strcmp(s, "0") != 0;
+    }();
+    return on;
+}
+
 using Map = std::unordered_map<uint64_t, uint32_t>;
 
 inline constexpr uint32_t kFreeThreadWord = 0x7FFFFFFFu;

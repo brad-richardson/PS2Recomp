@@ -26,6 +26,7 @@
 #include <ctime>
 #include <cstring>
 #include <cstdio>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -954,6 +955,36 @@ void register_ps2_runtime_kernel_tests()
                 t.IsTrue(st::evictIdle(allLive, st::key(-1, 3), live) == 0u,
                          "all-live map has nothing to evict");
             }
+        });
+
+        tc.Run("nested interrupt/alarm dispatch defers inside a handler", [](TestCase &t)
+        {
+            namespace st = ps2_ee_invocation_stacks;
+            enum class Kind
+            {
+                Interrupt,
+                Alarm,
+                Thread,
+                Callback
+            };
+            using Opt = std::optional<Kind>;
+            // No running handler: nothing defers.
+            t.IsTrue(!st::deferNested(Opt(), Kind::Interrupt), "idle run dispatches interrupts");
+            t.IsTrue(!st::deferNested(Opt(), Kind::Alarm), "idle run dispatches alarms");
+            // Inside an interrupt or alarm handler: pending interrupts and
+            // alarms wait; other kinds nest as before.
+            for (Kind running : {Kind::Interrupt, Kind::Alarm})
+            {
+                t.IsTrue(st::deferNested(Opt(running), Kind::Interrupt), "interrupt waits in handler");
+                t.IsTrue(st::deferNested(Opt(running), Kind::Alarm), "alarm waits in handler");
+                t.IsTrue(!st::deferNested(Opt(running), Kind::Thread), "threads still nest");
+                t.IsTrue(!st::deferNested(Opt(running), Kind::Callback), "callbacks still nest");
+            }
+            // Inside a thread/callback: everything nests as before.
+            for (Kind running : {Kind::Thread, Kind::Callback})
+                for (Kind pending :
+                     {Kind::Interrupt, Kind::Alarm, Kind::Thread, Kind::Callback})
+                    t.IsTrue(!st::deferNested(Opt(running), pending), "no deferral outside handlers");
         });
 
         tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)
