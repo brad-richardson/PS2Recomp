@@ -262,10 +262,19 @@ void configure_texture_replacement(Pcsx2Config::GSOptions& config)
     // REM3 P11 Phase 2: seed the live toggle's config bit from the open-time
     // env so it matches the vendor flag (InitializeFromEnvironment reads the
     // same var). Phase 2's worker command drives it live after open.
-    if (const char* odu = std::getenv("GE1_ONDEVICE_UPSCALE"); odu && std::strcmp(odu, "1") == 0)
+    // config-fix-1 item 13: share the provider's default-on interpretation
+    // (unset/anything-but-"0" is ON); the adapter used to seed from a
+    // strict literal "1", disagreeing with the provider on unset.
+    if (const char *odu = std::getenv("GE1_ONDEVICE_UPSCALE");
+        !odu || !*odu || std::strcmp(odu, "0") != 0)
     {
         config.OnDeviceUpscale = true;
-        std::fprintf(stderr, "ODU: config bit on (env)\n");
+        std::fprintf(stderr, "ODU: config bit on (env=%s)\n", odu ? odu : "(unset)");
+    }
+    else
+    {
+        config.OnDeviceUpscale = false;
+        std::fprintf(stderr, "ODU: config bit off (env=0)\n");
     }
     if (want_dump || want_repl)
         std::fprintf(stderr, "RMT1: tex dump=%s replace=%s precache=%d async=%d\n", want_dump ? dump : "off",

@@ -605,6 +605,16 @@ void register_ps2_settings_overlay_tests()
             const ps2x::set2::NavState st;
             t.IsTrue(!st.marker && !st.runMarker, "pending + running default off"); });
 
+        tc.Run("on-device upscale shares the provider default-on (unset/0/1)", [](TestCase &t)
+               {
+            // config-fix-1 item 13: unset, empty and anything but "0"
+            // are ON; only "0" is OFF. Adapter, panel seed and font
+            // flag all use this.
+            t.IsTrue(ps2x::set2::ondeviceUpscaleOn(nullptr), "unset -> on");
+            t.IsTrue(ps2x::set2::ondeviceUpscaleOn(""), "empty -> on");
+            t.IsTrue(ps2x::set2::ondeviceUpscaleOn("1"), "1 -> on");
+            t.IsTrue(!ps2x::set2::ondeviceUpscaleOn("0"), "0 -> off"); });
+
         tc.Run("touch maps to the VIRTUAL_PAD line (auto clears it)", [](TestCase &t)
                {
             t.IsTrue(ps2x::set2::touchFromSetting("1") == ps2x::set2::Touch::On, "1 -> on");

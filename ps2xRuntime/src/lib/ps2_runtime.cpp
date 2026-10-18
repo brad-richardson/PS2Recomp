@@ -7913,7 +7913,7 @@ void PS2Runtime::run()
         set2Perf = perf && std::string(perf) == "1";
         set2Nav.perf = set2Perf;
         const char *upscale = std::getenv("GE1_ONDEVICE_UPSCALE");
-        set2Upscale = upscale && std::string(upscale) == "1";
+        set2Upscale = ps2x::set2::ondeviceUpscaleOn(upscale);
         set2Nav.upscale = set2Upscale;
         set2Nav.touch = vpadTouchMode;
         const char *menubtn = std::getenv("PS2X_MENU_BUTTON");
@@ -9172,7 +9172,7 @@ void PS2Runtime::run()
                     }
                 }
                 const char *tkOdu = std::getenv("GE1_ONDEVICE_UPSCALE");
-                const bool tkUpscale = (tkOdu && std::strcmp(tkOdu, "1") == 0);
+                const bool tkUpscale = ps2x::set2::ondeviceUpscaleOn(tkOdu);
                 const bool tkUseUp = tkFontBaked.ok && (tkFontTex1.id != 0u || tkFontTex4.id != 0u);
                 // Upload-font quad draw (face + down/right shadow, in-game
                 // layering); returns drawn width. yTop = top of the ink band.

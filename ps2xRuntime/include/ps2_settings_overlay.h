@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -401,6 +402,15 @@ inline const char *markerToSetting(bool b)
 inline const char *markerName(bool b)
 {
     return b ? "on" : "off";
+}
+
+// config-fix-1 item 13: the shared on-device-upscale interpretation.
+// The provider defaults ON: unset, empty or anything but the literal
+// "0" is ON; only "0" is OFF. The adapter (ge1_gs.cpp) and both
+// ps2_runtime.cpp seeds use this so unset/0/1 agree everywhere.
+inline bool ondeviceUpscaleOn(const char *val)
+{
+    return !val || !*val || std::strcmp(val, "0") != 0;
 }
 enum class Action : uint8_t
 {
