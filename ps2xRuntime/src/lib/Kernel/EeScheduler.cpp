@@ -17,7 +17,6 @@
 #include "ps2_turbo_boot.h" // BTS1: boot turbo pacing suspension + yield poll
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ssx3_tricky_mc.h" // tk-announcer-1 (2b): air-edge poll
-#include "ps2_ach.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_e15.h"
 #include "runtime/gs/gs_stream_capture.h"
@@ -3144,10 +3143,6 @@ void EeScheduler::processEvent(const EeEvent &event)
             ps2x::tel::onCoverageTick(m_vsyncTick); // TEL2: file dump too (no-op when off)
         }
         ps2_fh1::onVBlank(m_rdram, m_vsyncTick, m_runtime.gs()); // FH1 tap/seq (env-only)
-        // ACH2: local achievements at the stock tick (read-only wrt guest;
-        // one getenv when the knob is off). After onVBlank so FH1's
-        // g_stockHalfExact is fresh for this VBlank.
-        ps2_ach::onVBlankTick(m_vsyncTick, m_rdram, m_runtime.memory().getScratchpad());
         // TEL2: session-log race tracker (read-only; one bool check when off).
         if (ps2x::tel::sessionOn())
             ps2x::tel::onVBlank(m_vsyncTick, m_rdram, PS2_RAM_SIZE, ps2_fh1::eventsMode(), ps2_fh1::g_guestActive);

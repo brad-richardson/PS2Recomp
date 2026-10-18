@@ -564,7 +564,6 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_microvu.cpp
     src/lib/vu/ps2_native_world.cpp # NRT1
     src/lib/games_database.cpp
-    src/lib/ps2_ach.cpp # ACH2: local achievements runtime
     src/lib/ps2_session_telemetry.cpp # TEL2: coverage + session log
     src/lib/ps2_net_dirtysock.cpp # ONL6: configured self-hosted lobby and P2P
     src/lib/ps2_net_link.cpp # np-link-1: delay-lockstep client (default off)
@@ -823,9 +822,8 @@ endif()
 # (default on; PS2X_AUDIO_STRETCH=0 disables). Static, LGPL-2.1 applied
 # as GPL per section 3.
 add_subdirectory(third_party/soundtouch)
-add_subdirectory(third_party/rcheevos) # ACH2: rc_runtime + rc_hash (no rc_client)
 
-target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop ps2x_soundtouch ps2x_rcheevos)
+target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop ps2x_soundtouch)
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
@@ -1285,11 +1283,6 @@ if(PS2X_IS_IOS)
         # second SDL's UIKit ObjC classes crash at launch (duplicate
         # SDL_LifecycleObserver). The GS closure never references SDL3.
         list(FILTER PS2X_GE1_ARCHIVES EXCLUDE REGEX ".*/sdl3/.*\\.a$")
-        # ACH2: drop PCSX2's bundled rcheevos: it shadows our vendored copy
-        # (same rc_* symbols, different version/layout -> silent misbehavior).
-        # Nothing in the GS closure references it (link fails loud if it ever
-        # does); our rc_runtime/rc_hash come from third_party/rcheevos.
-        list(FILTER PS2X_GE1_ARCHIVES EXCLUDE REGEX ".*/rcheevos/.*\\.a$")
         list(LENGTH PS2X_GE1_ARCHIVES PS2X_GE1_ARCHIVE_COUNT)
         message(STATUS "PS2X: GI1 static GS: ${PS2X_GE1_ARCHIVE_COUNT} archives from ${PS2X_GE1_IOS_BUILD}")
         target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_GE1_ARCHIVES})
@@ -1448,5 +1441,5 @@ if(PS2X_PREBUILT_EXPORT)
     file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/prebuilt-definitions.txt"
         CONTENT "$<JOIN:$<TARGET_PROPERTY:ps2_runtime,INTERFACE_COMPILE_DEFINITIONS>,\n>\n")
     file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/prebuilt-archives.txt" CONTENT
-        "$<TARGET_FILE:ps2EntryRunner>\n$<TARGET_FILE:ps2_runtime>\n$<TARGET_FILE:ps2_gs_shadow>\n$<TARGET_FILE:ps2_iop>\n$<TARGET_FILE:ps2x_soundtouch>\n$<TARGET_FILE:ps2x_rcheevos>\n$<TARGET_FILE:raylib>\n")
+        "$<TARGET_FILE:ps2EntryRunner>\n$<TARGET_FILE:ps2_runtime>\n$<TARGET_FILE:ps2_gs_shadow>\n$<TARGET_FILE:ps2_iop>\n$<TARGET_FILE:ps2x_soundtouch>\n$<TARGET_FILE:raylib>\n")
 endif()

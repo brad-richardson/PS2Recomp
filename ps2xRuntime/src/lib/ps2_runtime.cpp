@@ -9560,7 +9560,7 @@ void PS2Runtime::run()
 #endif
             }
         }
-        // ACH2: reusable toast (ps2x::ui::toast). Same host-drawn placement as the DS1 line, one row lower.
+        // Reusable toast (ps2x::ui::toast). Same host-drawn placement as the DS1 line, one row lower.
         if (!skipGl)
         {
             std::string toastMsg;

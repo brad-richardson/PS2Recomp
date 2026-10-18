@@ -1,11 +1,11 @@
 #pragma once
-// ACH2 (+QSR1): tiny reusable toast (one line of text, ~3 s, non-blocking).
+// Tiny reusable toast (one line of text, ~3 s, non-blocking).
 //
 // ps2x::ui::toast(text, seconds) from any thread; the render thread draws the
 // live toast in the overlay pass (ps2_runtime.cpp, next to the DS1 status
 // line: host-drawn over the presented frame, never into the guest frame).
 // Latest toast wins; at most one is ever shown. Bursty callers queue on
-// their side (ps2_ach's ToastQueue paces unlocks one at a time, ACH4).
+// their side.
 // Output-only: no guest state is read or written, so det hashes are
 // unaffected.
 //
