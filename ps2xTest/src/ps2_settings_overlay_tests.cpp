@@ -561,20 +561,23 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(w1[3] == std::make_pair(std::string("PS2X_INPUT_MARKER"), std::string("1")),
                      "pending marker on persists");
             // Screen writes native explicitly (no default-clearing choice);
-            // marker off writes no line (absent = off).
+            // marker off writes an explicit 0 (config-fix-1 item 10: a
+            // base-layer 1 must not reappear through a removed line).
             const auto w2 = ps2x::set2::settingsForRestart({}, Res::Screen, false, false);
-            t.IsTrue(w2.size() == 2 && w2[0].second == "native" && w2[1].second == "0",
-                     "empty file gains both lines");
+            t.IsTrue(w2.size() == 3 && w2[0].second == "native" && w2[1].second == "0" &&
+                         w2[2].second == "0",
+                     "empty file gains all three lines");
             // 1x writes 1 (it is never a default, but it is writable).
             const auto w3 = ps2x::set2::settingsForRestart({}, Res::R1x, false, false);
             t.IsTrue(w3[0].second == "1", "1x persists");
-            // A stale marker 1 does not survive a pending-off restart.
+            // A stale marker 1 becomes an explicit pending-off 0.
             const SettingsPairs staleOn{{"PS2X_INPUT_MARKER", "1"}};
             const auto w4 = ps2x::set2::settingsForRestart(staleOn, Res::Screen, false, false);
-            t.IsTrue(w4.size() == 2 && w4[0].second == "native" && w4[1].second == "0",
-                     "stale marker 1 cleared by pending off"); });
+            t.IsTrue(w4.size() == 3 && w4[0].second == "native" && w4[1].second == "0" &&
+                         w4[2].second == "0",
+                     "stale marker 1 overwritten by explicit pending off"); });
 
-        tc.Run("menu button maps to its line (shown clears it)", [](TestCase &t)
+        tc.Run("menu button maps to its line (both persist explicit)", [](TestCase &t)
                {
             using ps2x::set2::MenuBtn;
             t.IsTrue(ps2x::set2::menuBtnFromSetting("0") == MenuBtn::Hidden, "0 -> hidden");
@@ -582,10 +585,10 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(ps2x::set2::menuBtnFromSetting("1") == MenuBtn::Shown, "1 -> shown");
             t.IsTrue(ps2x::set2::menuBtnFromSetting("junk") == MenuBtn::Shown, "junk -> shown");
             t.IsTrue(std::string(ps2x::set2::menuBtnToSetting(MenuBtn::Hidden)) == "0", "hidden -> 0");
-            t.IsTrue(std::string(ps2x::set2::menuBtnToSetting(MenuBtn::Shown)).empty(), "shown clears");
+            t.IsTrue(std::string(ps2x::set2::menuBtnToSetting(MenuBtn::Shown)) == "1", "shown -> 1");
             t.IsTrue(ps2x::set2::settingsKeyAllowed("PS2X_MENU_BUTTON"), "key allowlisted"); });
 
-        tc.Run("input marker maps to its line (off clears it); default off", [](TestCase &t)
+        tc.Run("input marker maps to its line (both persist explicit); default off", [](TestCase &t)
                {
             // shortcuts-1 (Brad 10-18): dev option, off unless the env or
             // the setting turns it on. Only the literal "1" arms, matching
@@ -595,7 +598,7 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(!ps2x::set2::markerFromSetting("0"), "0 -> off");
             t.IsTrue(!ps2x::set2::markerFromSetting("junk"), "junk -> off");
             t.IsTrue(std::string(ps2x::set2::markerToSetting(true)) == "1", "on -> 1");
-            t.IsTrue(std::string(ps2x::set2::markerToSetting(false)).empty(), "off clears");
+            t.IsTrue(std::string(ps2x::set2::markerToSetting(false)) == "0", "off -> 0");
             t.IsTrue(std::string(ps2x::set2::markerName(true)) == "on", "on label");
             t.IsTrue(std::string(ps2x::set2::markerName(false)) == "off", "off label");
             t.IsTrue(ps2x::set2::settingsKeyAllowed("PS2X_INPUT_MARKER"), "key allowlisted");

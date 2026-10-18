@@ -334,8 +334,9 @@ enum class Touch : uint8_t
 // Menu "..." button (settings-res-1 addendum, Brad 10-17): a small dim
 // button at the top middle of the screen; tapping it opens the panel. Shown
 // by default on every device (even with a physical controller); only this
-// row hides it. Persisted as PS2X_MENU_BUTTON (Hidden="0", Shown=key
-// absent, so deleting the line restores the default).
+// row hides it. Persisted as PS2X_MENU_BUTTON (Hidden="0", Shown="1":
+// config-fix-1 item 10 persists explicit values so a lower-priority base
+// "0" cannot reappear through a removed line).
 enum class MenuBtn : uint8_t
 {
     Shown = 0,
@@ -356,7 +357,7 @@ inline const char *menuBtnToSetting(MenuBtn b)
     case MenuBtn::Hidden:
         return "0";
     default:
-        return ""; // Shown: no override line
+        return "1"; // Shown: explicit, wins over a base-layer "0"
     }
 }
 
@@ -379,8 +380,9 @@ inline bool menuButtonShown(MenuBtn b)
     return b == MenuBtn::Shown;
 }
 
-// shortcuts-1: Input marker row <-> PS2X_INPUT_MARKER. On="1", Off=absent
-// (upsert drops empty, so a stale "1" cannot survive an Off restart).
+// shortcuts-1: Input marker row <-> PS2X_INPUT_MARKER. On="1", Off="0"
+// (config-fix-1 item 10: explicit, so a lower-priority base "1" cannot
+// reappear through a removed line).
 // Only the literal "1" arms (same strict check as lim1Apply); unset or
 // anything else reads as Off, so a hand-edited file can't arm it. The
 // code default is off; the row shows the effective env at open (explicit
@@ -393,7 +395,7 @@ inline bool markerFromSetting(const std::string &val)
 
 inline const char *markerToSetting(bool b)
 {
-    return b ? "1" : ""; // Off: no override line
+    return b ? "1" : "0"; // Off: explicit, wins over a base-layer "1"
 }
 
 inline const char *markerName(bool b)
