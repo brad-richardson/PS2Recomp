@@ -52,7 +52,7 @@
 #include <string>
 #include <vector>
 
-#include "ps2_env_file.h"
+#include "ps2_env_sensitive.h"
 
 // The environ scan + sysconf need POSIX; Vita and Windows skip them (diag
 // extras omitted from the dump there, nproc reads unknown → pins allowed).

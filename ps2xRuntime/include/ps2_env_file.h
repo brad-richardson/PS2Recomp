@@ -15,6 +15,11 @@
 #include <utility>
 #include <vector>
 
+// F1 (appsec-fix-1): credential-adjacent key detection lives in
+// ps2_env_sensitive.h (a leaf header both parser headers can share; kept at
+// global scope so the name is ::ps2x::envKeyIsSensitive for every includer).
+#include "ps2_env_sensitive.h"
+
 namespace ps2x
 {
 
@@ -109,35 +114,6 @@ inline std::string expandEnvPlaceholders(const std::string &value, const std::ma
         pos = close + 1;
     }
     return out;
-}
-
-// F1 (appsec-fix-1): a key is sensitive when it names a credential, token,
-// secret or network identity. The iOS loader logs keys only (mirroring
-// Android); the knob dump redacts these values. Case-insensitive substring
-// match over the upper-cased key.
-inline std::string envKeyUpper(const std::string &key)
-{
-    std::string out;
-    out.reserve(key.size());
-    for (char c : key)
-    {
-        out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
-
-inline bool envKeyIsSensitive(const std::string &key)
-{
-    const std::string upper = envKeyUpper(key);
-    static const char *const kTokens[] = {"NET", "TOKEN", "PASS", "KEY", "SECRET", "LOGIN"};
-    for (const char *token : kTokens)
-    {
-        if (upper.find(token) != std::string::npos)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Merge env-file layers in order (later layers override earlier ones) and

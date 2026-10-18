@@ -1,5 +1,8 @@
 #include "MiniTest.h"
 #include "ps2_android_env.h"
+// F1 follow-up: the Android TU also includes ps2_knobs.h transitively; both
+// parser headers must coexist in one TU (mini_apk unity-build regression).
+#include "ps2_knobs.h"
 
 #include <string>
 #include <utility>
