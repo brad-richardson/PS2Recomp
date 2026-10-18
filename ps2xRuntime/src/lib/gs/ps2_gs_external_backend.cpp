@@ -361,11 +361,14 @@ void resolveGpuDefaults()
 void resolvePublicIosTier(int panelW, int panelH)
 {
     // The public iOS preset uses auto; play bundles use explicit values.
+    // config-fix-1 tier hardening: unset counts as auto, consistent with
+    // choose()/automatic() — otherwise an omitted key skips the tier and
+    // iOS falls back to the 1x vendor default (item 4 class).
     const char *render = std::getenv("GE1_UPSCALE");
     const char *output = std::getenv("PS2X_GE1_EXPORT_SIZE");
     const char *cas = std::getenv("GE1_CAS");
-    const auto isAuto = [](const char *value) { return value && std::strcmp(value, "auto") == 0; };
-    if (!isAuto(render) && !isAuto(output) && !isAuto(cas))
+    if (!ps2x::public_tier::automatic(render) && !ps2x::public_tier::automatic(output) &&
+        !ps2x::public_tier::automatic(cas))
         return;
     const ps2x::public_tier::Input input{true, 0, 0, panelW, panelH, false, nullptr, render,
                                          output, cas, nullptr};

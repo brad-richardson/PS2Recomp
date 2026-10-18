@@ -411,6 +411,18 @@ void register_ps2_knobs_tests()
             t.IsTrue(c.capable && c.driver == "0" && c.render == "2" && c.output == "display" &&
                      c.cas == "0.25" && c.aniso.empty(),
                      "public iOS uses capable tier and 2x off 1080p, aniso untouched");
+            // config-fix-1 tier hardening: unset counts as auto, same as
+            // the literals above (resolvePublicIosTier trigger).
+            t.IsTrue(automatic(nullptr) && automatic("") && automatic("auto"),
+                     "unset/empty/auto all trigger the tier");
+            t.IsTrue(!automatic("2") && !automatic("display") && !automatic("0.25"),
+                     "explicit values skip the tier");
+            in.render = nullptr;
+            in.output = nullptr;
+            in.cas = nullptr;
+            c = choose(in);
+            t.IsTrue(c.capable && c.render == "2" && c.output == "display" && c.cas == "0.25",
+                     "unset iOS keys resolve exactly like explicit auto");
         });
     });
 }
