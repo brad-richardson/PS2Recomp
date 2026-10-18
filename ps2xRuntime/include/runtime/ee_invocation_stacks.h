@@ -37,19 +37,59 @@ namespace ps2_ee_invocation_stacks
 // forces it on (=1) or off (=0); default is on under PS2X_NET_STOCK120=1,
 // off otherwise — det boots (STOCK120 off) never take the path.
 template <typename Kind>
+inline bool isHandlerKind(Kind k)
+{
+    return k == Kind::Interrupt || k == Kind::Alarm;
+}
+
+template <typename Kind>
 inline bool deferNested(std::optional<Kind> runningTop, Kind pending)
 {
-    const auto handler = [](Kind k) { return k == Kind::Interrupt || k == Kind::Alarm; };
-    return runningTop && handler(*runningTop) && handler(pending);
+    return runningTop && isHandlerKind(*runningTop) && isHandlerKind(pending);
+}
+
+// astra-sched-1 F1: the effective mask follows the innermost live
+// Interrupt/Alarm in the invocation stack, not merely the top. Synchronous
+// non-handler children (syscall/RPC/HLE/Gs callbacks) dispatched inside a
+// handler keep its mask; without this, Interrupt -> callback -> Interrupt
+// re-opens the nesting the deferral was built to close. Pass the stack
+// innermost-first (rbegin/rend); Proj maps an element to its Kind.
+template <typename Kind, typename It, typename Proj>
+inline std::optional<Kind> handlerContextTop(It first, It last, Proj &&proj)
+{
+    for (auto it = first; it != last; ++it)
+    {
+        Kind k = proj(*it);
+        if (isHandlerKind(k))
+            return k;
+    }
+    return std::nullopt;
+}
+
+// astra-sched-1 knob-scope finding: the raw STOCK120 env is broader than
+// "only in an online 120 race" (it also fires in offline or stock-60 boots
+// carrying that env), while ps2_fh1::netStock120() additionally requires
+// eventsMode. The scheduler TU installs netStock120 as the default source;
+// TUs without the scheduler (unit tests) keep the raw-env fallback, and an
+// explicit PS2X_EE_DEFER_NESTED always wins over both.
+inline bool (*deferNestedDefaultSource)() = nullptr;
+
+inline bool resolveDeferNested(std::optional<bool> knob, bool stock120Env)
+{
+    if (knob.has_value())
+        return *knob;
+    if (deferNestedDefaultSource != nullptr)
+        return deferNestedDefaultSource();
+    return stock120Env;
 }
 
 inline bool deferNestedEnabled() noexcept
 {
     static const bool on = [] {
         if (const char *e = std::getenv("PS2X_EE_DEFER_NESTED"); e && *e)
-            return std::strcmp(e, "0") != 0;
+            return resolveDeferNested(std::optional<bool>(std::strcmp(e, "0") != 0), false);
         const char *s = std::getenv("PS2X_NET_STOCK120");
-        return s && *s && std::strcmp(s, "0") != 0;
+        return resolveDeferNested(std::nullopt, s && *s && std::strcmp(s, "0") != 0);
     }();
     return on;
 }
@@ -90,8 +130,13 @@ uint32_t take(Map &map, uint64_t k, Carve &&carve)
 
 // Hand `k` the stack of one idle cached entry: a non-free key whose thread
 // currently holds no live invocation, so the cached stack backs nothing.
-// Returns 0 when every cached entry belongs to a live thread (genuine
-// exhaustion). The map stays the same size: eviction reuses, never grows.
+// Returns 0 when every cached entry belongs to a thread with live
+// invocations. Liveness is per-thread, not per-depth (astra-sched-1 F5): a
+// thread that cached depths 0..17 but now holds only depth 0 still pins all
+// 18 entries, so eviction can fail while historical slots sit unused. That
+// conservative failure keeps the clean exhaustion exit; reclaiming
+// provably-unused depths would need per-allocation (SP) ownership tracking.
+// The map stays the same size: eviction reuses, never grows.
 template <typename IsLiveThread>
 uint32_t evictIdle(Map &map, uint64_t k, IsLiveThread &&isLiveThread)
 {

@@ -21,6 +21,7 @@
 #include "runtime/game_module.h"
 #include "ps2_turbo_boot.h" // BTS1: disarm boot turbo on state load
 #include "runtime/ee_scheduler.h"
+#include "runtime/ee_invocation_stacks.h"
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -828,6 +829,20 @@ namespace ps2_savestate
             h.push_back({"gs_backend", env ? env : "cpu", true});
             env = std::getenv("PS2X_SKIP_MOVIE");
             h.push_back({"skip_movie", env ? env : "", false});
+            // astra-sched-1 F4: scheduling policy in the compat header (and
+            // the canonical manifest built from it). Migration rule: states
+            // saved before the deferral knob lack both lines — strict
+            // refuses (QSR1/microvu precedent), default warns and loads
+            // under the loading process's effective policy (all such states
+            // predate the feature, so defer-off-era). A present-but-mismatched
+            // line means different scheduling rules at save time; strict
+            // refuses, default warns. Policy is process-lifetime (the cached
+            // static); states never change it.
+            h.push_back({"ee_defer_nested",
+                         ps2_ee_invocation_stacks::deferNestedEnabled() ? "1" : "0",
+                         config().strict});
+            env = std::getenv("PS2X_NET_STOCK120");
+            h.push_back({"net_stock120", env && *env ? env : "", config().strict});
             // CN2b: the paraLLEl-GS pgs_ssaa/pgs_hires lines are gone; older
             // files still carry them and load (only this side's keys are checked).
             return h;

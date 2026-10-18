@@ -49,6 +49,48 @@
 
 #include "ps2_session_telemetry.h" // TEL2
 
+// astra-sched-1 knob-scope finding: the deferral default means "online 120
+// race" (ps2_fh1::netStock120: eventsMode + STOCK120 env), not merely
+// "STOCK120 env set" (which also fires in offline or stock-60 boots carrying
+// that env). Installed before first use; deferNestedEnabled() caches its
+// answer on first call, after all static initializers have run.
+namespace
+{
+struct DeferNestedGateInit
+{
+    DeferNestedGateInit()
+    {
+        ps2_ee_invocation_stacks::deferNestedDefaultSource = ps2_fh1::netStock120;
+    }
+};
+static DeferNestedGateInit g_deferNestedGateInit;
+} // namespace
+
+// astra-sched-1 F1/F2: a thread is in handler context when any live
+// invocation is an Interrupt/Alarm (F1 ancestry: synchronous non-handler
+// children keep the mask). Rescheduling defers until that context exits;
+// flags are kept, never cleared, so the per-iteration paths retry.
+static bool inHandlerContext(const GuestThread *thread)
+{
+    if (thread == nullptr)
+        return false;
+    return ps2_ee_invocation_stacks::handlerContextTop<GuestInvocationKind>(
+               thread->invocations.rbegin(), thread->invocations.rend(),
+               [](const GuestInvocation &invocation) { return invocation.kind; })
+        .has_value();
+}
+
+template <typename ThreadMap>
+static bool anyThreadInHandlerContext(const ThreadMap &threads)
+{
+    for (const auto &entry : threads)
+    {
+        if (inHandlerContext(&entry.second))
+            return true;
+    }
+    return false;
+}
+
 // RPL3: sched-gate mnemonics follow the EeEventType order (ps2_rpl3_nv.h).
 static_assert(static_cast<uint32_t>(EeEventType::Stop) == 0u, "rpl3 mnemonic order");
 static_assert(static_cast<uint32_t>(EeEventType::VBlankStart) == 1u, "rpl3 mnemonic order");
@@ -769,6 +811,21 @@ void EeScheduler::run()
             }
             else
             {
+                // astra-sched-1 F2: no thread is ready, but a handler is
+                // live-but-suspended on some thread. Admitting a pending
+                // Interrupt/Alarm onto a fresh thread would nest across
+                // threads, so wait for events instead; the F3 backlog
+                // counters expose the stall, and the [ee:idle] dump fires
+                // if nothing ever becomes ready. Blocking inside a handler
+                // is outside the kernel contract; the old path papered it
+                // over by nesting without bound (the r5 shape).
+                if (ps2_ee_invocation_stacks::deferNestedEnabled() &&
+                    ps2_ee_invocation_stacks::isHandlerKind(m_pendingInvocations.front().kind) &&
+                    anyThreadInHandlerContext(m_threads))
+                {
+                    waitForEvent();
+                    continue;
+                }
                 GuestThread *owner = &acquireInvocationThread();
                 GuestInvocation invocation = std::move(m_pendingInvocations.front());
                 m_pendingInvocations.pop_front();
@@ -871,13 +928,19 @@ void EeScheduler::run()
             continue;
         }
 
+        // astra-sched-1 F1: the effective mask is the innermost live handler
+        // kind, not merely the top: a synchronous non-handler child
+        // (syscall/RPC/HLE/Gs callback) inside a handler keeps its mask.
+        const std::optional<GuestInvocationKind> effectiveTop =
+            running->invocations.empty()
+                ? std::optional<GuestInvocationKind>()
+                : ps2_ee_invocation_stacks::handlerContextTop<GuestInvocationKind>(
+                      running->invocations.rbegin(), running->invocations.rend(),
+                      [](const GuestInvocation &invocation) { return invocation.kind; });
         if (!m_pendingInvocations.empty() &&
             !(ps2_ee_invocation_stacks::deferNestedEnabled() &&
               ps2_ee_invocation_stacks::deferNested(
-                  running->invocations.empty()
-                      ? std::nullopt
-                      : std::optional(running->invocations.back().kind),
-                  m_pendingInvocations.front().kind)))
+                  effectiveTop, m_pendingInvocations.front().kind)))
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
@@ -1006,7 +1069,13 @@ void EeScheduler::run()
         }
 
         processPendingEvents();
-        if (m_rescheduleRequested && m_currentThreadId != 0)
+        // astra-sched-1 F2: a handler on the running thread reaches a
+        // timeslice with a ready peer, or an interrupt-safe wake requests
+        // preemption. Keep the flags (the per-iteration path retries) and
+        // switch only after the handler context exits; switching now would
+        // admit another handler while this one is live.
+        if (m_rescheduleRequested && m_currentThreadId != 0 &&
+            !(ps2_ee_invocation_stacks::deferNestedEnabled() && inHandlerContext(currentThread())))
         {
             GuestThread *preempted = currentThread();
             assert(preempted != nullptr);
@@ -1083,7 +1152,12 @@ bool EeScheduler::checkpointDueFull(uint32_t cycles) noexcept
 
 bool EeScheduler::checkpointSliceExpired(GuestThread *running)
 {
-    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
+    // astra-sched-1 F2: a handler reaching a timeslice with a ready peer
+    // keeps running (slice renewed); the peer still waits ready and the next
+    // expiry re-requests, so no wakeup is lost and no second handler is
+    // admitted while this one is live.
+    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority) &&
+        !(ps2_ee_invocation_stacks::deferNestedEnabled() && inHandlerContext(running)))
     {
         m_rescheduleRequested = true;
         m_timeSliceExpired = true;
@@ -1588,6 +1662,14 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
     {
         return;
     }
+    // astra-sched-1 F2: m_insideInterrupt excludes Alarm context, so check
+    // the full handler context (either kind) before transferring out of a
+    // handler. Flags are kept; the caller retries after handler exit.
+    if (m_currentThreadId != 0 && ps2_ee_invocation_stacks::deferNestedEnabled() &&
+        inHandlerContext(currentThread()))
+    {
+        return;
+    }
     if (m_currentThreadId != 0)
     {
         GuestThread *self = currentThread();
@@ -1926,9 +2008,64 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
 {
     assertExecutor();
     ps2_e15::selection(m_vsyncTick,"queue",invocation.context.pc,&invocation.context,m_currentThreadId);
+    // astra-sched-1 F3: deferral-active overload policy. A checkpointing
+    // handler that never returns leaves periodic producers appending full
+    // contexts without bound; repeated masked hardware-IRQ occurrences are
+    // replayed as separate callbacks, unlike a latched pending cause.
+    // Identical pending (kind, pc, a4-cause/id) repeats beyond the cap are
+    // absorbed (counted, diagnosed) instead of queued: the cap matches the
+    // normal invocation-stack band, so pending beyond it is definitionally
+    // backlog. Distinct software alarms (different ids) and every
+    // non-handler kind are never coalesced. The eager path is unchanged.
+    if (ps2_ee_invocation_stacks::deferNestedEnabled() &&
+        ps2_ee_invocation_stacks::isHandlerKind(invocation.kind))
+    {
+        constexpr size_t kPendingIdenticalCap = 32u;
+        const uint32_t pc = invocation.context.pc;
+        const uint32_t a4 = getRegU32(&invocation.context, 4);
+        size_t identical = 0u;
+        for (const GuestInvocation &queued : m_pendingInvocations)
+        {
+            if (queued.kind == invocation.kind && queued.context.pc == pc &&
+                getRegU32(&queued.context, 4) == a4 && ++identical >= kPendingIdenticalCap)
+                break;
+        }
+        if (identical >= kPendingIdenticalCap)
+        {
+            ++m_pendingCoalesced;
+            if (m_pendingCoalesced == 1u || m_pendingCoalesced % 1024u == 0u)
+            {
+                std::fprintf(stderr,
+                             "[ee:sched] pending identical coalesced kind=%u pc=0x%x a4=%u "
+                             "total=%llu depth=%zu tick=%llu\n",
+                             static_cast<unsigned>(invocation.kind), pc, a4,
+                             static_cast<unsigned long long>(m_pendingCoalesced),
+                             m_pendingInvocations.size(),
+                             static_cast<unsigned long long>(m_vsyncTick));
+            }
+            return;
+        }
+    }
     invocation.sequence = ++m_invocationSequence;
     m_pendingInvocations.push_back(std::move(invocation));
     m_checkpointPending.store(true, std::memory_order_release);
+    // astra-sched-1 F3: pending-depth high-water (always on, host-side only,
+    // no guest effect). Crossings log at 64 then ×4; depth-driven, so runs
+    // are deterministic.
+    if (m_pendingInvocations.size() > m_pendingHighWater)
+    {
+        m_pendingHighWater = m_pendingInvocations.size();
+        if (m_pendingHighWaterMark == 0u)
+            m_pendingHighWaterMark = 64u;
+        if (m_pendingHighWater >= m_pendingHighWaterMark)
+        {
+            std::fprintf(stderr,
+                         "[ee:sched] pending backlog high-water depth=%zu tick=%llu coalesced=%llu\n",
+                         m_pendingHighWater, static_cast<unsigned long long>(m_vsyncTick),
+                         static_cast<unsigned long long>(m_pendingCoalesced));
+            m_pendingHighWaterMark *= 4u;
+        }
+    }
 }
 
 void EeScheduler::startSoundClock()
@@ -2745,6 +2882,14 @@ void EeScheduler::applyPendingPreemption()
     }
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    // astra-sched-1 F2: keep the flags when the current thread is in handler
+    // context; processPendingEvents() runs every iteration and retries after
+    // the handler exits. Clearing here would drop a higher-priority waiter's
+    // wakeup; switching now would nest handlers across threads.
+    if (ps2_ee_invocation_stacks::deferNestedEnabled() && inHandlerContext(self))
+    {
+        return;
+    }
     enqueueReady(*self, !m_timeSliceExpired);
     m_currentThreadId = 0;
     m_rescheduleRequested = false;

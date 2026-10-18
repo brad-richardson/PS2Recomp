@@ -587,6 +587,15 @@ private:
     std::deque<GuestInvocation> m_pendingInvocations;
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
+    // astra-sched-1 F3: pending-backlog diagnostics and the deferral-active
+    // overload policy. Host-side only: never serialized, no guest effect.
+    // m_pendingHighWater is the deepest the queue has been;
+    // m_pendingHighWaterMark the last logged high-water level;
+    // m_pendingCoalesced counts identical repeats absorbed by the cap
+    // instead of queued without bound.
+    size_t m_pendingHighWater = 0;
+    size_t m_pendingHighWaterMark = 0;
+    uint64_t m_pendingCoalesced = 0;
     uint64_t m_vsyncTick = 0;
     // PT2: per-tick GameThread tail (PS2X_PERF_LOG=1; knob off is one bool
     // check per VBlank plus one per waitForEvent wait). Executor only.

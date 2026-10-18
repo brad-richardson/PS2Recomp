@@ -104,11 +104,14 @@ void register_ps2_tc1_vf0_tests();
 void register_ps2_session_telemetry_tests();
 void reset_ps2_test_function_table();
 int np_fix_child_main(const std::string &name);
+int sched_child_main(const std::string &name);
 
 int main(int argc, char **argv)
 {
     if (argc == 3 && std::string(argv[1]) == "--np-fix-child")
         return np_fix_child_main(argv[2]);
+    if (argc == 3 && std::string(argv[1]) == "--sched-child")
+        return sched_child_main(argv[2]);
     if (std::getenv("PS2X_JCAM2_PROBE"))
         return ps2_fh1_jcam2_protection_probe();
     MiniTest::BeforeEach(reset_ps2_test_function_table);

@@ -37,6 +37,20 @@
 #include <signal.h>
 #include <unistd.h>
 #endif
+#if defined(__unix__) || defined(__APPLE__)
+#include <cerrno>
+#include <sys/wait.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+namespace sched_child_detail
+{
+std::string schedSelfExePath();
+} // namespace sched_child_detail
+#endif
 
 using namespace ps2_syscalls;
 
@@ -75,6 +89,55 @@ struct EeSchedulerTestAccess
         for (const GuestInvocation &invocation : ee.m_pendingInvocations)
             pcs.push_back(invocation.context.pc);
         return pcs;
+    }
+    // astra-sched-1 F1–F3: drive producers and handler context directly.
+    static void enqueueRaw(EeScheduler &ee, GuestInvocationKind kind, uint32_t pc, uint32_t a4)
+    {
+        GuestInvocation invocation{};
+        invocation.kind = kind;
+        invocation.context.pc = pc;
+        SET_GPR_U32(&invocation.context, 4, a4);
+        ee.queueInvocation(std::move(invocation));
+    }
+    static size_t pendingDepth(const EeScheduler &ee) { return ee.m_pendingInvocations.size(); }
+    static uint64_t coalesced(const EeScheduler &ee) { return ee.m_pendingCoalesced; }
+    static size_t pendingHighWater(const EeScheduler &ee) { return ee.m_pendingHighWater; }
+    static void pushThreadInvocation(EeScheduler &ee, int threadId, GuestInvocationKind kind)
+    {
+        GuestInvocation invocation{};
+        invocation.kind = kind;
+        ee.m_threads.at(threadId).invocations.push_back(std::move(invocation));
+    }
+    static void popThreadInvocation(EeScheduler &ee, int threadId)
+    {
+        auto &invs = ee.m_threads.at(threadId).invocations;
+        if (!invs.empty())
+            invs.pop_back();
+    }
+    static void setCurrent(EeScheduler &ee, int threadId)
+    {
+        ee.m_currentThreadId = threadId;
+        ee.m_runningThreadId = -1;
+    }
+    static int currentId(const EeScheduler &ee) { return ee.m_currentThreadId; }
+    static void setReschedule(EeScheduler &ee) { ee.m_rescheduleRequested = true; }
+    static bool rescheduleFlag(const EeScheduler &ee) { return ee.m_rescheduleRequested; }
+    static void pushReady(EeScheduler &ee, int priority, int threadId)
+    {
+        ee.m_readyQueues[static_cast<size_t>(priority)].push_back(threadId);
+    }
+    static GuestThread *threadPtr(EeScheduler &ee, int threadId)
+    {
+        auto it = ee.m_threads.find(threadId);
+        return it == ee.m_threads.end() ? nullptr : &it->second;
+    }
+    static bool sliceExpired(EeScheduler &ee, GuestThread *running)
+    {
+        return ee.checkpointSliceExpired(running);
+    }
+    static void transfer(EeScheduler &ee, bool interruptSafe)
+    {
+        ee.transferIfRequested(interruptSafe);
     }
 };
 
@@ -985,6 +1048,114 @@ void register_ps2_runtime_kernel_tests()
                 for (Kind pending :
                      {Kind::Interrupt, Kind::Alarm, Kind::Thread, Kind::Callback})
                     t.IsTrue(!st::deferNested(Opt(running), pending), "no deferral outside handlers");
+        });
+
+        tc.Run("handler ancestry keeps the mask through non-handler children", [](TestCase &t)
+        {
+            namespace st = ps2_ee_invocation_stacks;
+            enum class Kind
+            {
+                Interrupt,
+                Alarm,
+                Thread,
+                Callback
+            };
+            using Opt = std::optional<Kind>;
+            auto topOf = [](std::vector<Kind> innermostFirst) {
+                return st::handlerContextTop<Kind>(innermostFirst.rbegin(), innermostFirst.rend(),
+                                                   [](Kind k) { return k; });
+            };
+            t.IsTrue(!topOf({}).has_value(), "empty stack has no context");
+            t.IsTrue(!topOf({Kind::Thread}).has_value(), "plain thread has no context");
+            t.IsTrue(!topOf({Kind::Callback, Kind::Thread}).has_value(), "callback on thread has none");
+            t.IsTrue(topOf({Kind::Interrupt}) == Opt(Kind::Interrupt), "live interrupt found");
+            t.IsTrue(topOf({Kind::Alarm}) == Opt(Kind::Alarm), "live alarm found");
+            // F1 hole: a synchronous child on top must not drop the mask.
+            t.IsTrue(topOf({Kind::Callback, Kind::Interrupt}) == Opt(Kind::Interrupt),
+                      "callback inside interrupt keeps it");
+            t.IsTrue(topOf({Kind::Callback, Kind::Alarm}) == Opt(Kind::Alarm),
+                      "callback inside alarm keeps it");
+            t.IsTrue(topOf({Kind::Interrupt, Kind::Callback, Kind::Interrupt}) == Opt(Kind::Interrupt),
+                      "innermost handler wins");
+            // The guard decision with ancestry: pending work sees the mask.
+            auto defers = [](std::vector<Kind> stack, Kind pending) {
+                return st::deferNested(
+                    st::handlerContextTop<Kind>(stack.rbegin(), stack.rend(),
+                                                [](Kind k) { return k; }),
+                    pending);
+            };
+            t.IsTrue(defers({Kind::Callback, Kind::Interrupt}, Kind::Interrupt),
+                      "interrupt waits behind callback-in-handler");
+            t.IsTrue(defers({Kind::Callback, Kind::Interrupt}, Kind::Alarm),
+                      "alarm waits behind callback-in-handler");
+            t.IsTrue(!defers({Kind::Callback, Kind::Interrupt}, Kind::Callback),
+                      "other kinds still nest behind callback-in-handler");
+            t.IsTrue(!defers({Kind::Callback, Kind::Thread}, Kind::Interrupt),
+                      "no handler below means no deferral");
+        });
+
+        tc.Run("resolveDeferNested knob/source/env precedence matrix", [](TestCase &t)
+        {
+            namespace st = ps2_ee_invocation_stacks;
+            // Explicit knob always wins, with or without a default source.
+            t.IsTrue(st::resolveDeferNested(std::optional<bool>(true), false), "knob on, env off");
+            t.IsTrue(st::resolveDeferNested(std::optional<bool>(true), true), "knob on, env on");
+            t.IsTrue(!st::resolveDeferNested(std::optional<bool>(false), false), "knob off, env off");
+            t.IsTrue(!st::resolveDeferNested(std::optional<bool>(false), true), "knob off, env on");
+            // No knob and no source: raw STOCK120 env decides (legacy default).
+            bool (*saved)() = st::deferNestedDefaultSource;
+            st::deferNestedDefaultSource = nullptr;
+            t.IsTrue(st::resolveDeferNested(std::nullopt, true), "no knob/source, env on");
+            t.IsTrue(!st::resolveDeferNested(std::nullopt, false), "no knob/source, env off");
+            // No knob with a source: the source (netStock120 in production)
+            // decides, so STOCK120=1 without eventsMode stays off.
+            st::deferNestedDefaultSource = []() -> bool { return true; };
+            t.IsTrue(st::resolveDeferNested(std::nullopt, false), "source on decides over env off");
+            st::deferNestedDefaultSource = []() -> bool { return false; };
+            t.IsTrue(!st::resolveDeferNested(std::nullopt, true), "source off decides over env on");
+            st::deferNestedDefaultSource = saved;
+        });
+
+        tc.Run("no-ready admission defers handler work behind live handlers", [](TestCase &t)
+        {
+            namespace st = ps2_ee_invocation_stacks;
+            enum class Kind
+            {
+                Interrupt,
+                Alarm,
+                Thread,
+                Callback
+            };
+            // Pure decision for the no-ready-thread admission path: admit
+            // unless the deferral is active, the front is handler work, and
+            // some thread holds live handler context.
+            auto admits = [](bool deferralActive, Kind front, bool anyHandlerLive) {
+                return !deferralActive || !st::isHandlerKind(front) || !anyHandlerLive;
+            };
+            t.IsTrue(admits(false, Kind::Interrupt, true), "deferral off admits everything");
+            t.IsTrue(admits(true, Kind::Callback, true), "non-handler front still admitted");
+            t.IsTrue(admits(true, Kind::Interrupt, false), "no live handler admits");
+            t.IsTrue(admits(true, Kind::Alarm, false), "no live handler admits alarms");
+            t.IsTrue(!admits(true, Kind::Interrupt, true), "live handler defers interrupt");
+            t.IsTrue(!admits(true, Kind::Alarm, true), "live handler defers alarm");
+        });
+
+        tc.Run("F5 historical depths pin entries but stay safe", [](TestCase &t)
+        {
+            namespace st = ps2_ee_invocation_stacks;
+            // Thread A cached depths 0..17 long ago but now holds only depth
+            // 0 live; B holds depth 0 live and wants depth 1. Liveness is
+            // per-thread, so eviction finds nothing to reuse even though 17
+            // of A's historical slots back nothing. The failure keeps the
+            // clean exhaustion exit instead of aliasing a live stack.
+            st::Map map;
+            for (uint32_t d = 0u; d < 18u; ++d)
+                map.emplace(st::key(7, static_cast<int>(d)), 0x100000u - d * 0x4000u);
+            map.emplace(st::key(9, 0), 0x100000u - 18u * 0x4000u);
+            auto live = [](int id) { return id == 7 || id == 9; };
+            t.IsTrue(st::evictIdle(map, st::key(9, 1), live) == 0u,
+                      "per-thread liveness rejects provably-idle depths");
+            t.Equals(map.size(), static_cast<size_t>(19), "failed eviction changes nothing");
         });
 
         tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)
@@ -2651,5 +2822,257 @@ void register_ps2_runtime_kernel_tests()
                      "both markers should cross-check to the same table base");
         });
 
+#if defined(__unix__) || defined(__APPLE__)
+        tc.Run("sched-child deferral env matrix in fresh processes", [](TestCase &t)
+        {
+            struct Guard
+            {
+                const char *name;
+                bool present;
+                std::string text;
+                explicit Guard(const char *k)
+                    : name(k), present(std::getenv(k) != nullptr),
+                      text(present ? std::getenv(k) : "")
+                {
+                }
+                void set(const char *v)
+                {
+                    if (v == nullptr)
+                        unsetenv(name);
+                    else
+                        setenv(name, v, 1);
+                }
+                ~Guard()
+                {
+                    if (present)
+                        setenv(name, text.c_str(), 1);
+                    else
+                        unsetenv(name);
+                }
+            };
+            Guard knob("PS2X_EE_DEFER_NESTED"), stock("PS2X_NET_STOCK120"), full120("PS2X_SSX3_FULL120");
+            auto run = [&](const char *child) {
+                const std::string self = sched_child_detail::schedSelfExePath();
+                if (self.empty())
+                    return 1002;
+                const pid_t pid = fork();
+                if (pid < 0)
+                    return 1000;
+                if (pid == 0)
+                {
+                    execl(self.c_str(), self.c_str(), "--sched-child", child, nullptr);
+                    _exit(127);
+                }
+                int status = 0;
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                {
+                }
+                if (!WIFEXITED(status))
+                    return 1001;
+                return WEXITSTATUS(status);
+            };
+            knob.set("1");
+            stock.set(nullptr);
+            full120.set(nullptr);
+            t.Equals(run("env-on"), 0, "knob=1 enables in a fresh process");
+            knob.set("0");
+            t.Equals(run("env-off"), 0, "knob=0 disables in a fresh process");
+            knob.set(nullptr);
+            stock.set("1");
+            full120.set(nullptr);
+            t.Equals(run("env-stock-noevents"), 0, "STOCK120=1 without eventsMode stays off");
+            stock.set(nullptr);
+            t.Equals(run("env-bare"), 0, "no knobs stays off");
+            knob.set("1");
+            t.Equals(run("f3cap"), 0, "identical pending cap holds under deferral");
+            t.Equals(run("f2chain"), 0, "preemption/transfer/slice defer in handler context");
+        });
+#else
+        tc.Run("sched-child deferral env matrix in fresh processes", [](TestCase &t)
+        {
+            std::puts("[sched] SKIP fresh-process matrix: fork unavailable on this platform");
+        });
+#endif
+
     });
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+namespace sched_child_detail
+{
+std::string schedSelfExePath()
+{
+#if defined(__APPLE__)
+    uint32_t size = 0u;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) == 0)
+    {
+        buf.resize(std::strlen(buf.c_str()));
+        return buf;
+    }
+    return {};
+#else
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1u);
+    if (n <= 0)
+        return {};
+    buf[n] = '\0';
+    return std::string(buf);
+#endif
+}
+
+int schedChildEnvOn()
+{
+    return ps2_ee_invocation_stacks::deferNestedEnabled() ? 0 : 1;
+}
+
+int schedChildEnvOff()
+{
+    return ps2_ee_invocation_stacks::deferNestedEnabled() ? 1 : 0;
+}
+
+int schedChildEnvStockNoEvents()
+{
+    // STOCK120=1 without eventsMode must NOT enable (netStock120 gate).
+    return ps2_ee_invocation_stacks::deferNestedEnabled() ? 1 : 0;
+}
+
+int schedChildEnvBare()
+{
+    return ps2_ee_invocation_stacks::deferNestedEnabled() ? 1 : 0;
+}
+
+int schedChildF3Cap()
+{
+    using ps2_ee_invocation_stacks::deferNestedEnabled;
+    if (!deferNestedEnabled())
+        return 2;
+    TestEnv env;
+    EeScheduler &ee = env.runtime.eeScheduler();
+    ee.reset(env.rdram.data(), env.ctx);
+    for (int i = 0; i < 40; ++i)
+        EeSchedulerTestAccess::enqueueRaw(ee, GuestInvocationKind::Interrupt, 0x1000u, 2u);
+    if (EeSchedulerTestAccess::pendingDepth(ee) != 32u)
+        return 1;
+    if (EeSchedulerTestAccess::coalesced(ee) != 8u)
+        return 1;
+    // Distinct software alarms (different ids) are never coalesced.
+    for (uint32_t id : {7u, 8u, 9u})
+        EeSchedulerTestAccess::enqueueRaw(ee, GuestInvocationKind::Alarm, 0x2000u, id);
+    if (EeSchedulerTestAccess::pendingDepth(ee) != 35u)
+        return 1;
+    if (EeSchedulerTestAccess::coalesced(ee) != 8u)
+        return 1;
+    // Non-handler kinds are never coalesced either.
+    for (int i = 0; i < 40; ++i)
+        EeSchedulerTestAccess::enqueueRaw(ee, GuestInvocationKind::GsCallback, 0x3000u, 0u);
+    if (EeSchedulerTestAccess::pendingDepth(ee) != 75u)
+        return 1;
+    if (EeSchedulerTestAccess::coalesced(ee) != 8u)
+        return 1;
+    if (EeSchedulerTestAccess::pendingHighWater(ee) != 75u)
+        return 1;
+    return 0;
+}
+
+int schedChildF2Chain()
+{
+    using ps2_ee_invocation_stacks::deferNestedEnabled;
+    if (!deferNestedEnabled())
+        return 2;
+    TestEnv env;
+    EeScheduler &ee = env.runtime.eeScheduler();
+    ee.reset(env.rdram.data(), env.ctx);
+    EeThreadCreateParams pa{};
+    pa.entry = 0x10000u;
+    pa.stack = 0x20000u;
+    pa.stackSize = 0x800u;
+    pa.priority = 10;
+    const int idA = ee.createThread(pa);
+    EeThreadCreateParams pb = pa;
+    pb.priority = 5;
+    const int idB = ee.createThread(pb);
+    if (idA <= 0 || idB <= 0)
+        return 1;
+    EeSchedulerTestAccess::setCurrent(ee, idA);
+    EeSchedulerTestAccess::pushThreadInvocation(ee, idA, GuestInvocationKind::Interrupt);
+    EeSchedulerTestAccess::pushReady(ee, 5, idB);
+    GuestThread *threadA = EeSchedulerTestAccess::threadPtr(ee, idA);
+    if (threadA == nullptr)
+        return 1;
+    // Timeslice with live handler context: renew, no reschedule.
+    if (EeSchedulerTestAccess::sliceExpired(ee, threadA))
+        return 1;
+    if (EeSchedulerTestAccess::rescheduleFlag(ee))
+        return 1;
+    // Transfer out of handler context: refused, flags kept.
+    EeSchedulerTestAccess::setReschedule(ee);
+    try
+    {
+        EeSchedulerTestAccess::transfer(ee, false);
+    }
+    catch (const EeDispatcherTransfer &)
+    {
+        return 1;
+    }
+    if (!EeSchedulerTestAccess::rescheduleFlag(ee))
+        return 1;
+    // Pending preemption with live handler context: no switch, flags kept.
+    EeSchedulerTestAccess::pending(ee);
+    if (EeSchedulerTestAccess::currentId(ee) != idA)
+        return 1;
+    if (!EeSchedulerTestAccess::rescheduleFlag(ee))
+        return 1;
+    // Handler exits: timeslice fires, preemption yields, transfer throws.
+    EeSchedulerTestAccess::popThreadInvocation(ee, idA);
+    if (!EeSchedulerTestAccess::sliceExpired(ee, threadA))
+        return 1;
+    if (!EeSchedulerTestAccess::rescheduleFlag(ee))
+        return 1;
+    EeSchedulerTestAccess::pending(ee);
+    if (EeSchedulerTestAccess::currentId(ee) != 0)
+        return 1;
+    if (EeSchedulerTestAccess::rescheduleFlag(ee))
+        return 1;
+    EeSchedulerTestAccess::setCurrent(ee, idA);
+    EeSchedulerTestAccess::setReschedule(ee);
+    try
+    {
+        EeSchedulerTestAccess::transfer(ee, false);
+        return 1;
+    }
+    catch (const EeDispatcherTransfer &)
+    {
+    }
+    if (EeSchedulerTestAccess::rescheduleFlag(ee))
+        return 1;
+    return 0;
+}
+} // namespace sched_child_detail
+#endif
+
+int sched_child_main(const std::string &name)
+{
+#if defined(__unix__) || defined(__APPLE__)
+    using namespace sched_child_detail;
+    int rc = 99;
+    if (name == "env-on")
+        rc = schedChildEnvOn();
+    else if (name == "env-off")
+        rc = schedChildEnvOff();
+    else if (name == "env-stock-noevents")
+        rc = schedChildEnvStockNoEvents();
+    else if (name == "env-bare")
+        rc = schedChildEnvBare();
+    else if (name == "f3cap")
+        rc = schedChildF3Cap();
+    else if (name == "f2chain")
+        rc = schedChildF2Chain();
+    std::fflush(nullptr);
+    return rc;
+#else
+    (void)name;
+    return 99;
+#endif
 }
