@@ -3,6 +3,7 @@
 #include "ps2_net_protocol.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -255,8 +256,14 @@ namespace
         tc.Run("config-fix-1 item 1: no session active on a fresh host", [](TestCase &t)
         {
             // No lobby socket and no P2P match link exist in the host
-            // suite, so configured-but-idle must read inactive here.
+            // suite, so configured-but-idle must read inactive here —
+            // even with the public preset values (NET=1 + server) set.
             t.IsFalse(ps2_net::sessionActive(), "idle host has no active online session");
+            ::setenv("PS2X_NET", "1", 1);
+            ::setenv("PS2X_NET_SERVER", "ssx.bradr.dev", 1);
+            t.IsFalse(ps2_net::sessionActive(), "NET=1 configured with no session stays inactive");
+            ::unsetenv("PS2X_NET");
+            ::unsetenv("PS2X_NET_SERVER");
         });
     }
 }
