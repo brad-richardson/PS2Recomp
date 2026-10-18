@@ -621,9 +621,11 @@ namespace ps2_net
         // what is logged, per the plan's logging section. Posted once per
         // install (flag file beside the Quick Play login), non-blocking.
         // Full text goes to REPORT.md for Brad's review.
+        // F9 (appsec-fix-1): the notice also names the random install ID.
         constexpr char kOnlineNotice[] =
             "Quick Play races relay through ssx.bradr.dev - no peer IPs.\n"
             "Names are unowned labels; leaderboard names are just names.\n"
+            "A random install ID is sent to the lobby to hold your seat.\n"
             "Debug logs may contain IPs: share them privately.";
 
         void maybeFirstRunNotice()
