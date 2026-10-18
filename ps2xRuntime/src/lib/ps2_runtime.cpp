@@ -7686,8 +7686,8 @@ void PS2Runtime::run()
     if (asv1Enabled && std::strcmp(asv1Enabled, "1") == 0 &&
         ps2_savestate::config().loadPath.empty())
     {
-        if (ps2_net::enabled())
-            std::fprintf(stderr, "[autosave] launch skipped: online mode enabled\n");
+        if (ps2_net::sessionActive())
+            std::fprintf(stderr, "[autosave] launch skipped: online session active\n");
         else
         {
             const std::string slot = autosaveSlotPath();

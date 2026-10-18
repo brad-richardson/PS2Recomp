@@ -1055,6 +1055,18 @@ namespace ps2_net
                           ps2_net_protocol::kOnlineRequires120);
     }
 
+    bool sessionActive()
+    {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+        if (g_lockstepLink.load(std::memory_order_acquire))
+            return true;
+        std::lock_guard<std::mutex> lock(g_sockMutex);
+        return !g_sockets.empty();
+#else
+        return false;
+#endif
+    }
+
     // F3 (appsec-fix-1): hard byte ceiling for the opt-in packet capture.
     constexpr uint64_t kCaptureMaxBytes = 8u * 1024u * 1024u;
     bool g_captureCapped = false;

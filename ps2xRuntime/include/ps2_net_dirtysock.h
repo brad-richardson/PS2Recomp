@@ -18,6 +18,11 @@ namespace ps2_net
     // True with PS2X_NET=1 and an explicit PS2X_NET_SERVER.
     bool enabled();
 
+    // config-fix-1 item 1: true only while an online session is active (a
+    // lobby socket is open or a P2P match link is up). Configured-but-idle
+    // (NET=1 + server, no session) returns false so offline autosave and
+    // launch-resume keep working on the public presets.
+
     // True from gmlk/crea until the last gmlk/dest. Events mode holds
     // stock 60 while true unless the post-v0 LOCKSTEP120 knob is set.
     bool lockstepLinkActive();

@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "ps2_net_dirtysock.h"
 #include "ps2_net_protocol.h"
 
 #include <cstdint>
@@ -251,6 +252,12 @@ namespace
                                                                   0x0100007Fu, 3658u),
                              "unpinned drops");
                });
+        tc.Run("config-fix-1 item 1: no session active on a fresh host", [](TestCase &t)
+        {
+            // No lobby socket and no P2P match link exist in the host
+            // suite, so configured-but-idle must read inactive here.
+            t.IsFalse(ps2_net::sessionActive(), "idle host has no active online session");
+        });
     }
 }
 

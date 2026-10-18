@@ -2074,9 +2074,9 @@ namespace ps2_savestate
         const char *enabled = std::getenv("PS2X_AUTOSAVE");
         if (!enabled || std::strcmp(enabled, "1") != 0)
             return false;
-        if (ps2_net::enabled())
+        if (ps2_net::sessionActive())
         {
-            std::fprintf(stderr, "[autosave] skipped: online mode enabled\n");
+            std::fprintf(stderr, "[autosave] skipped: online session active\n");
             return false;
         }
         if (!requestQuickSave(path))
