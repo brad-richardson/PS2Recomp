@@ -36,6 +36,7 @@
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
 #include "ps2_pad_latch.h"
+#include "ps2_controller_map.h"
 #include "ps2_input_diag.h"
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
@@ -2510,10 +2511,18 @@ bool gamepadConnected()
 // A connected controller hides the overlay once it has been used (any
 // button, or a stick past half-way) since it connected. The iOS Simulator
 // reports an always-connected device named "Gamepad" with nothing attached,
-// so "connected" alone would hide the overlay for good.
+// so "connected" alone would hide the overlay for good (see
+// iosRealControllerPresent below for the connected-but-unused rule).
 bool gamepadInUse()
 {
     static bool s_used = false;
+    // ctrl-harden-1: a stale raylib slot (Android disconnect, OS pad gone)
+    // must not stick "used" on: no device, no use.
+    if (ps2xOsGamepadStaleGone())
+    {
+        s_used = false;
+        return false;
+    }
     bool any = false;
     for (int i = 0; i < 4; ++i)
     {
@@ -2535,6 +2544,24 @@ bool gamepadInUse()
     }
     return any && s_used;
 }
+
+#if defined(PS2X_IOS)
+// ctrl-harden-1: a connected REAL controller hides the overlay immediately
+// (Touch = Auto), before its first press. The Simulator's fake
+// always-connected "Gamepad" never hides on its own (first real press
+// still hides via gamepadInUse, as before).
+bool iosRealControllerPresent()
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        if (!IsGamepadAvailable(i))
+            continue;
+        if (ps2x::ctrlmap::hidesOverlay(GetGamepadName(i)))
+            return true;
+    }
+    return false;
+}
+#endif
 
 int virtualPadTouches(ps2x::vpad::TouchPoint *ts, int max, float screenWidth, float screenHeight)
 {
@@ -2595,6 +2622,14 @@ void publishPad(uint16_t mask, uint64_t tick)
 {
     ps2x::inputdiag::notePublish(mask, tick);
     ps2x::padlatch::sharedLatch().publish(mask);
+}
+
+// ctrl-harden-1: publish pad 2's mask to its own latch (second controller
+// only; the render loop passes zeros while the panel, the Tricky list or
+// the background pause owns the pad). No per-frame diag line for port 1.
+void publishPadPort1(uint16_t mask, uint64_t /*tick*/)
+{
+    ps2x::padlatch::sharedLatchPort1().publish(mask);
 }
 
 void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed, const ps2x::vpad::StickVec &stick)
@@ -7960,6 +7995,7 @@ void PS2Runtime::run()
             vpadPad = ps2x::vpad::PadState{};
             vpadPressedPrev = 0u; // set2-polish-1: no stale touch chord across the pause
             publishPad(0, m_memory.gs().vsyncTick.load());
+            publishPadPort1(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
@@ -8248,8 +8284,22 @@ void PS2Runtime::run()
             vpadImCache = 30;
         }
         const bool vpadPadHides = vpadImPresent || gamepadConnected() || gamepadInUse();
+        // ctrl-harden-1: feed the sampler's stale-slot guard (Android
+        // disconnect with held buttons) from this OS-level poll.
+        ps2xNoteOsGamepadPresent(vpadImPresent);
+        // ... and refresh soon when raylib still claims a pad the OS no
+        // longer lists (disconnect detected; heals within ~5 host frames
+        // instead of the full 30-frame cache window).
+        if (!vpadImPresent && gamepadConnected() && vpadImCache > 5)
+            vpadImCache = 5;
 #else
-        const bool vpadPadHides = gamepadInUse();
+        // ctrl-harden-1: a connected real controller hides the overlay at
+        // once (Touch = Auto); the Simulator fake needs a first press.
+        const bool vpadPadHides =
+#if defined(PS2X_IOS)
+            iosRealControllerPresent() ||
+#endif
+            gamepadInUse();
 #endif
         const bool vpadPadConnected = vpadWanted && !vpadForcedOn && vpadPadHides;
 #if defined(__ANDROID__)
@@ -8297,6 +8347,10 @@ void PS2Runtime::run()
             set2On ? set2TestMask(set2Test, set2HostFrame) : static_cast<uint16_t>(0u);
         const uint16_t ds1TrueRaw =
             static_cast<uint16_t>(ps2xSampleRaylibPad().pressed | set2Inject);
+        // ctrl-harden-1: pad 2 follows the second controller only (no
+        // touch, no keyboard, no test-span inject, no DS1/SET2 chords —
+        // those stay on pad 1, whose controller owns the settings chord).
+        const uint16_t ds1Port1Raw = ps2xSampleRaylibPadPort(1).pressed;
         // SET2: while the panel is open the panel owns the pad (DS1 suppressed).
         const uint16_t ds1RawPressed = set2Open ? 0u : ds1TrueRaw;
         uint16_t raylibPressed = ds1RawPressed;
@@ -8371,7 +8425,7 @@ void PS2Runtime::run()
 #endif
             ps2_snd_audio_output::pausePlayback();
             const uint64_t openTick = m_memory.gs().vsyncTick.load();
-            ps2x::padlatch::sharedLatch().setPanelOpen(true);
+            ps2x::padlatch::setPanelOpenAll(true);
             ps2x::hostPause::requestPause();
             const bool acked = ps2x::hostPause::waitGateAck(2000);
             set2HoldsPause().store(true, std::memory_order_release);
@@ -8409,7 +8463,7 @@ void PS2Runtime::run()
                     set2HeldTouches.push_back(seed[i].id);
                 }
             }
-            ps2x::padlatch::sharedLatch().setPanelOpen(false);
+            ps2x::padlatch::setPanelOpenAll(false);
             set2HoldsPause().store(false, std::memory_order_release);
             ps2x::hostPause::requestResume();
             ps2_snd_audio_output::resumePlayback();
@@ -9455,6 +9509,11 @@ void PS2Runtime::run()
             publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
             vpadPressedPrev = 0u; // set2-polish-1: no overlay, no touch chord
         }
+        // ctrl-harden-1: pad 2's latch follows the second controller. The
+        // panel and the Tricky list own both pads while open (zeros here;
+        // their branches publish zero to pad 1 above and fall through).
+        publishPadPort1((tkPublishOwn || set2Open) ? static_cast<uint16_t>(0u) : ds1Port1Raw,
+                        m_memory.gs().vsyncTick.load());
         // IN4: input-diagnostics per-frame (SDL watch install, 1 s stat line,
         // 5 s timer flush; no-ops unless PS2X_INPUT_DIAG=1, except the
         // once-only watch install that Part A touches need).

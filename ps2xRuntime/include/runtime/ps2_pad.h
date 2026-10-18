@@ -22,6 +22,18 @@ struct PSRaylibPadSample
     bool useGamepad = false;
 };
 PSRaylibPadSample ps2xSampleRaylibPad();
+// ctrl-harden-1: sample one guest port's physical input. Port 0 (pad 1)
+// takes the first available controller (+ keyboard/touch, which stay on
+// pad 1); port 1 (pad 2) takes the second controller, gamepad-only;
+// higher ports read neutral. Live-evaluated per call (reconnect-safe).
+PSRaylibPadSample ps2xSampleRaylibPadPort(int port);
+#if defined(__ANDROID__)
+// Render-thread report of OS-level gamepad presence (InputManager), so the
+// sampler can ignore raylib's stale single slot after a disconnect.
+void ps2xNoteOsGamepadPresent(bool present);
+#endif
+// True while the sampler must ignore raylib slot state (see above).
+bool ps2xOsGamepadStaleGone();
 
 // DS1: quick-save/load chord (SELECT+L3 save, SELECT+R3 load), edge-triggered
 // on the thumb press while SELECT is held. Pure step function (unit-tested);

@@ -3520,6 +3520,9 @@ namespace
         if (!r.pod(latch))
             return false;
         ps2x::padlatch::sharedLatch().savestateSet(latch);
+        // ctrl-harden-1: port 2's latch is session-local (no format change);
+        // clear it so no stale edge surfaces after a load.
+        ps2x::padlatch::sharedLatchPort1().savestateSet(ps2x::padlatch::Latch{});
         return true;
     }
     std::string padLatchReady()
@@ -3528,6 +3531,10 @@ namespace
         // Host input would leak into a restored run; save with the pad idle.
         if (l.live || l.pendDown || l.pendUp || l.owedDown || l.owedUp)
             return "host pad input pending";
+        // ctrl-harden-1: same rule for pad 2's session-local latch.
+        const ps2x::padlatch::Latch l1 = ps2x::padlatch::sharedLatchPort1().savestateGet();
+        if (l1.live || l1.pendDown || l1.pendUp || l1.owedDown || l1.owedUp)
+            return "host pad 2 input pending";
         return {};
     }
 

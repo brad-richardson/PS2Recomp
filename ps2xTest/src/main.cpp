@@ -8,6 +8,7 @@ void register_r5900_decoder_tests();
 void register_elf_analyzer_tests();
 void register_pad_input_tests();
 void register_ps2_pad_latch_tests();
+void register_ps2_controller_map_tests();
 void register_ps2_present_fallback_tests();
 void register_ps2_present_geometry_tests();
 void register_ps2_present_vk_ledger_tests();
@@ -117,6 +118,7 @@ int main(int argc, char **argv)
     register_elf_analyzer_tests();
     register_pad_input_tests();
     register_ps2_pad_latch_tests();
+    register_ps2_controller_map_tests();
     register_ps2_present_fallback_tests();
     register_ps2_present_geometry_tests();
     register_ps2_present_vk_ledger_tests();

@@ -1,7 +1,9 @@
 #include "runtime/ps2_pad.h"
+#include "ps2_controller_map.h"
 #include "ps2_host_backend.h"
 #include "ps2_pad_latch.h"
 #include "ps2_virtual_pad.h"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,101 +31,179 @@ namespace
     constexpr uint16_t PAD_L2 = 0x0100u;
 }
 
-PSRaylibPadSample ps2xSampleRaylibPad()
+#if defined(__ANDROID__)
+// ctrl-harden-1: OS-level presence last reported by the render thread
+// (ps2xNoteOsGamepadPresent, from InputManager, independent of raylib).
+// raylib's Android backend keeps a single merged slot that is set on the
+// first input event and never cleared, so a disconnect with held buttons
+// leaves stale pressed bits behind. While the OS reports no gamepad after
+// having seen one, the sampler below ignores the stale slot so the latch
+// releases cleanly. Never-seen stays trusted (fail-safe: a JNI outage on a
+// fresh boot can only show the overlay, never kill a live pad).
+std::atomic<bool> &androidOsPresence()
 {
-    PSRaylibPadSample out;
-#if defined(PS2X_IOS)
-    // I25: a Bluetooth pad (MFi/Xbox/PS) need not land at index 0, so take
-    // the first ready one; and union keyboard + gamepad (N6's Android
-    // behaviour), so a hardware keyboard works alongside a controller.
-    int kGamepad = 0;
-    for (int i = 0; i < 4; ++i)
-    {
-        if (IsGamepadAvailable(i))
-        {
-            kGamepad = i;
-            break;
-        }
-    }
-    const bool useGamepad = IsGamepadAvailable(kGamepad);
-    const bool useKeyboard = true;
-#else
-    constexpr int kGamepad = 0;
-    const bool useGamepad = IsGamepadAvailable(kGamepad);
-    const bool useKeyboard = !useGamepad;
+    static std::atomic<bool> present{false};
+    return present;
+}
+std::atomic<bool> &androidOsEverSeen()
+{
+    static std::atomic<bool> seen{false};
+    return seen;
+}
+void ps2xNoteOsGamepadPresent(bool present)
+{
+    androidOsPresence().store(present, std::memory_order_relaxed);
+    if (present)
+        androidOsEverSeen().store(true, std::memory_order_relaxed);
+}
 #endif
-    out.gamepad = kGamepad;
-    out.useGamepad = useGamepad;
+
+// True while a stale raylib slot must be ignored (Android disconnect with
+// the OS reporting no pad after having seen one). The overlay in-use
+// tracker consults this so it cannot stick "used" on a ghost.
+bool ps2xOsGamepadStaleGone()
+{
+#if defined(__ANDROID__)
+    return androidOsEverSeen().load(std::memory_order_relaxed) &&
+           !androidOsPresence().load(std::memory_order_relaxed);
+#else
+    return false;
+#endif
+}
+
+namespace
+{
+// Buttons of one raylib slot (no keyboard).
+uint16_t sampleSlotButtons(int kGamepad)
+{
     uint16_t pressed = 0u;
     auto setBit = [&pressed](uint16_t mask)
     { pressed |= mask; };
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_UP))
+        setBit(PAD_UP);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+        setBit(PAD_DOWN);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+        setBit(PAD_LEFT);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+        setBit(PAD_RIGHT);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+        setBit(PAD_CROSS);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+        setBit(PAD_CIRCLE);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
+        setBit(PAD_SQUARE);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP))
+        setBit(PAD_TRIANGLE);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
+        setBit(PAD_L1);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
+        setBit(PAD_R1);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
+        setBit(PAD_L2);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
+        setBit(PAD_R2);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+        setBit(PAD_START);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
+        setBit(PAD_SELECT);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
+        setBit(PAD_L3);
+    if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
+        setBit(PAD_R3);
+    return pressed;
+}
 
+uint16_t sampleKeyboardButtons()
+{
+    uint16_t pressed = 0u;
+    auto setBit = [&pressed](uint16_t mask)
+    { pressed |= mask; };
+    if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
+        setBit(PAD_UP);
+    if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
+        setBit(PAD_DOWN);
+    if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
+        setBit(PAD_LEFT);
+    if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
+        setBit(PAD_RIGHT);
+    if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
+        setBit(PAD_CROSS);
+    if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
+        setBit(PAD_CIRCLE);
+    if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
+        setBit(PAD_SQUARE);
+    if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
+        setBit(PAD_TRIANGLE);
+    if (IsKeyDown(KEY_Q))
+        setBit(PAD_L1);
+    if (IsKeyDown(KEY_E))
+        setBit(PAD_R1);
+    if (IsKeyDown(KEY_LEFT_SHIFT))
+        setBit(PAD_L2);
+    if (IsKeyDown(KEY_RIGHT_SHIFT))
+        setBit(PAD_R2);
+    if (IsKeyDown(KEY_ENTER))
+        setBit(PAD_START);
+    if (IsKeyDown(KEY_TAB))
+        setBit(PAD_SELECT);
+    return pressed;
+}
+} // namespace
+
+PSRaylibPadSample ps2xSampleRaylibPad()
+{
+    return ps2xSampleRaylibPadPort(0);
+}
+
+PSRaylibPadSample ps2xSampleRaylibPadPort(int port)
+{
+    using ps2x::ctrlmap::kSlots;
+    PSRaylibPadSample out;
+    // Live assignment every sample: the first available slot drives pad 1,
+    // the second drives pad 2, so a reconnected or new controller takes
+    // pad 1 immediately with no relaunch (ctrl-harden-1).
+    bool avail[kSlots] = {};
+    for (int i = 0; i < kSlots; ++i)
+        avail[i] = IsGamepadAvailable(i);
+    int kGamepad = -1;
+    if (port == 0)
+        kGamepad = ps2x::ctrlmap::pad1Slot(avail, kSlots);
+    else if (port == 1)
+        // Pad 2 is gamepad-only: the second controller, never the keyboard
+        // or the touch overlay (both stay on pad 1).
+        kGamepad = ps2x::ctrlmap::pad2Slot(avail, kSlots);
+    // Ports past 2 have no input (were: a mirror of pad 1's live mask).
+#if defined(__ANDROID__)
+    // ANDROID: ignore raylib's single merged slot once the OS reports the
+    // pad gone (see androidOsPresence above): the slot keeps stale pressed
+    // bits after a disconnect, and the latch would stick without this. The
+    // keyboard rule below re-applies, so a hardware keyboard keeps working.
+    if (androidOsEverSeen().load(std::memory_order_relaxed) &&
+        !androidOsPresence().load(std::memory_order_relaxed))
+        kGamepad = -1;
+#endif
+    const bool useGamepad = kGamepad >= 0;
+    bool useKeyboard = false;
+    if (port == 0)
+    {
+#if defined(PS2X_IOS)
+        // I25: a Bluetooth pad (MFi/Xbox/PS) need not land at index 0, so
+        // take the first ready one; and union keyboard + gamepad (N6's
+        // Android behaviour), so a hardware keyboard works alongside a
+        // controller.
+        useKeyboard = true;
+#else
+        useKeyboard = !useGamepad;
+#endif
+    }
+    out.gamepad = useGamepad ? kGamepad : 0;
+    out.useGamepad = useGamepad;
+    uint16_t pressed = 0u;
     if (useGamepad)
-    {
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_UP))
-            setBit(PAD_UP);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
-            setBit(PAD_DOWN);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
-            setBit(PAD_LEFT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
-            setBit(PAD_RIGHT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-            setBit(PAD_CROSS);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
-            setBit(PAD_CIRCLE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
-            setBit(PAD_SQUARE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP))
-            setBit(PAD_TRIANGLE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
-            setBit(PAD_L1);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
-            setBit(PAD_R1);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
-            setBit(PAD_L2);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
-            setBit(PAD_R2);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
-            setBit(PAD_START);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
-            setBit(PAD_SELECT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
-            setBit(PAD_L3);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
-            setBit(PAD_R3);
-    }
+        pressed = static_cast<uint16_t>(pressed | sampleSlotButtons(kGamepad));
     if (useKeyboard)
-    {
-        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
-            setBit(PAD_UP);
-        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
-            setBit(PAD_DOWN);
-        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
-            setBit(PAD_LEFT);
-        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
-            setBit(PAD_RIGHT);
-        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
-            setBit(PAD_CROSS);
-        if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
-            setBit(PAD_CIRCLE);
-        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
-            setBit(PAD_SQUARE);
-        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
-            setBit(PAD_TRIANGLE);
-        if (IsKeyDown(KEY_Q))
-            setBit(PAD_L1);
-        if (IsKeyDown(KEY_E))
-            setBit(PAD_R1);
-        if (IsKeyDown(KEY_LEFT_SHIFT))
-            setBit(PAD_L2);
-        if (IsKeyDown(KEY_RIGHT_SHIFT))
-            setBit(PAD_R2);
-        if (IsKeyDown(KEY_ENTER))
-            setBit(PAD_START);
-        if (IsKeyDown(KEY_TAB))
-            setBit(PAD_SELECT);
-    }
+        pressed = static_cast<uint16_t>(pressed | sampleKeyboardButtons());
     out.pressed = pressed;
     return out;
 }
@@ -146,7 +226,11 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
         return true;
 
     uint16_t btns = 0xFFFFu;
-    const PSRaylibPadSample ray = ps2xSampleRaylibPad();
+    // ctrl-harden-1: each guest port samples its own controller (pad 1 =
+    // first available slot, pad 2 = second; ports past 2 are silent). Port 2
+    // no longer peeks port 1's live mask (Brad 10-17: one controller drove
+    // both riders in 2P split screen).
+    const PSRaylibPadSample ray = ps2xSampleRaylibPadPort(port);
     if (ray.useGamepad)
     {
         const int kGamepad = ray.gamepad;
@@ -160,18 +244,22 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
         data[5] = static_cast<uint8_t>(128 + ry * 127);
     }
 
-    // IN2: the latch path takes the render-thread-published mask (port 0
-    // consumes one presented mask per guest read; other ports follow live
-    // without advancing it).
+    // IN2: the latch path takes the render-thread-published mask (each port
+    // consumes one presented mask per guest read from its own latch).
     {
-        const uint16_t latched = (port == 0) ? ps2x::padlatch::sharedLatch().consume()
-                                             : ps2x::padlatch::sharedLatch().peekLive();
+        uint16_t latched = 0u;
+        if (port == 0)
+            latched = ps2x::padlatch::sharedLatch().consume();
+        else if (port == 1)
+            latched = ps2x::padlatch::sharedLatchPort1().consume();
         btns &= static_cast<uint16_t>(~latched);
     }
 
     // I32: the virtual analog stick overrides the left stick while the
     // overlay drives it (kStickNoOverride while the overlay is off or
-    // hidden behind a physical controller).
+    // hidden behind a physical controller). The overlay only ever drives
+    // pad 1, so the override applies to port 0 alone.
+    if (port == 0)
     {
         const uint16_t vst = ps2x::vpad::liveStick().load(std::memory_order_relaxed);
         if (vst != ps2x::vpad::kStickNoOverride)

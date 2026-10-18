@@ -247,4 +247,25 @@ namespace ps2x::padlatch
         static SharedLatch latch;
         return latch;
     }
+
+    // ctrl-harden-1: pad 2 (guest port 1) owns its own latch, fed only by
+    // the second controller (Brad 10-17: port 2 peeked port 1's live mask,
+    // so one controller drove both riders). With one controller pad 2's
+    // latch idles at zero; the render thread publishes zeros to it while
+    // the panel, the Tricky list or the background pause owns the pad.
+    // Savestates carry port 0 only (no format change); the load path clears
+    // this latch so no stale edge surfaces after a load.
+    inline SharedLatch &sharedLatchPort1()
+    {
+        static SharedLatch latch;
+        return latch;
+    }
+
+    // Panel transitions own both ports: discard live and queued edges on
+    // either side so a pre-pause tap cannot surface after resume.
+    inline void setPanelOpenAll(bool open)
+    {
+        sharedLatch().setPanelOpen(open);
+        sharedLatchPort1().setPanelOpen(open);
+    }
 }
