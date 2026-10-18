@@ -43,6 +43,8 @@ inline constexpr size_t kField = 100u;
 inline constexpr uint32_t kNoTable = 0xFFFFFFFFu;
 inline constexpr uint32_t kBrandAddr = 0x46EAE8u;
 inline constexpr char kBrand[] = "EA RADIO BIG";
+inline constexpr char kBlank[] = "            "; // 12 spaces, same width as kBrand
+static_assert(sizeof(kBrand) == sizeof(kBlank), "brand and blank share the field width");
 
 // Same guard as bootBannerFromEnv: without the boot-served Tricky INF the
 // cache is stock and there is nothing to scope.
@@ -60,21 +62,35 @@ inline bool fieldFits(const char *s)
 
 // Strict order+stride discovery: every record must prefix-match its title
 // with a NUL terminator (rejects the raw INF text, where titles sit inside
-// TITLE = "..." lines). Returns the table base or kNoTable.
+// TITLE = "..." lines). Anchors on the first non-empty record (some sets
+// open with empty strings) and verifies all 35 at the 100B stride.
+// Returns the table base or kNoTable.
 inline uint32_t findTable(const uint8_t *ram, const char *const *titles)
 {
     static constexpr uint32_t kRamBytes = 32u * 1024u * 1024u;
     const size_t span = kRecords * kField;
-    const char *first = titles[0];
+    size_t anchor = 0;
+    while (anchor < kRecords && titles[anchor][0] == 0)
+        ++anchor;
+    if (anchor == kRecords)
+        return kNoTable;
+    const char *first = titles[anchor];
     const size_t fl = std::strlen(first);
+    const size_t prefix = anchor * kField;
     uint32_t off = 0;
     while (off + span <= kRamBytes)
     {
         const void *hit = std::memchr(ram + off, first[0], kRamBytes - span - off);
         if (!hit)
             return kNoTable;
-        off = static_cast<uint32_t>(static_cast<const uint8_t *>(hit) - ram);
-        bool ok = std::memcmp(ram + off, first, fl) == 0 && ram[off + fl] == 0;
+        const uint32_t found = static_cast<uint32_t>(static_cast<const uint8_t *>(hit) - ram);
+        if (found < prefix)
+        {
+            off = found + 1;
+            continue;
+        }
+        off = found - static_cast<uint32_t>(prefix);
+        bool ok = true;
         for (size_t i = 0; ok && i < kRecords; ++i)
         {
             const size_t tl = std::strlen(titles[i]);
@@ -83,9 +99,18 @@ inline uint32_t findTable(const uint8_t *ram, const char *const *titles)
         }
         if (ok)
             return off;
-        ++off;
+        off = found + 1;
     }
     return kNoTable;
+}
+
+// Anchor record used by the fast path (first non-empty entry of a set).
+inline size_t anchorIndex(const char *const *titles)
+{
+    size_t anchor = 0;
+    while (anchor < kRecords && titles[anchor][0] == 0)
+        ++anchor;
+    return anchor;
 }
 
 struct SyncState
@@ -120,12 +145,25 @@ inline bool poolLive(const ModeT *target)
     {
         if (a.disc != "/DATA/AUDIO/MUSIC.BIG")
             continue;
+        // Silent: the caller logs the fallback when it applies a set.
         std::error_code ec;
-        if (std::filesystem::is_regular_file(a.host, ec))
-            return true;
-        std::fprintf(stderr, "[ssx3-course] banner: pool host missing, keeping stock titles (%s)\n",
-                     a.host.c_str());
+        return std::filesystem::is_regular_file(a.host, ec);
+    }
+    return false;
+}
+
+// True when the mode's pool alias names a missing host (diagnostic only).
+template <typename ModeT>
+inline bool poolHostMissing(const ModeT *target)
+{
+    if (!target)
         return false;
+    for (const auto &a : target->aliases)
+    {
+        if (a.disc != "/DATA/AUDIO/MUSIC.BIG")
+            continue;
+        std::error_code ec;
+        return !std::filesystem::is_regular_file(a.host, ec);
     }
     return false;
 }
@@ -164,8 +202,8 @@ inline bool applySet(uint8_t *ram, bool tricky, uint32_t titleBase, uint32_t art
     if (tricky)
     {
         if (std::memcmp(ram + kBrandAddr, kBrand, brandLen) == 0)
-            std::memset(ram + kBrandAddr, ' ', brandLen);
-        else if (std::memcmp(ram + kBrandAddr, "            ", brandLen) != 0)
+            std::memcpy(ram + kBrandAddr, kBlank, brandLen);
+        else if (std::memcmp(ram + kBrandAddr, kBlank, brandLen) != 0)
         {
             std::fprintf(stderr, "[ssx3-course] banner: brand holds neither brand nor blank, leaving it\n");
             return false;
@@ -173,7 +211,7 @@ inline bool applySet(uint8_t *ram, bool tricky, uint32_t titleBase, uint32_t art
     }
     else
     {
-        if (std::memcmp(ram + kBrandAddr, "            ", brandLen) == 0)
+        if (std::memcmp(ram + kBrandAddr, kBlank, brandLen) == 0)
             std::memcpy(ram + kBrandAddr, kBrand, brandLen);
         else if (std::memcmp(ram + kBrandAddr, kBrand, brandLen) != 0)
         {
@@ -225,6 +263,10 @@ inline bool syncForMode(uint8_t *ram, const ModeT *target, std::vector<std::stri
         }
         st.artistBase = a;
     }
+    if (!tricky && poolHostMissing(target))
+    {
+        std::fprintf(stderr, "[ssx3-course] banner: pool host missing, keeping stock titles\n");
+    }
     if (!applySet(ram, tricky, st.titleBase, st.artistBase, writes))
         return false;
     st.set = tricky ? 1 : 0;
@@ -250,7 +292,10 @@ inline void ensureSynced(uint8_t *ram, const ModesT &ms, uint64_t tick)
     {
         const char *const *T = tricky ? kBannerTrickyTitle : kBannerStockTitle;
         const char *const *A = tricky ? kBannerTrickyArtist : kBannerStockArtist;
-        if (ramHasN(ram, st.titleBase, T[0]) && ramHasN(ram, st.artistBase, A[0]))
+        const size_t ta = anchorIndex(T);
+        const size_t aa = anchorIndex(A);
+        if (ramHasN(ram, st.titleBase + static_cast<uint32_t>(ta * kField), T[ta]) &&
+            ramHasN(ram, st.artistBase + static_cast<uint32_t>(aa * kField), A[aa]))
             return;
     }
     if (tick < st.nextTryTick)
