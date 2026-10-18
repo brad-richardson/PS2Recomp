@@ -228,8 +228,9 @@ inline constexpr uint64_t kSetupBlindTicks = 300u; // Setup->Peak journey per pr
                                                    // flips ~150 after the Continue accept, the screen follows)
 inline constexpr uint64_t kSetupSettleTicks = 150u; // the words lead the screen; settle past the flip
 inline constexpr int kPressBudget = 48;
-inline constexpr int kPeakTries = 12; // accept-only fallback attempts (P3: 8 exhausted on walker-messed states)
-inline constexpr int kModeTries = 10; // (P3: 6 exhausted the same way: 6 tries x 4 presses = 24)
+inline constexpr int kPeakTries = 16; // accept-only attempts (P3: 8 exhausted on walker-messed states;
+                                      // Part 2: the same budget also covers transition-eaten accepts)
+inline constexpr int kModeTries = 14; // (P3: 6 exhausted the same way; Part 2: also covers eaten accepts)
 
 enum class NavPhase : uint8_t
 {
@@ -609,18 +610,16 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.sub = 2;
             return pressAccept(kPadCross);
         }
-        if (n.sub == 2)
+        if (n.sub == 2 || n.sub == 6)
         {
-            // Still on Peak: the accept may still be in flight (the retry
-            // below carries the long blind); retry once, then give up.
-            n.sub = 4;
-            return pressAccept(kPadCross);
-        }
-        if (n.sub == 6)
-        {
-            // Still on Peak: the post-back-out accept may still be in
-            // flight; retry once with the long blind, then give up.
-            n.sub = 4;
+            // Still on Peak: the accept was eaten by a transition or is
+            // still in flight. Retry tries-bounded, never the two-strike
+            // give-up: a landed accept changes the screen, so a screen-0
+            // retry is always safe (the Setup->Peak journey outlasts any
+            // fixed blind; the word/entries/object signals all lead it).
+            if (++n.tries >= kPeakTries)
+                return abort(); // never converging (or locked)
+            n.sub = 2;
             return pressAccept(kPadCross);
         }
         if (n.sub == 7)
@@ -739,14 +738,12 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.sub = 2;
             return pressAccept(kPadCross);
         }
-        if (n.sub == 2)
+        if (n.sub == 2 || n.sub == 6)
         {
-            n.sub = 4;
-            return pressAccept(kPadCross);
-        }
-        if (n.sub == 6)
-        {
-            n.sub = 4;
+            // Still on Mode: same ate-by-transition patience as the peak.
+            if (++n.tries >= kModeTries)
+                return abort(); // never converging
+            n.sub = 2;
             return pressAccept(kPadCross);
         }
         if (n.sub == 7)
@@ -1178,29 +1175,6 @@ inline uint16_t driveOnRead(uint8_t *ram, uint32_t size, uint32_t controller, ui
         d.armed = false;
         aborted = true;
         return 0u;
-    }
-    // TEMP-DIAG (lane scratch, revert before commit): per-read EVAL trace.
-    static const bool tknavTrace = std::getenv("PS2X_TKNAV_TRACE") != nullptr;
-    if (tknavTrace)
-    {
-        uint32_t sobj = 0, sobj38 = 0, sobj3c = 0;
-        if (controller + 0x2ecu <= size - 4u)
-        {
-            sobj = ps2_ssx3_tricky::rd32(ram, controller + 0x2e8u);
-            if (sobj + 0x40u <= size && sobj >= 0x1000u)
-            {
-                sobj38 = ps2_ssx3_tricky::rd32(ram, sobj + 0x38u);
-                sobj3c = ps2_ssx3_tricky::rd32(ram, sobj + 0x3cu);
-            }
-        }
-        std::fprintf(stderr,
-                     "[tknav] tick=%llu phase=%d screen=%d peakOk=%d peak=%u typeOk=%d type=%u row=%d sub=%d "
-                     "tries=%d blind=%llu mask=%04x sobj=%x+%x/%x entries=%llu\n",
-                     static_cast<unsigned long long>(tick), static_cast<int>(d.nav.phase), v.screen,
-                     v.peakOk ? 1 : 0, v.peakOk ? v.peak : 0u, v.typeOk ? 1 : 0, v.typeOk ? v.type : 0u, v.row,
-                     d.nav.sub, d.nav.tries, static_cast<unsigned long long>(d.nav.blindUntil), o.mask, sobj,
-                     sobj38, sobj3c,
-                     static_cast<unsigned long long>(ps2_ssx3_tricky::state().mapEntries));
     }
     return o.mask;
 }

@@ -678,6 +678,81 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(o.aborted, "aborts");
             t.Equals(o.mask, 0, "pad released"); });
 
+        tc.Run("eaten Peak accepts retry tries-bounded, then ride", [](TestCase &t)
+               {
+            // The Setup->Peak journey eats accepts (no screen change): the
+            // navigator retries instead of the two-strike give-up. Guest
+            // eats the first 3 Peak accepts, then answers (60-tick flips).
+            const CourseOption goal = kCourses[0].opts[0]; // Garibaldi P1 Race
+            NavState n;
+            navStart(n, goal, 0, 0);
+            int screen = 0, eatsLeft = 3;
+            int pending = -1;
+            uint64_t flipAt = 0;
+            bool left = false;
+            const auto view = [&]() {
+                FeView v;
+                if (left)
+                {
+                    v.mapLive = false;
+                    return v;
+                }
+                auto ram = viewRam(static_cast<uint32_t>(screen), 0, 0, 0, 0x600000, 0x601000, 0x602000);
+                return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            };
+            const auto apply = [&](uint16_t mask, uint64_t tick) {
+                if (mask != kPadCross)
+                    return;
+                if (screen == 2)
+                {
+                    left = true; // goal row 0: the accept leaves the Map screens
+                    return;
+                }
+                if (screen == 0 && eatsLeft > 0)
+                {
+                    --eatsLeft; // eaten by the transition: no effect
+                    return;
+                }
+                pending = screen + 1;
+                flipAt = tick + 60;
+            };
+            uint64_t tick = 0;
+            uint16_t lastOut = 0;
+            for (int i = 0; i < 3000 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            {
+                if (pending >= 0 && tick >= flipAt)
+                {
+                    screen = pending;
+                    pending = -1;
+                }
+                NavOut o = navStep(n, view(), tick, false, false);
+                if (lastOut != 0 && o.mask == 0)
+                    apply(lastOut, tick);
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "rides after retries");
+            t.IsTrue(n.handedOff, "handoff");
+            t.Equals(n.presses, 6, "3 eaten + Peak + Mode + Event accepts"); });
+
+        tc.Run("endlessly-eaten accepts abort at the tries cap", [](TestCase &t)
+               {
+            // Nothing ever lands: the tries cap (not the press budget)
+            // bounds the patience.
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            auto ram = viewRam(0, 0, 0, 0, 0x600000, 0x601000, 0x602000);
+            FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            uint64_t tick = 0;
+            for (int i = 0; i < 4000 && n.phase != NavPhase::Aborted; ++i)
+            {
+                navStep(n, v, tick, false, false);
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "aborts");
+            t.Equals(n.tries, kPeakTries, "tries cap binds");
+            t.Equals(n.presses, kPeakTries, "one press per try"); });
+
         tc.Run("back-out Triangles until the Map screens are left", [](TestCase &t)
                {
             NavState n;
