@@ -4791,6 +4791,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     // preserve-fix-1 P11/P12: seed the per-boot stock donor baseline from
     // pristine RAM (applyFromEnv no longer writes at boot).
     ps2_ssx3_tricky_list::seedMapBaselineFromModes(m_memory.getRDRAM(), PS2_RAM_SIZE);
+    const char *overlayDir = std::getenv("PS2X_CD_OVERLAY");
+    ps2_ssx3_file_table::reset(ps2_ssx3_course::courseModes().armed && overlayDir && *overlayDir);
 
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
     return true;

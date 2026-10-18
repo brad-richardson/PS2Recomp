@@ -290,17 +290,21 @@ inline bool modeSet(uint8_t *ram, bool on, std::string &msg)
     {
         const size_t want = on ? 1u : 0u;
         size_t cur = modeCurrent(ms, ram);
-        if (cur == want)
+        bool matches = cur == want;
+        // A mapped launch can make modeCurrent infer Stock even while
+        // donor fields or the file table still belong to Tricky.
+        for (const ModeField &f : ms.fields)
+        {
+            const auto *v = on ? modeValue(ms.modes[0], f) : nullptr;
+            matches = matches && rdStr(ram, modeFieldAddr(f), modeFieldWidth(f)) == (v ? *v : f.stock);
+        }
+        if (matches && (on || !ps2_ssx3_file_table::state().active))
             return false;
         std::string step;
-        for (size_t k = 0; k <= ms.modes.size() && cur != want; ++k)
+        if (modeApply(ms, ram, want, step) < 0)
         {
-            if (modeNext(ms, ram, step) < 0)
-            {
-                msg = "mode: " + step;
-                return k != 0;
-            }
-            cur = modeCurrent(ms, ram);
+            msg = "mode: " + step;
+            return false;
         }
         msg = std::string("mode: Tricky ") + (on ? "on (course mode " + ms.modes[0].name + ")" : "off (Stock)");
         return true;

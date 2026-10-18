@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_cd_overlay.h"
+#include "ps2_ssx3_file_table.h"
 
 #include <cstring>
 #include <filesystem>
@@ -185,6 +186,102 @@ void register_ps2_cd_overlay_tests()
             t.IsTrue(std::memcmp(&buf[kSec], sec.data(), kSec) == 0, "patched in the middle of a read");
             t.Equals(buf[0], static_cast<uint8_t>(0xAA), "other sectors untouched");
             fs::remove_all(dir); });
+
+        tc.Run("dormant listing preserves the stock boot directory", [](TestCase &t)
+               {
+            const auto img = makeImage();
+            const fs::path dir = makeOverlayDir("dormant", {{"DATA/WORLDS/GARI.BIG", 5000}});
+            ps2_cd_overlay::Overlay ov;
+            std::string err;
+            t.IsTrue(ps2_cd_overlay::build(dir, kImageSectors, reader(img), ov, err), err);
+            ov.listingDormant = true;
+            std::vector<uint8_t> sector(img.begin() + 22 * kSec, img.begin() + 23 * kSec);
+            const auto stock = sector;
+            ov.patchDirSectors(22, 1, sector.data(), sector.size());
+            t.IsTrue(sector == stock, "boot walker must see only stock ISO records");
+            t.IsNotNull(ov.fileFor(ov.files[0].lbn), "pseudo-LBN data remains available for mode-on");
+            fs::remove_all(dir); });
+
+        tc.Run("mode files merge unsigned keys and restore every allocated byte", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_file_table;
+            std::vector<uint8_t> ram(0x600000, 0);
+            constexpr uint32_t base = 0x100000, stride = 268;
+            write32(ram.data() + kBase, base);
+            write32(ram.data() + kNameBytes, 256);
+            write32(ram.data() + kCount, 2);
+            write32(ram.data() + kSeed, 0x12345678);
+            write32(ram.data() + base, 0x7fffffffu);
+            write32(ram.data() + base + stride, 0x80000000u);
+            ram[base + kCapacity * stride - 1] = 0xab;
+            const auto stock = ram;
+            ps2_cd_overlay::Overlay ov;
+            ps2_cd_overlay::OverlayFile f;
+            f.isoPath = "/data/worlds/gari.big;1"; f.lbn = 1000; f.sizeBytes = 5000;
+            ov.files.push_back(f);
+            ps2_cd_overlay::publishRuntimeOverlay(&ov);
+            reset(true);
+            t.IsTrue(ram == stock, "arming is host-only; stock boot RAM unchanged");
+            t.IsTrue(ov.listingDormant, "ISO listing remains dormant");
+            std::string msg;
+            t.IsTrue(transition(ram.data(), ram.size(), true, msg), msg);
+            t.Equals(read32(ram.data() + kCount), 3u, "one free slot used");
+            const auto key = hash("/DATA/WORLDS/GARI.BIG", 0x12345678);
+            t.Equals(hash("/DATA/WORLDS/GARI.BIG", 0x1505u), 0x0363ef6au, "live guest table hash fixture");
+            t.Equals(key, 0xc07056bdu, "reverse-djb2 fixture with live-style seed");
+            bool found = false;
+            for (unsigned i = 0; i < 3; ++i)
+            {
+                const auto *row = ram.data() + base + i * stride;
+                if (i) t.IsTrue(read32(row - stride) < read32(row), "unsigned ordering across sign bit");
+                if (read32(row) != key) continue;
+                found = true;
+                t.Equals(read32(row + 4), 1000u, "overlay pseudo-LBN");
+                t.Equals(read32(row + 8), 5000u, "overlay byte size");
+                t.Equals(std::string(reinterpret_cast<const char *>(row + 12)), std::string("/DATA/WORLDS/GARI.BIG"), "normalized lookup name");
+            }
+            t.IsTrue(found, "overlay hash resolves in live table");
+            const auto active = ram;
+            t.IsTrue(transition(ram.data(), ram.size(), true, msg), msg);
+            t.IsTrue(ram == active, "repeated mode-on is idempotent");
+            t.IsTrue(transition(ram.data(), ram.size(), false, msg), msg);
+            t.IsTrue(ram == stock, "mode-off restores all slots and count byte-exactly");
+            t.IsTrue(transition(ram.data(), ram.size(), true, msg), msg);
+            t.IsTrue(transition(ram.data(), ram.size(), false, msg), msg);
+            t.IsTrue(ram == stock, "second visit restores true stock again");
+            reset(false); ps2_cd_overlay::runtimeOverlay() = nullptr; });
+
+        tc.Run("mode files refuse collisions capacity and invalid layout without writes", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_file_table;
+            std::vector<uint8_t> ram(0x600000, 0);
+            constexpr uint32_t base = 0x100000, stride = 268;
+            write32(ram.data() + kBase, base);
+            write32(ram.data() + kNameBytes, 256);
+            write32(ram.data() + kCount, 1);
+            write32(ram.data() + kSeed, 0);
+            ps2_cd_overlay::Overlay ov;
+            ps2_cd_overlay::OverlayFile f;
+            f.isoPath = "/DATA/WORLDS/GARI.BIG;1"; f.lbn = 1000; f.sizeBytes = 5000;
+            ov.files.push_back(f);
+            ps2_cd_overlay::publishRuntimeOverlay(&ov);
+            reset(true);
+            write32(ram.data() + base, hash("/DATA/WORLDS/GARI.BIG", 0));
+            auto before = ram;
+            std::string msg;
+            t.IsFalse(transition(ram.data(), ram.size(), true, msg), "collision refused");
+            t.IsTrue(msg.find("collision") != std::string::npos, msg);
+            t.IsTrue(ram == before && state().stock.empty(), "collision owns no snapshot or RAM");
+            write32(ram.data() + kCount, kCapacity);
+            before = ram;
+            t.IsFalse(transition(ram.data(), ram.size(), true, msg), "capacity refused");
+            t.IsTrue(ram == before, "capacity refusal is atomic");
+            write32(ram.data() + kCount, 1);
+            write32(ram.data() + kBase, 0x5ffffc);
+            before = ram;
+            t.IsFalse(transition(ram.data(), ram.size(), true, msg), "out-of-RAM allocation refused");
+            t.IsTrue(ram == before, "invalid layout leaves RAM unchanged");
+            reset(false); ps2_cd_overlay::runtimeOverlay() = nullptr; });
 
         tc.Run("refuses loudly", [](TestCase &t)
                {

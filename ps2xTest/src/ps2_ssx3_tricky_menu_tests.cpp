@@ -248,6 +248,27 @@ void register_ps2_ssx3_tricky_menu_tests()
             t.Equals(name0(), std::string("Snow Jam"), "Tricky off: stock name");
             p = Picker{}; });
 
+        tc.Run("mode: mapped donor cannot skip the authoritative stock exit", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            auto ram = stockCourseRam();
+            std::memcpy(&ram[kEventBase + 68], "BAM", 3);
+            std::vector<Block> blocks;
+            std::vector<Mode> modes;
+            std::string err, msg;
+            t.IsTrue(parse("mode = Tricky\nrow = 0:GARI:Garibaldi\n", blocks, err, &modes), err);
+            auto &ms = courseModes();
+            t.IsTrue(armModes(ms, ram.data(), modes, [](const std::string &) {}), "armed");
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), true, msg), msg);
+            wrStr(ram.data(), kEventBase + 68, 16, "ELYS");
+            wrStr(ram.data(), kEventBase + 4, 32, "Elysium Alps");
+            t.Equals(modeCurrent(ms, ram.data()), size_t(0), "mapped donor defeats the all-rows detector");
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), false, msg), "stock exit still restores ownership");
+            t.Equals(rdStr(ram.data(), kEventBase + 68, 16), std::string("BAM"), "true stock archive");
+            t.Equals(rdStr(ram.data(), kEventBase + 4, 32), std::string("Snow Jam"), "true stock name");
+            t.IsFalse(ps2_ssx3_tricky::modeSet(ram.data(), false, msg), "second exit is inert");
+            ms = Modes{}; });
+
         tc.Run("mode: TK9 course mode 1 on, Stock off, across two modes", [](TestCase &t)
                {
             using namespace ps2_ssx3_course;

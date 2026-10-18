@@ -131,6 +131,8 @@ struct Overlay
     uint32_t endLbn = 0;
     std::vector<std::string> log;
 
+    bool listingDormant = false; // SSX3 mode-owned files stay out of its boot walk.
+
     bool contains(uint32_t lbn) const { return !files.empty() && lbn >= firstLbn && lbn < endLbn; }
 
     // Overlay file holding lbn, or nullptr (a gap between files or outside).
@@ -147,7 +149,7 @@ struct Overlay
     // Copy synthetic directory sectors over [lbn, lbn+sectors) of dst.
     void patchDirSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount) const
     {
-        if (!dst)
+        if (!dst || listingDormant)
             return;
         for (const auto &[dirLbn, bytes] : dirSectors)
         {
@@ -161,6 +163,21 @@ struct Overlay
         }
     }
 };
+
+// Runtime publication is host-only. Direct Overlay users retain the
+// directory-patching API; SSX3 defers its listing before the first CD read.
+inline Overlay *&runtimeOverlay() { static Overlay *p = nullptr; return p; }
+inline bool &directoryDormant() { static bool dormant = false; return dormant; }
+inline void setDirectoryDormant(bool dormant)
+{
+    directoryDormant() = dormant;
+    if (runtimeOverlay()) runtimeOverlay()->listingDormant = dormant;
+}
+inline void publishRuntimeOverlay(Overlay *overlay)
+{
+    runtimeOverlay() = overlay;
+    overlay->listingDormant = directoryDormant();
+}
 
 using SectorReader = std::function<bool(uint32_t lbn, uint8_t *dst)>;
 

@@ -546,6 +546,7 @@ namespace
                 delete built;
                 return nullptr;
             }
+            ps2_cd_overlay::publishRuntimeOverlay(built);
             for (const std::string &line : built->log)
             {
                 std::cerr << "[cd-overlay] " << line << std::endl;

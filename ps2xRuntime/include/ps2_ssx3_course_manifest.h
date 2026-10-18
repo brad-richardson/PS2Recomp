@@ -63,6 +63,7 @@
 #include <vector>
 
 #include "ps2_cd_overlay.h"
+#include "ps2_ssx3_file_table.h"
 #include "ps2_ssx3_banner_scope.h"
 
 namespace ps2_ssx3_course
@@ -944,10 +945,10 @@ inline size_t modeCurrent(const Modes &ms, const uint8_t *ram)
     return 0;
 }
 
-// Moves to the next mode. Returns the mode index now in RAM (0 = Stock), or
+// Apply one authoritative target mode. Returns the mode index now in RAM (0 = Stock), or
 // -1 (nothing written) when blocked; `msg` gets the status line, `writes`
 // one line per changed field.
-inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::string> *writes = nullptr)
+inline int modeApply(Modes &ms, uint8_t *ram, size_t next, std::string &msg, std::vector<std::string> *writes = nullptr)
 {
     const std::string why = pickerBlocked(ram);
     if (!why.empty())
@@ -971,8 +972,10 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
         }
     }
     const size_t cur = modeCurrent(ms, ram);
-    const size_t next = (cur + 1u) % (ms.modes.size() + 1u);
+    if (next > ms.modes.size()) { msg = "course modes: invalid target"; return -1; }
     const Mode *target = next ? &ms.modes[next - 1u] : nullptr;
+    if (!ps2_ssx3_file_table::transition(ram, 32u * 1024u * 1024u, target != nullptr, msg))
+        return -1;
     // TKP4b: the aliases follow the mode (off on Stock and on modes without
     // any). Set after the refusal checks above, with the RAM writes.
     if (target && !target->aliases.empty())
@@ -1026,6 +1029,11 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
     msg = "course modes: " + std::string(cur ? ms.modes[cur - 1u].name : "Stock") + " -> " +
           (target ? target->name : "Stock");
     return static_cast<int>(next);
+}
+
+inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::string> *writes = nullptr)
+{
+    return modeApply(ms, ram, (modeCurrent(ms, ram) + 1u) % (ms.modes.size() + 1u), msg, writes);
 }
 
 // Called for every guest scePadRead (port 0) with the 32-byte pad buffer
