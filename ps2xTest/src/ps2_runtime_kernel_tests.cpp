@@ -6,6 +6,7 @@
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_invocation_stacks.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ee_tls_pool.h"
 #if PS2X_ENABLE_DET_HASH_TAP
@@ -15,6 +16,7 @@
 #include "runtime/third_party/xxhash.h"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -856,6 +858,60 @@ void register_ps2_runtime_kernel_tests()
                 last = (slot == tp::kNone) ? tp::kNone : tp::addrOf(slot, kBase, kBlock);
                 t.IsTrue((i < kSlots) == (last != tp::kNone), "first 256 carves serve, 257th fails");
             }
+        });
+        tc.Run("invocation stacks stay bounded across many short-lived threads", [](TestCase &t)
+        {
+            namespace st = ps2_ee_invocation_stacks;
+            // The band of PS2X_HLE_POOLS_LOW=1: [0xB2000, 0x100000), 19 x 16 KB.
+            uint32_t bandTop = 0x100000u;
+            uint32_t carved = 0u;
+            auto carve = [&]() -> uint32_t {
+                if (bandTop < 0xB2000u + 0x4000u)
+                    return 0u;
+                const uint32_t top = bandTop;
+                bandTop -= 0x4000u;
+                ++carved;
+                return top;
+            };
+            st::Map map;
+            // Two long-lived threads with nested invocations, as at boot.
+            for (uint32_t d = 0u; d < 3u; ++d)
+            {
+                t.IsTrue(st::take(map, st::key(1, d), carve) != 0u, "main thread stack");
+                t.IsTrue(st::take(map, st::key(-1, d), carve) != 0u, "dispatcher stack");
+            }
+            // 2000 short-lived threads cycling ids 2..255 (online), each
+            // taking an interrupt at depth 0 and a nested callback at depth 1.
+            bool allServed = true;
+            for (int i = 0; i < 2000; ++i)
+            {
+                const int id = 2 + (i % 254);
+                allServed = st::take(map, st::key(id, 0u), carve) != 0u && allServed;
+                allServed = st::take(map, st::key(id, 1u), carve) != 0u && allServed;
+                st::release(map, id); // the thread exits (dormant)
+            }
+            t.IsTrue(allServed, "every invocation got a stack");
+            t.Equals(carved, 8u, "6 long-lived + 2 recycled: no growth with thread churn");
+            const uint32_t mainTop = st::take(map, st::key(1, 0u), carve);
+            t.IsTrue(mainTop == 0x100000u, "live entries keep their stacks");
+            // Overlapping lives: 5 threads alive at once need 10 stacks.
+            for (int id = 2; id < 7; ++id)
+            {
+                st::take(map, st::key(id, 0u), carve);
+                st::take(map, st::key(id, 1u), carve);
+            }
+            t.Equals(carved, 16u, "concurrent threads carve only the extra stacks");
+            for (int id = 2; id < 7; ++id)
+                t.Equals(static_cast<unsigned>(st::release(map, id)), 2u, "release returns both depths");
+            // The free list rides in the map (savestate format unchanged).
+            st::Map restored = map;
+            const uint32_t reused = st::take(restored, st::key(9, 0u), carve);
+            t.IsTrue(reused != 0u && carved == 16u, "a restored map reuses a freed stack");
+            std::vector<uint32_t> tops;
+            for (const auto &[k, v] : restored)
+                tops.push_back(v);
+            std::sort(tops.begin(), tops.end());
+            t.IsTrue(std::adjacent_find(tops.begin(), tops.end()) == tops.end(), "no stack is handed out twice");
         });
 
         tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)

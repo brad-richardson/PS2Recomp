@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "runtime/ee_invocation_stacks.h"
 #include "ps2_microvu.h"
 #include "ps2_mtvu.h"
 #include "ps2_pad_latch.h"
@@ -2027,20 +2028,15 @@ uint32_t EeScheduler::invocationStackTop()
         throw std::logic_error("EE invocation stack requested without a current guest context");
     }
     const size_t depth = owner ? owner->invocations.size() : 0u;
-    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(owner->id)) << 32u) |
-                         static_cast<uint32_t>(depth);
-    const auto existing = m_invocationStackTops.find(key);
-    if (existing != m_invocationStackTops.end())
-    {
-        return existing->second;
-    }
+    const uint64_t key = ps2_ee_invocation_stacks::key(owner->id, static_cast<uint32_t>(depth));
     constexpr uint32_t kInvocationStackSize = 0x4000u;
-    const uint32_t top = m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
+    const uint32_t top = ps2_ee_invocation_stacks::take(m_invocationStackTops, key, [this] {
+        return m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
+    });
     if (top == 0u)
     {
         throw std::runtime_error("EE invocation stack space exhausted");
     }
-    m_invocationStackTops.emplace(key, top);
     return top;
 }
 
@@ -2630,6 +2626,10 @@ void EeScheduler::makeDormant(GuestThread &item)
             ps2_tls_pool::release(g_tls_free, slot, g_tls_index, kTlsPoolCount);
         item.tlsBase = 0;
     }
+    // A dormant guest thread holds no invocation: return its stacks for
+    // reuse (dispatcher threads, id < 0, are recycled whole instead).
+    if (item.id > 0)
+        ps2_ee_invocation_stacks::release(m_invocationStackTops, item.id);
 }
 
 void EeScheduler::removeFromWaitObject(GuestThread &item)
