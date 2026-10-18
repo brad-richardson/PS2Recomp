@@ -74,9 +74,8 @@ these adapters are GPL-3.0-or-later. Optional Turnip comes from
 [Mesa fork sources](https://github.com/brad-richardson/mesa/tree/ssx3), mostly
 MIT with component-specific notices
 ([inventory](https://github.com/brad-richardson/mesa/blob/ssx3/docs/license.rst)).
-SoundTouch, rcheevos and fetched libraries retain their own notices
-([SoundTouch](../ps2xRuntime/third_party/soundtouch/README.at1.md),
-[rcheevos licence](../ps2xRuntime/third_party/rcheevos/LICENSE)). Record exact
+SoundTouch and fetched libraries retain their own notices
+([SoundTouch](../ps2xRuntime/third_party/soundtouch/README.at1.md)). Record exact
 source revisions and applicable notices for the components you build.
 Software licences do not authorize distributing game-derived assets.
 

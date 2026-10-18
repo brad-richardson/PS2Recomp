@@ -51,7 +51,7 @@ target_link_libraries(ps2EntryRunner PRIVATE
     -Wl,--whole-archive "${_lib}/libps2EntryRunner.a" -Wl,--no-whole-archive
     -Wl,--start-group ps2_game_objects "${_lib}/libps2_runtime.a"
     "${_lib}/libps2_gs_shadow.a" "${_lib}/libps2_iop.a"
-    "${_lib}/libps2x_soundtouch.a" "${_lib}/libps2x_rcheevos.a" "${_lib}/libraylib.a"
+    "${_lib}/libps2x_soundtouch.a" "${_lib}/libraylib.a"
     -Wl,--end-group android EGL GLESv2 OpenSLES log m dl atomic)
 if(PS2X_THINLTO_CACHE_DIR)
     target_link_options(ps2EntryRunner PRIVATE "-Wl,--thinlto-cache-dir=${PS2X_THINLTO_CACHE_DIR}"
