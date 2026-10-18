@@ -1126,11 +1126,19 @@ inline void applyFromEnv(uint8_t *ram)
     for (Mode &m : modes)
         for (ModeAlias &a : m.aliases)
             a.host = resolveAliasHost(path, a.host);
-    log(std::string("applying ") + path);
-    const int n = apply(ram, blocks, log);
-    if (n < 0)
+    log(std::string("parsed ") + path);
+    // preserve-fix-1 P11/P12: event blocks are never written at boot. The
+    // guest keeps exact stock bytes; modes arm from pristine RAM and apply
+    // their rows/pokes/aliases only on mode-on (modeNext), restoring the
+    // captured stock on mode-off. apply() below stays as the tested block
+    // writer for explicit use; the boot path must not call it.
+    std::string verr;
+    if (verifyTables(ram, verr) != 0u)
+    {
+        log("refused: table mismatch (" + verr + "); nothing armed");
         return;
-    log("applied " + std::to_string(n) + " writes in " + std::to_string(blocks.size()) + " event blocks");
+    }
+    log("verified tables, 0 boot writes in " + std::to_string(blocks.size()) + " event blocks");
     bool hasPicker = false;
     for (const Block &b : blocks)
         hasPicker = hasPicker || !b.picker.empty();

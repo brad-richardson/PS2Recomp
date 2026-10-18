@@ -4788,6 +4788,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     // TK2: host course manifest (PS2X_SSX3_COURSE_MANIFEST, default off).
     ps2_ssx3_course::applyFromEnv(m_memory.getRDRAM());
+    // preserve-fix-1 P11/P12: seed the per-boot stock donor baseline from
+    // pristine RAM (applyFromEnv no longer writes at boot).
+    ps2_ssx3_tricky_list::seedMapBaselineFromModes(m_memory.getRDRAM(), PS2_RAM_SIZE);
 
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
     return true;

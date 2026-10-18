@@ -522,6 +522,64 @@ void register_ps2_ssx3_tricky_list_tests()
                      "ev14 name stock again");
             t.IsTrue(restoreAllCourseMaps(ram.data(), size), "second restore no-op"); });
 
+        tc.Run("preserve-fix-1 boot seeding keeps true stock across Tricky-mapped first maps", [](TestCase &t)
+               {
+            // Table P D1: the first map used to capture the already-Tricky
+            // donor (GARI for event 0, ALOHA for 14), so every later restore
+            // reinstalled the donor. Seeding from pristine boot RAM before
+            // any mode write keeps TRUE stock. Uses ev2/ev4 (no other test
+            // maps them) and resets the process-wide statics afterwards.
+            mapState() = MapState{};
+            ps2_ssx3_course::courseModes() = ps2_ssx3_course::Modes{};
+            const uint32_t size = kMapEventBase + 4u * kMapEventStride + kMapArchiveOff + kMapArchiveLen;
+            std::vector<uint8_t> ram(size, 0);
+            auto field = [&](int ev, uint32_t off) -> uint8_t * { return ram.data() + kMapEventBase + ev * kMapEventStride + off; };
+            std::memcpy(field(2, kMapArchiveOff), "MESA", 5);
+            std::memcpy(field(2, kMapNameOff), "Mesablanca", 11);
+            std::memcpy(field(4, kMapArchiveOff), "BAM", 4);
+            std::memcpy(field(4, kMapNameOff), "Metro City", 11);
+            ps2_ssx3_course::Mode mode;
+            mode.name = "Tricky";
+            ps2_ssx3_course::ModeRow r2;
+            r2.event = 2;
+            r2.archive = "SNOW";
+            r2.name = "Snowdream";
+            ps2_ssx3_course::ModeRow r4;
+            r4.event = 4;
+            r4.archive = "MERQ";
+            r4.name = "Merqury City";
+            mode.rows.push_back(r2);
+            mode.rows.push_back(r4);
+            t.IsTrue(ps2_ssx3_course::courseModes().modes.empty(), "modes start disarmed");
+            {
+                auto sink = [](const std::string &) {};
+                t.IsTrue(armModes(ps2_ssx3_course::courseModes(), ram.data(), std::vector<ps2_ssx3_course::Mode>{mode}, sink),
+                         "modes arm on pristine RAM");
+            }
+            seedMapBaselineFromModes(ram.data(), size);
+            t.IsTrue(mapState().snapHave[2] && mapState().snapHave[4], "seeded both donors");
+            t.Equals(std::strcmp(mapState().snapArchive[2], "MESA"), 0, "ev2 archive true stock");
+            t.Equals(std::strcmp(mapState().snapArchive[4], "BAM"), 0, "ev4 archive true stock");
+            // The exact D1 order: the menu-entry mapping lands FIRST (donor
+            // in RAM), then a second launch maps another donor. Pre-fix the
+            // first map's lazy snapshot captures the Tricky donor, so every
+            // later restore reinstalls it; seeded baselines keep true stock.
+            MapSpec first{2, "SNOW", "Snowdream"};
+            MapSpec second{4, "MERQ", "Merqury City"};
+            t.IsTrue(applyCourseMap(ram.data(), size, first), "menu-entry launch maps ev2");
+            t.IsTrue(applyCourseMap(ram.data(), size, second), "second launch maps ev4");
+            t.Equals(std::strcmp(mapState().snapArchive[2], "MESA"), 0, "ev2 snapshot still true stock");
+            t.Equals(std::strcmp(mapState().snapArchive[4], "BAM"), 0, "ev4 snapshot still true stock");
+            t.IsTrue(restoreAllCourseMaps(ram.data(), size), "restore all");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(2, kMapArchiveOff)), "MESA"), 0,
+                     "ev2 archive true stock again");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(2, kMapNameOff)), "Mesablanca"), 0,
+                     "ev2 name true stock again");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(4, kMapArchiveOff)), "BAM"), 0,
+                     "ev4 archive true stock again");
+            mapState() = MapState{};
+            ps2_ssx3_course::courseModes() = ps2_ssx3_course::Modes{}; });
+
         tc.Run("navigator aborts with the pad released when the view goes blind", [](TestCase &t)
                {
             NavState n;

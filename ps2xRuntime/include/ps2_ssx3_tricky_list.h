@@ -1055,6 +1055,9 @@ inline bool applyCourseMap(uint8_t *ram, uint32_t size, const MapSpec &spec)
     if (!aSrc || !nSrc)
         return false;
     MapState &st = mapState();
+    // Backstop only: boot seeding (seedMapBaselineFromModes) captures true
+    // stock for every armed mode-row event. This fires solely for events
+    // mapped without an armed manifest.
     if (!st.snapHave[spec.event])
     {
         mapRead(st.snapArchive[spec.event], kMapArchiveLen, aSrc);
@@ -1135,6 +1138,37 @@ inline bool restoreAllCourseMaps(uint8_t *ram, uint32_t size)
     }
     st.activeEvent = -1;
     return ok;
+}
+
+// preserve-fix-1 P11/P12 (Table P D1): seed the per-boot stock baseline for
+// every donor event any armed course mode touches, from pristine boot RAM —
+// before any mode write. Called once at loadELF after applyFromEnv (which no
+// longer writes at boot). After this, restore paths always return TRUE stock,
+// never an in-mode snapshot: the first-map lazy snapshot in applyCourseMap
+// stays only as a backstop for events mapped without an armed manifest.
+inline void seedMapBaselineFromModes(const uint8_t *ram, uint32_t size)
+{
+    MapState &st = mapState();
+    if (!ram)
+        return;
+    const ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
+    if (!ms.armed)
+        return;
+    for (const ps2_ssx3_course::ModeField &f : ms.fields)
+    {
+        const int ev = f.event;
+        if (ev < 0 || ev > kMapDonorMax || st.snapHave[ev])
+            continue;
+        const uint8_t *aSrc = mapField(ram, size, ev, kMapArchiveOff, kMapArchiveLen);
+        const uint8_t *nSrc = mapField(ram, size, ev, kMapNameOff, kMapNameLen);
+        if (!aSrc || !nSrc)
+            continue;
+        mapRead(st.snapArchive[ev], kMapArchiveLen, aSrc);
+        mapRead(st.snapName[ev], kMapNameLen, nSrc);
+        st.snapHave[ev] = true;
+        std::fprintf(stderr, "[tklist] baseline ev%d stock archive=\"%s\" name=\"%s\"\n", ev, st.snapArchive[ev],
+                     st.snapName[ev]);
+    }
 }
 
 // ---- Cross-thread drive (game-thread merge, ONL10 precedent) -------------

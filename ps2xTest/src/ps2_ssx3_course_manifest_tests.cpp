@@ -539,6 +539,66 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(rel, (root / "rel-speech").lexically_normal().string(), "relative host resolved");
             t.Equals(abs, std::string("/abs/music-big"), "absolute host unchanged"); });
 
+        tc.Run("preserve-fix-1 boot writes no event blocks; modes arm from pristine RAM", [](TestCase &t)
+               {
+            // Table P P11/P12: a manifest carrying an event sky block plus
+            // mode rows must leave every stock byte alone at boot. Pre-fix
+            // applyFromEnv wrote the blocks (sky 48->46); post-fix it only
+            // verifies and arms, so f.stock is true stock.
+            using namespace ps2_ssx3_course;
+            namespace fs = std::filesystem;
+            const fs::path root = fs::temp_directory_path() / "ps2x-preserve-fix-1-manifest";
+            fs::remove_all(root);
+            fs::create_directories(root);
+            const fs::path mf = root / "m-tricky.txt";
+            {
+                std::ofstream out(mf, std::ios::binary);
+                out << "mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                       "poke = 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big\n"
+                       "alias = /DATA/AUDIO/SPEECH.BIG:rel-speech\n"
+                       "event = 16\nsky = 46\n";
+            }
+            auto ram = stockTables();
+            const char oldPoke[] = "data/ui/courspic.big";
+            std::memcpy(&ram[0x47BDB0], oldPoke, sizeof(oldPoke) - 1);
+            const uint32_t skyAddr = kTopoBase + 16u * kTopoStride + 8u;
+            const int32_t stockSky = 48;
+            std::memcpy(&ram[skyAddr], &stockSky, 4);
+            ::setenv("PS2X_SSX3_COURSE_MANIFEST", mf.string().c_str(), 1);
+            ::setenv("PS2X_SSX3_COURSE_PICKER", "1", 1);
+            ::setenv("PS2X_SSX3_TRICKY_MENU", "1", 1);
+            ::setenv("PS2X_SSX3_TRICKY_MUSIC_INF", "/host/music-inf-tricky-big", 1);
+            applyFromEnv(ram.data());
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "event-block manifest still serves stock boot INF");
+            const bool armed = courseModes().armed;
+            std::string ev0Archive, ev0Name;
+            int sky = 0;
+            if (armed)
+            {
+                for (const ModeField &f : courseModes().fields)
+                {
+                    if (f.event == 0 && f.archive)
+                        ev0Archive = f.stock;
+                    if (f.event == 0 && !f.archive)
+                        ev0Name = f.stock;
+                }
+                std::memcpy(&sky, &ram[skyAddr], 4);
+            }
+            const bool rowsPristine =
+                std::strcmp(reinterpret_cast<const char *>(&ram[kEventBase + 0 * kEventStride + 68]), "BAM") == 0;
+            ::unsetenv("PS2X_SSX3_COURSE_MANIFEST");
+            ::unsetenv("PS2X_SSX3_COURSE_PICKER");
+            ::unsetenv("PS2X_SSX3_TRICKY_MENU");
+            ::unsetenv("PS2X_SSX3_TRICKY_MUSIC_INF");
+            courseModes() = Modes{};
+            ps2_cd_overlay::clearModeAlias();
+            fs::remove_all(root);
+            t.IsTrue(armed, "mode armed");
+            t.Equals(sky, 48, "sky block not written at boot");
+            t.IsTrue(rowsPristine, "event rows untouched at boot");
+            t.Equals(ev0Archive, std::string("BAM"), "f.stock archive is true stock");
+            t.Equals(ev0Name, std::string("Snow Jam"), "f.stock name is true stock"); });
+
         tc.Run("tk-banner-2 boot serves the stock INF (no boot alias)", [](TestCase &t)
                {
             using namespace ps2_ssx3_course;
