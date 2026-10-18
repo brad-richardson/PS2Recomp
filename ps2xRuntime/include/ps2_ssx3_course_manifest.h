@@ -23,7 +23,8 @@
 //   block per manifest): extra courses for this event's slot. See the picker
 //   section below; inert unless PS2X_SSX3_COURSE_PICKER=1.
 // `mode = <name>` (TK9, <= 7 per manifest) opens a named mode block instead
-// of an event block; it holds only these keys, applied as a set by the chord:
+// of an event block; it holds only these keys, applied as a set on mode-on
+// (menu entry through modeSet; preserve-fix-1 removed the L3+R3 chord):
 //   row = <event 0-22>:<archive|->:<name|->  (the event's world archive +68
 //     and/or name +4 while the mode is on; `-` keeps the field; one per event)
 //   poke = 0x<va>:<old>:<new>  (same-length printable string swap, no ':'
@@ -56,7 +57,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -491,7 +491,7 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
         for (const Block &b : out)
             if (!b.picker.empty())
             {
-                err = "picker entries and modes in one manifest (both use the L3+R3 chord)";
+                err = "picker entries and modes in one manifest (they would fight over the event rows)";
                 return false;
             }
     if (modes)
@@ -632,11 +632,10 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
 // list shows a pick only from the next frontend build. The status line /
 // Android toast (the caller) shows it at once.
 //
-// Input: L3+R3 pressed together (edge) with SELECT up, read from the pad
-// buffer the guest gets from scePadRead (port 0), so a pad script drives it
-// deterministically. DS1 owns SELECT+L3/R3; the stock game ignores L3+R3 at
-// Select Event (TK7 e1). While the chord is held the picker hides L3+R3
-// from the guest.
+// preserve-fix-1 P04/P16: no pad trigger — the L3+R3 chord is removed, so
+// pickerNext/modeNext below run only from explicit callers (menu entry/exit
+// through modeSet) and tests. L3+R3 always reach the guest; DS1 owns
+// SELECT+L3/R3 and the input marker owns its own chord.
 //
 // Safe point: no event is live and nothing is loading.
 //   - Live event: the app-update dispatch (0x3171B4, `jalr` through
@@ -647,7 +646,7 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
 //     no signal: it stays set after a quit (TK7 e5).
 //   - Loading: no ELF location slot (0x442168, 50 x 16 B, +8 state) is in
 //     state 8 (load requested; TK5 d1).
-// Outside that the chord is refused and logged, so a running or loading
+// Outside that the switch is refused and logged, so a running or loading
 // event never sees its row change.
 //
 // The current entry is derived from RAM (the event's topology location) on
@@ -668,7 +667,8 @@ struct Picker
     bool armed = false;
     int event = -1;
     std::vector<PickerEntry> entries; // [0] = the event's row after apply
-    bool chordWas = false;
+    // preserve-fix-1 P04/P16: no chord edge state — the L3+R3 switch is
+    // removed and pickerOnPadRead never consumes pad input.
 };
 
 inline Picker &picker()
@@ -718,7 +718,7 @@ inline bool armPicker(Picker &p, const uint8_t *ram, const std::vector<Block> &b
         std::string list;
         for (const PickerEntry &e : p.entries)
             list += (list.empty() ? "" : ", ") + std::to_string(e.location) + ":" + e.name;
-        log("picker: armed on event " + std::to_string(b.event) + " [" + list + "], chord L3+R3 in the menus");
+        log("picker: armed on event " + std::to_string(b.event) + " [" + list + "], menu entry only (no chord)");
         return true;
     }
     return false;
@@ -784,11 +784,12 @@ inline int pickerNext(Picker &p, uint8_t *ram, std::string &msg)
     return static_cast<int>(next);
 }
 
-// ---- Course modes (TK9; same knob and chord as the picker) ---------------
+// ---- Course modes (TK9; same knob as the picker) ---------------------------
 // A mode is a named set of event-row fields (world archive +68, name +4) plus
-// same-length RAM string pokes, switched as one unit by the L3+R3 chord:
-// Stock -> mode 1 -> ... -> mode N -> Stock. "Stock" is the rows as the
-// manifest's event blocks left them (read back at arm time) and every poke's
+// same-length RAM string pokes, switched as one unit on menu entry/exit
+// through modeSet (preserve-fix-1 removed the L3+R3 chord):
+// Stock -> mode 1 -> ... -> mode N -> Stock. "Stock" is the pristine boot
+// rows (read back at arm time; no manifest writes at boot) and every poke's
 // old string. Why this is enough (TK8 §3a): game-app init 0x22F6B0 builds
 // "data/worlds/" + row+0x44 + ".big" at each event start, and the loading
 // screen copies its COURSPIC path from 0x47BDB0 (func_3168B0) at each event
@@ -920,7 +921,7 @@ inline bool armModes(Modes &ms, const uint8_t *ram, const std::vector<Mode> &mod
                                    : m.aliases.size() == 1 ? ", alias"
                                                            : ", " + std::to_string(m.aliases.size()) + " aliases") +
                 ")";
-    log("modes: armed [" + list + "], chord L3+R3 in the menus");
+    log("modes: armed [" + list + "], menu entry only (no chord)");
     return true;
 }
 
@@ -1028,66 +1029,26 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
 }
 
 // Called for every guest scePadRead (port 0) with the 32-byte pad buffer
-// the guest receives. `vsyncTick` only labels the log line. Returns true
-// with `status` set only when the chord switched something (the caller shows
-// it: status line + Android toast via ps2_savestate::noteQuickStatus).
-// A refused chord (event live/loading) only logs and returns false, so the
-// L3+R3 input-mark confirm keeps its own toast.
+// the guest receives. preserve-fix-1 P04/P16: the L3+R3 course-mode switch is
+// removed — the Tricky menu entry is the only way into Tricky, and L3/R3
+// always reach the guest untouched (the input marker owns its own L3+R3
+// chord). This keeps only the lazy banner sync; it never sets `status`,
+// never touches `pad`, and always returns false. `vsyncTick` only labels the
+// log line.
 inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std::string &status)
 {
-    Picker &p = picker();
+    (void)pad;
+    (void)status;
     Modes &ms = courseModes();
-    if ((!p.armed && !ms.armed) || !ram || !pad) // armed is set once in loadELF, before the EE runs
+    if (!ms.armed || !ram) // armed is set once in loadELF, before the EE runs
         return false;
     // tk-banner-2: lazy post-parse banner sync. The guest parses MUSIC.INF
     // after loadELF, so the boot window's first sync can only run once the
     // tables exist; afterwards this fast-paths (record-0 match) and only
     // re-syncs on a real change (mode switch writes go through modeNext,
     // a savestate load shows up as a mismatch).
-    if (ms.armed)
-        banner::ensureSynced(ram, ms, vsyncTick);
-    static std::mutex mu; // pad reads come from the EE thread; the lock only guards chordWas
-    std::lock_guard<std::mutex> lock(mu);
-    const uint16_t buttons = static_cast<uint16_t>(pad[2] | (pad[3] << 8));
-    const bool chord = (buttons & (kBtnL3 | kBtnR3)) == 0u && (buttons & kBtnSelect) != 0u;
-    const bool fired = chord && !p.chordWas;
-    // set2-polish-1 (Brad 10-16): a refusal ("not now, an event is live")
-    // shares the L3+R3 input-mark chord, so it stays in the log only — no
-    // status/toast. Only a real switch confirms ("Mode: X" / "Course: X").
-    bool confirm = false;
-    if (fired)
-    {
-        std::string msg;
-        if (ms.armed)
-        {
-            std::vector<std::string> writes;
-            const int idx = modeNext(ms, ram, msg, &writes);
-            std::fprintf(stderr, "[ssx3-course] tick=%llu %s\n", static_cast<unsigned long long>(vsyncTick),
-                         msg.c_str());
-            for (const std::string &w : writes)
-                std::fprintf(stderr, "[ssx3-course]   %s\n", w.c_str());
-            if (idx >= 0)
-            {
-                status = "Mode: " + std::string(idx ? ms.modes[static_cast<size_t>(idx) - 1u].name : "Stock");
-                confirm = true;
-            }
-        }
-        else
-        {
-            const int idx = pickerNext(p, ram, msg);
-            std::fprintf(stderr, "[ssx3-course] tick=%llu %s\n", static_cast<unsigned long long>(vsyncTick),
-                         msg.c_str());
-            if (idx >= 0)
-            {
-                status = "Course: " + p.entries[static_cast<size_t>(idx)].name;
-                confirm = true;
-            }
-        }
-    }
-    p.chordWas = chord;
-    if (chord)
-        pad[2] = static_cast<uint8_t>(pad[2] | kBtnL3 | kBtnR3);
-    return fired && confirm;
+    banner::ensureSynced(ram, ms, vsyncTick);
+    return false;
 }
 
 // tk-banner-2: the boot serves the stock DATA/CONFIG/MUSIC.INF off the

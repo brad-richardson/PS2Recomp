@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_course_manifest.h"
+#include "ps2_ssx3_tricky_menu.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -142,7 +143,7 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsTrue(parse("event = 0\narchive = GARI\n", nb, err), err.c_str());
             t.IsFalse(armPicker(none, ram.data(), nb, [](const std::string &) {}), "no entries, not armed"); });
 
-        tc.Run("picker cycles on the L3+R3 edge, hides the chord, and refuses during an event", [](TestCase &t)
+        tc.Run("preserve-fix-1 P04/P16: the L3+R3 chord is inert and passes through", [](TestCase &t)
                {
             using namespace ps2_ssx3_course;
             auto ram = stockTables();
@@ -156,36 +157,40 @@ void register_ps2_ssx3_course_manifest_tests()
             auto name0 = [&] { return std::string(reinterpret_cast<const char *>(&ram[0x43D950 + 4])); };
 
             auto idle = padBuffer(0);
-            pickerOnPadRead(ram.data(), idle.data(), 1, status);
+            t.IsFalse(pickerOnPadRead(ram.data(), idle.data(), 1, status), "idle: nothing");
             t.Equals(topoLocation(ram, 0), 0, "no chord, no switch");
+            t.Equals(status, std::string(), "status untouched");
 
             auto l3 = padBuffer(kBtnL3);
-            pickerOnPadRead(ram.data(), l3.data(), 2, status);
+            t.IsFalse(pickerOnPadRead(ram.data(), l3.data(), 2, status), "L3 alone: nothing");
             t.Equals(topoLocation(ram, 0), 0, "L3 alone does nothing");
             t.Equals(l3[2], padBuffer(kBtnL3)[2], "L3 alone reaches the guest");
 
+            // The removed switch: the chord used to cycle entry 0 ->
+            // Garibaldi and hide L3+R3 from the guest. Now nothing switches
+            // and every button reaches the guest; the menu entry is the only
+            // path in.
             auto chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), chord.data(), 3, status);
-            t.Equals(topoLocation(ram, 0), 49, "switched to Garibaldi");
-            t.Equals(name0(), std::string("Garibaldi"), "name follows");
-            t.Equals(status, std::string("Course: Garibaldi"), "status line");
-            t.Equals(chord[2], static_cast<uint8_t>(0xFF), "chord hidden from the guest");
+            t.IsFalse(pickerOnPadRead(ram.data(), chord.data(), 3, status), "chord: nothing");
+            t.Equals(topoLocation(ram, 0), 0, "chord does not switch");
+            t.Equals(name0(), std::string("Snow Jam"), "name stays stock");
+            t.Equals(status, std::string(), "no status line");
+            t.Equals(chord[2], padBuffer(kBtnL3 | kBtnR3)[2], "chord reaches the guest");
             auto held = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), held.data(), 4, status);
-            t.Equals(topoLocation(ram, 0), 49, "held chord does not repeat");
+            t.IsFalse(pickerOnPadRead(ram.data(), held.data(), 4, status), "held chord: nothing");
+            t.Equals(topoLocation(ram, 0), 0, "held chord still does nothing");
 
             auto withSelect = padBuffer(kBtnSelect | kBtnL3 | kBtnR3);
             pickerOnPadRead(ram.data(), idle.data(), 5, status);
-            pickerOnPadRead(ram.data(), withSelect.data(), 6, status);
-            t.Equals(topoLocation(ram, 0), 49, "SELECT held = DS1's chord, not ours");
+            t.IsFalse(pickerOnPadRead(ram.data(), withSelect.data(), 6, status), "DS1 chord: nothing");
+            t.Equals(topoLocation(ram, 0), 0, "SELECT held = DS1's chord, not ours");
             t.Equals(withSelect[2], padBuffer(kBtnSelect | kBtnL3 | kBtnR3)[2], "DS1 chord untouched");
 
             pickerOnPadRead(ram.data(), idle.data(), 7, status);
             auto again = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), again.data(), 8, status);
-            t.Equals(topoLocation(ram, 0), 0, "cycles back to stock");
-            t.Equals(name0(), std::string("Snow Jam"), "stock name back");
-            t.IsTrue(ram[0x43D950 + 4 + 8] == 0, "name NUL-padded");
+            t.IsFalse(pickerOnPadRead(ram.data(), again.data(), 8, status), "chord again: nothing");
+            t.Equals(topoLocation(ram, 0), 0, "never leaves stock");
+            t.Equals(name0(), std::string("Snow Jam"), "stock name kept");
 
             // In an event: 0x4A5B64 -> A, [A] = app, [app] = vtable, +0x34 = 0x2306B8 (KSEG0 pointers).
             const uint32_t mgr = 0x80C00000u, app = 0x00C00100u, vt = 0x00C00200u, fn = kGameUpdate;
@@ -196,13 +201,12 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(appUpdateFn(ram.data()), kGameUpdate, "pointer chain");
             pickerOnPadRead(ram.data(), idle.data(), 9, status);
             auto live = padBuffer(kBtnL3 | kBtnR3);
-            // set2-polish-1 (Brad 10-16): a refused chord shares the L3+R3
-            // input-mark chord, so it only logs — no status/toast. The
-            // marker keeps its own "input marked" confirm instead.
-            t.IsFalse(pickerOnPadRead(ram.data(), live.data(), 10, status), "refused: no confirm");
-            t.Equals(topoLocation(ram, 0), 0, "refused while an event is live");
-            t.Equals(status, std::string("Course: Snow Jam"), "status keeps the last real switch");
-            t.Equals(live[2], static_cast<uint8_t>(0xFF), "refused chord still hidden from the guest");
+            // No switch exists to refuse: the chord passes through even with
+            // a live event, and the input marker owns its own L3+R3 chord.
+            t.IsFalse(pickerOnPadRead(ram.data(), live.data(), 10, status), "live event: nothing");
+            t.Equals(topoLocation(ram, 0), 0, "nothing while an event is live");
+            t.Equals(status, std::string(), "still no status line");
+            t.Equals(live[2], padBuffer(kBtnL3 | kBtnR3)[2], "live chord reaches the guest");
             const uint32_t frontend = 0x2F0000u, zero = 0u, requested = 8u;
             std::memcpy(&ram[0xC00200 + kAppUpdateSlot], &frontend, 4);
             std::memcpy(&ram[kSlotBase + 49u * kSlotStride + 8u], &requested, 4);
@@ -264,7 +268,7 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsTrue(parse("mode = T\npoke = 0x100:abc:abd\nmode = U\npoke = 0x100:abc:xyz\n", b, err, &m),
                      "same site in two modes"); });
 
-        tc.Run("TK9 modes cycle Stock -> mode -> Stock, poke and undo, derive from RAM, refuse unsafe", [](TestCase &t)
+        tc.Run("preserve-fix-1 P04/P16: modes switch on menu entry/exit (modeSet), never on the chord", [](TestCase &t)
                {
             using namespace ps2_ssx3_course;
             auto ram = stockTables();
@@ -287,39 +291,45 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(modeCurrent(ms, ram.data()), static_cast<size_t>(0), "starts at Stock");
             auto str = [&](uint32_t a) { return std::string(reinterpret_cast<const char *>(&ram[a])); };
 
+            // The removed switch: the chord used to cycle Stock -> Tricky ->
+            // Two here. Menu entry/exit through modeSet is the only path now;
+            // the chord passes through untouched (see the picker case above).
             std::string status;
             auto idle = padBuffer(0);
             auto chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), idle.data(), 1, status);
-            pickerOnPadRead(ram.data(), chord.data(), 2, status);
-            t.Equals(status, std::string("Mode: Tricky"), "status");
+            t.IsFalse(pickerOnPadRead(ram.data(), idle.data(), 1, status), "idle: nothing");
+            t.IsFalse(pickerOnPadRead(ram.data(), chord.data(), 2, status), "chord: nothing");
+            t.Equals(status, std::string(), "no status line");
+            t.Equals(chord[2], padBuffer(kBtnL3 | kBtnR3)[2], "chord reaches the guest");
+            t.Equals(modeCurrent(ms, ram.data()), static_cast<size_t>(0), "still Stock");
+
+            std::string msg;
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), true, msg), "menu entry switches on");
             t.Equals(str(0x43D950 + 68), std::string("GARI"), "archive on");
             t.Equals(str(0x43D950 + 4), std::string("Garibaldi"), "name on");
             t.Equals(str(0x47BDB0), std::string("data/ui/courspit.big"), "poke on");
-            t.Equals(chord[2], static_cast<uint8_t>(0xFF), "chord hidden");
             t.Equals(modeCurrent(ms, ram.data()), static_cast<size_t>(1), "derived: Tricky");
 
-            pickerOnPadRead(ram.data(), idle.data(), 3, status);
-            chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), chord.data(), 4, status);
-            t.Equals(status, std::string("Mode: Two"), "second mode");
-            t.Equals(str(0x43D950 + 68), std::string("BAM"), "Two keeps the stock archive");
-            t.Equals(str(0x43D950 + 4), std::string("Other"), "Two's name");
-            t.Equals(str(0x47BDB0), std::string("data/ui/courspic.big"), "Two has no poke: undone");
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), false, msg), "menu exit switches off");
+            t.Equals(str(0x43D950 + 68), std::string("BAM"), "stock archive back");
+            t.Equals(str(0x43D950 + 4), std::string("Snow Jam"), "stock name back");
+            t.Equals(str(0x47BDB0), std::string("data/ui/courspic.big"), "poke undone");
 
-            std::string msg;
+            // modeNext itself is unchanged (menu entry/exit and other explicit
+            // callers still cycle through it): Stock -> Tricky here.
             std::vector<std::string> w;
-            t.Equals(modeNext(ms, ram.data(), msg, &w), 0, "back to Stock");
-            t.Equals(str(0x43D950 + 4), std::string("Snow Jam"), "stock name");
-            t.IsTrue(ram[0x43D950 + 4 + 8] == 0 && ram[0x43D950 + 4 + 9] == 0, "NUL-padded");
-            t.Equals(w.size(), static_cast<size_t>(1), "one field changed (name)");
+            t.Equals(modeNext(ms, ram.data(), msg, &w), 1, "modeNext still cycles to Tricky");
+            t.Equals(str(0x43D950 + 68), std::string("GARI"), "archive on again");
+            t.Equals(str(0x43D950 + 4), std::string("Garibaldi"), "name on again");
+            t.Equals(w.size(), static_cast<size_t>(3), "archive + name + poke written");
 
             // A foreign string at the poke site refuses the switch, nothing written.
             std::memcpy(&ram[0x47BDB0], "data/ui/coursXXX.big", 20);
             t.Equals(modeNext(ms, ram.data(), msg), -1, "refused");
             t.IsTrue(msg.find("neither") != std::string::npos, msg.c_str());
-            t.Equals(str(0x43D950 + 68), std::string("BAM"), "nothing written");
-            std::memcpy(&ram[0x47BDB0], "data/ui/courspic.big", 20);
+            t.Equals(str(0x43D950 + 68), std::string("GARI"), "nothing written");
+            t.Equals(str(0x43D950 + 4), std::string("Garibaldi"), "name kept");
+            std::memcpy(&ram[0x47BDB0], "data/ui/courspit.big", 20);
 
             // Savestate-style: RAM already in Tricky -> the next press goes to Two.
             std::memcpy(&ram[0x43D950 + 68], "GARI", 5);
@@ -422,21 +432,16 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsTrue(armModes(ms, ram.data(), m, log), "armed");
             auto pending = ps2_cd_overlay::pendingAlias();
             t.IsTrue(pending.first.empty(), "arming starts with the alias off");
-            std::string status;
-            auto idle = padBuffer(0);
-            auto chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), idle.data(), 1, status);
-            pickerOnPadRead(ram.data(), chord.data(), 2, status);
-            t.Equals(status, std::string("Mode: Tricky"), "status");
+            // preserve-fix-1 P04/P16: the chord is gone; menu entry/exit
+            // through modeSet is the only switch.
+            std::string msg;
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), true, msg), "menu entry switches on");
             pending = ps2_cd_overlay::pendingAlias();
             t.Equals(pending.first, std::string("/DATA/AUDIO/SPEECH.BIG"), "alias on in Tricky");
             t.Equals(pending.second, std::string("/host/speech-big"), "host on in Tricky");
-            pickerOnPadRead(ram.data(), idle.data(), 3, status);
-            chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), chord.data(), 4, status);
-            t.Equals(status, std::string("Mode: Two"), "second mode");
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), false, msg), "menu exit switches off");
             pending = ps2_cd_overlay::pendingAlias();
-            t.IsTrue(pending.first.empty(), "Two has no alias: off");
+            t.IsTrue(pending.first.empty(), "Stock has no alias: off");
             ms = Modes{}; // leave the process-wide modes disarmed
             ps2_cd_overlay::clearModeAlias();
         });
@@ -471,20 +476,15 @@ void register_ps2_ssx3_course_manifest_tests()
             Modes &ms = courseModes();
             t.IsTrue(armModes(ms, ram.data(), m, log), "armed");
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "arming starts with the aliases off");
-            std::string status;
-            auto idle = padBuffer(0);
-            auto chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), idle.data(), 1, status);
-            pickerOnPadRead(ram.data(), chord.data(), 2, status);
-            t.Equals(status, std::string("Mode: Tricky"), "status");
+            // preserve-fix-1 P04/P16: the chord is gone; menu entry/exit
+            // through modeSet is the only switch.
+            std::string msg;
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), true, msg), "menu entry switches on");
             const auto armed = ps2_cd_overlay::pendingAliases();
             t.Equals(armed.size(), static_cast<size_t>(2), "both armed");
             t.Equals(armed[0].first, std::string("/DATA/AUDIO/SPEECH.BIG"), "first disc");
             t.Equals(armed[1].second, std::string("/host/music-big"), "second host");
-            pickerOnPadRead(ram.data(), idle.data(), 3, status);
-            chord = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), chord.data(), 4, status);
-            t.Equals(status, std::string("Mode: Stock"), "back to stock");
+            t.IsTrue(ps2_ssx3_tricky::modeSet(ram.data(), false, msg), "menu exit switches off");
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "stock clears the aliases");
             ms = Modes{}; // leave the process-wide modes disarmed
             ps2_cd_overlay::clearModeAlias();

@@ -334,7 +334,8 @@ inline bool modeSet(uint8_t *ram, bool on, std::string &msg)
 }
 
 // The bytes a list refresh depends on: the 23 event rows (names) and the
-// topology table (picker locations). A change across one scePadRead = a chord.
+// topology table (picker locations). A change across one scePadRead = a mode
+// switch (preserve-fix-1 removed the L3+R3 chord).
 inline constexpr uint32_t kRowsBytes = ps2_ssx3_course::kRows * ps2_ssx3_course::kEventStride;
 inline constexpr uint32_t kTopoBytes = ps2_ssx3_course::kRows * ps2_ssx3_course::kTopoStride;
 inline bool rowsArmed()
