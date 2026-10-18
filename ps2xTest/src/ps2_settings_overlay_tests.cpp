@@ -231,9 +231,13 @@ void register_ps2_settings_overlay_tests()
             // Still held after open: stripped, no second open.
             auto again = ps2x::set2::holdStartStep(st, false, true, 2000, true);
             t.IsTrue(!again.openEdge && again.stripStart, "held after open: stripped, no re-open");
-            // Release re-arms; a new tap pulses again.
-            (void)ps2x::set2::holdStartStep(st, false, false, 2017, true);
-            auto p0 = ps2x::set2::holdStartStep(st, false, false, 2034, true);
+            // Release re-arms (the held Start is never sent, so no pulse);
+            // a fresh tap pulses again.
+            auto rel2 = ps2x::set2::holdStartStep(st, false, false, 2017, true);
+            t.IsTrue(!rel2.openEdge && !rel2.addStart, "release after open: no pulse, re-armed");
+            (void)ps2x::set2::holdStartStep(st, false, true, 2050, true);
+            (void)ps2x::set2::holdStartStep(st, false, false, 2100, true); // release: arms the pulse
+            auto p0 = ps2x::set2::holdStartStep(st, false, false, 2117, true);
             t.IsTrue(p0.addStart, "re-armed tap pulses"); });
 
         tc.Run("Select cancels the hold (the chord owns Select+Start)", [](TestCase &t)
