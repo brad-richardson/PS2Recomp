@@ -280,7 +280,8 @@ void prepareEnvironment(const char *argv0)
             // the launcherKeys skip below).
             const bool owned = key == "GE1_UPSCALE" || key == "PS2X_SETTINGS_PERF" ||
                                key == "PS2X_VIRTUAL_PAD" || key == "PS2X_MENU_BUTTON" ||
-                               key == "PS2X_INPUT_MARKER" || key == "GE1_ONDEVICE_UPSCALE";
+                               key == "PS2X_INPUT_MARKER" || key == "PS2X_HOLD_START" ||
+                               key == "GE1_ONDEVICE_UPSCALE";
             if (!owned || launcherKeys.count(key) != 0)
                 continue;
             setenv(key.c_str(), value.c_str(), 1);

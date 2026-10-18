@@ -192,13 +192,102 @@ void register_ps2_settings_overlay_tests()
             auto d = driveChord({{100, 3u}, {200, 0u}, {400, 2u}, {450, 3u}, {600, 0u}}, 800);
             t.IsTrue(d.openCount == 2, "re-arms after both release"); }); });
 
+    MiniTest::Case("Set2HoldStart", [](TestCase &tc)
+                   {
+        tc.Run("tap shorter than the threshold pulses Start once, never opens", [](TestCase &t)
+               {
+            ps2x::set2::HoldStartState st;
+            // 17 ms host frames: Start down 100 ms then released.
+            auto o0 = ps2x::set2::holdStartStep(st, false, true, 1000, true);
+            t.IsTrue(!o0.openEdge && o0.stripStart && !o0.addStart, "held: stripped, no open");
+            auto o1 = ps2x::set2::holdStartStep(st, false, true, 1100, true);
+            t.IsTrue(!o1.openEdge && o1.stripStart, "still held: stripped");
+            auto rel = ps2x::set2::holdStartStep(st, false, false, 1117, true);
+            t.IsTrue(!rel.openEdge && !rel.addStart && !rel.stripStart, "release frame only arms");
+            for (int i = 0; i < ps2x::set2::kHoldStartPulseFrames; ++i)
+            {
+                auto o = ps2x::set2::holdStartStep(st, false, false, 1134 + i, true);
+                t.IsTrue(o.addStart && !o.openEdge, "pulse frame");
+            }
+            auto done = ps2x::set2::holdStartStep(st, false, false, 1200, true);
+            t.IsTrue(!done.addStart && !done.openEdge, "pulse ends"); });
+
+        tc.Run("hold past 600 ms opens and never sends Start", [](TestCase &t)
+               {
+            ps2x::set2::HoldStartState st;
+            bool opened = false;
+            for (int64_t ms = 0; ms <= 700; ms += 17)
+            {
+                auto o = ps2x::set2::holdStartStep(st, false, true, 1000 + ms, true);
+                if (o.openEdge)
+                    opened = true;
+                if (!o.openEdge)
+                    t.IsTrue(o.stripStart, "held Start stripped before the threshold");
+                else
+                    t.IsTrue(o.stripStart, "opening frame still stripped");
+                t.IsTrue(!o.addStart, "never pulses on a hold");
+            }
+            t.IsTrue(opened, "opened at/after 600 ms");
+            // Still held after open: stripped, no second open.
+            auto again = ps2x::set2::holdStartStep(st, false, true, 2000, true);
+            t.IsTrue(!again.openEdge && again.stripStart, "held after open: stripped, no re-open");
+            // Release re-arms; a new tap pulses again.
+            (void)ps2x::set2::holdStartStep(st, false, false, 2017, true);
+            auto p0 = ps2x::set2::holdStartStep(st, false, false, 2034, true);
+            t.IsTrue(p0.addStart, "re-armed tap pulses"); });
+
+        tc.Run("Select cancels the hold (the chord owns Select+Start)", [](TestCase &t)
+               {
+            ps2x::set2::HoldStartState st;
+            (void)ps2x::set2::holdStartStep(st, false, true, 1000, true);
+            auto o = ps2x::set2::holdStartStep(st, true, true, 1050, true);
+            t.IsTrue(!o.openEdge && !o.stripStart && !o.addStart, "Select yields to chord");
+            auto rel = ps2x::set2::holdStartStep(st, false, false, 1100, true);
+            t.IsTrue(!rel.addStart, "cancelled hold never pulses"); });
+
+        tc.Run("Off passes Start straight through (chord still opens)", [](TestCase &t)
+               {
+            ps2x::set2::HoldStartState st;
+            auto o = ps2x::set2::holdStartStep(st, false, true, 1000, false);
+            t.IsTrue(!o.openEdge && !o.stripStart && !o.addStart, "off: passthrough");
+            auto o2 = ps2x::set2::holdStartStep(st, false, true, 2000, false);
+            t.IsTrue(!o2.openEdge && !o2.stripStart, "off hold: still passthrough");
+            // The chord path (unchanged) still opens on Select+Start.
+            ps2x::set2::ChordState cst;
+            (void)ps2x::set2::chordStep(cst, true, false, 3000);
+            auto co = ps2x::set2::chordStep(cst, true, true, 3050);
+            t.IsTrue(co.openEdge, "chord still opens when hold is off"); });
+
+        tc.Run("settings mapping: default on, 0 is off, on clears", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::set2::holdStartFromSetting(""), "unset -> on");
+            t.IsTrue(ps2x::set2::holdStartFromSetting("1"), "1 -> on");
+            t.IsTrue(ps2x::set2::holdStartFromSetting("junk"), "junk -> on");
+            t.IsTrue(!ps2x::set2::holdStartFromSetting("0"), "0 -> off");
+            t.IsTrue(std::string(ps2x::set2::holdStartToSetting(true)).empty(), "on clears");
+            t.IsTrue(std::string(ps2x::set2::holdStartToSetting(false)) == "0", "off -> 0");
+            t.IsTrue(ps2x::set2::settingsKeyAllowed("PS2X_HOLD_START"), "key allowlisted");
+            t.IsTrue(std::string(ps2x::set2::holdStartName(true)) == "on", "on label");
+            t.IsTrue(std::string(ps2x::set2::holdStartName(false)) == "off", "off label"); });
+
+        tc.Run("nav X toggles Hold Start live and disarms", [](TestCase &t)
+               {
+            ps2x::set2::NavState st;
+            st.sel = ps2x::set2::Row::HoldStart;
+            st.restartArmed = true;
+            auto o1 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(o1.action == ps2x::set2::Action::Changed && !st.holdStart, "on -> off");
+            t.IsTrue(!st.restartArmed, "live row disarms");
+            auto o2 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(o2.action == ps2x::set2::Action::Changed && st.holdStart, "off -> on"); }); });
+
     MiniTest::Case("Set2Nav", [](TestCase &tc)
                    {
-        tc.Run("Up/Down wrap across the seven rows", [](TestCase &t)
+        tc.Run("Up/Down wrap across the eight rows", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             auto up = ps2x::set2::navStep(st, true, false, false, false, false);
-            t.IsTrue(up.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Marker, "wrap to Input marker");
+            t.IsTrue(up.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::HoldStart, "wrap to Hold Start");
             auto down = ps2x::set2::navStep(st, false, true, false, false, false);
             t.IsTrue(down.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Mode, "wrap to Mode"); });
 
@@ -368,7 +457,7 @@ void register_ps2_settings_overlay_tests()
         tc.Run("row labels are short and complete (panel-polish-1, no truncation)", [](TestCase &t)
                {
             using ps2x::set2::Row;
-            t.Equals(ps2x::set2::kRowCount, 7, "seven rows");
+            t.Equals(ps2x::set2::kRowCount, 8, "eight rows");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Mode)) == "Mode", "mode");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Res)) == "Resolution", "resolution");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Perf)) == "Perf", "perf");
@@ -376,6 +465,7 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Touch)) == "Touch", "touch");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::MenuBtn)) == "Menu button", "menu button");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Marker)) == "Input marker", "input marker");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::HoldStart)) == "Hold Start", "hold start");
             for (int i = 0; i < ps2x::set2::kRowCount; ++i)
             {
                 const std::string label(

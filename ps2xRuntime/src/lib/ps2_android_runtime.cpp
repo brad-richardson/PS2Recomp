@@ -153,7 +153,8 @@ void loadSettingsEnvFile(bool explicitInputMarker)
                 // mirroring the iOS launcherKeys carve-out.
                 if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF" &&
                     entry.first != "PS2X_VIRTUAL_PAD" && entry.first != "PS2X_MENU_BUTTON" &&
-                    entry.first != "PS2X_INPUT_MARKER" && entry.first != "GE1_ONDEVICE_UPSCALE")
+                    entry.first != "PS2X_INPUT_MARKER" && entry.first != "PS2X_HOLD_START" &&
+                    entry.first != "GE1_ONDEVICE_UPSCALE")
                     continue;
                 if (entry.first == "PS2X_INPUT_MARKER" && explicitInputMarker)
                 {

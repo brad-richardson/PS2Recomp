@@ -7887,6 +7887,7 @@ void PS2Runtime::run()
         std::fprintf(stderr, "[set2] overlay on (shot=%s)\n",
                      (set2ShotPath && set2ShotPath[0]) ? set2ShotPath : "(none)");
     ps2x::set2::ChordState set2Chord;
+    ps2x::set2::HoldStartState set2Hold; // hold-start-1: lone-Start hold opener, carried across frames
     // set2-polish-1 (Brad 10-16): the chord also listens to the touch
     // SELECT/START buttons (previous host frame's vpad mask), with the same
     // hold-back applied to the touch path before it publishes.
@@ -7924,6 +7925,10 @@ void PS2Runtime::run()
         const char *marker = std::getenv("PS2X_INPUT_MARKER");
         set2Nav.marker = ps2x::set2::markerFromSetting(marker ? marker : "");
         set2Nav.runMarker = set2Nav.marker;
+        // hold-start-1: Hold Start row seeds from the effective env (same
+        // layering as the other live rows). Code default on.
+        const char *holdStart = std::getenv("PS2X_HOLD_START");
+        set2Nav.holdStart = ps2x::set2::holdStartFromSetting(holdStart ? holdStart : "");
     }
     // tk-menu-1 Part 2: the Tricky course list. Knob off: one cached-bool
     // check per host frame in the block below; the guest is untouched.
@@ -8610,25 +8615,42 @@ void PS2Runtime::run()
             const ps2x::set2::ChordOut set2ChordOut = ps2x::set2::chordStep(
                 set2Chord, (set2Union & ps2x::vpad::kSelect) != 0u,
                 (set2Union & ps2x::vpad::kStart) != 0u, set2NowMs);
+            // hold-start-1: lone-Start hold opener on the same host union
+            // (controller, keyboard and touch Start; test spans inject here
+            // too, so the hold path is automated and covers this hook).
+            // The guest sees Start only on release, so pause opens about one
+            // tap length later. Det stays IDENTICAL: padscripts drive the
+            // guest pad directly, never this host union.
+            const bool set2HoldOn = set2Nav.holdStart;
+            const ps2x::set2::HoldStartOut set2HoldOut = ps2x::set2::holdStartStep(
+                set2Hold, (set2Union & ps2x::vpad::kSelect) != 0u,
+                (set2Union & ps2x::vpad::kStart) != 0u, set2NowMs, set2HoldOn && !set2Open);
+            const bool set2HoldOpen = set2HoldOn && set2HoldOut.openEdge;
+            const bool set2HoldStrip = set2HoldOn && set2HoldOut.stripStart;
+            const bool set2HoldAdd = set2HoldOn && set2HoldOut.addStart;
             if (!set2Open)
             {
                 if (set2ChordOut.stripSelect)
                     raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kSelect);
-                if (set2ChordOut.stripStart)
+                if (set2ChordOut.stripStart || set2HoldStrip)
                     raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kStart);
                 if (set2ChordOut.addSelect)
                     raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kSelect);
-                if (set2ChordOut.addStart)
+                // Hold owns the Start pulse when on (one pulse, not two);
+                // the chord owns it when hold is off.
+                if (set2HoldAdd)
+                    raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kStart);
+                else if (!set2HoldOn && set2ChordOut.addStart)
                     raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kStart);
                 // set2-polish-1: carry the same hold-back for the touch
                 // path (applied at the vpad publish below, like the
                 // close-press mask, so a touch Select never leaks ahead).
                 set2VpadStrip = static_cast<uint16_t>(
                     (set2ChordOut.stripSelect ? ps2x::vpad::kSelect : 0u) |
-                    (set2ChordOut.stripStart ? ps2x::vpad::kStart : 0u));
+                    ((set2ChordOut.stripStart || set2HoldStrip) ? ps2x::vpad::kStart : 0u));
                 set2VpadAdd = static_cast<uint16_t>(
                     (set2ChordOut.addSelect ? ps2x::vpad::kSelect : 0u) |
-                    (set2ChordOut.addStart ? ps2x::vpad::kStart : 0u));
+                    ((set2HoldOn ? set2HoldAdd : set2ChordOut.addStart) ? ps2x::vpad::kStart : 0u));
                 // The close-press overhang drops out button by button as each
                 // releases; new presses pass (they were never in the mask).
                 const uint16_t set2Swallowed = ps2x::set2::swallowStep(set2Swallow, set2Union);
@@ -8645,8 +8667,15 @@ void PS2Runtime::run()
                     std::fprintf(stderr, "[set2] select pulse hostFrame=%llu guestTick=%llu\n",
                                  static_cast<unsigned long long>(set2HostFrame),
                                  static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
-                if (set2ChordOut.openEdge)
+                if (set2ChordOut.openEdge || set2HoldOpen)
+                {
+                    if (set2HoldOpen)
+                        std::fprintf(stderr, "[set2] hold-start open (>=%dms) hostFrame=%llu guestTick=%llu\n",
+                                     ps2x::set2::kHoldStartMs,
+                                     static_cast<unsigned long long>(set2HostFrame),
+                                     static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
                     set2DoOpen();
+                }
             }
             else
             {
@@ -8701,13 +8730,22 @@ void PS2Runtime::run()
                                                        ps2x::set2::menuBtnToSetting(set2Nav.menubtn));
                     set2WriteSettings(pairs); // false on the Mac (live-only there)
                 }
+                if (navOut.action == ps2x::set2::Action::Changed &&
+                    set2Nav.sel == ps2x::set2::Row::HoldStart)
+                {
+                    // hold-start-1: live like Touch/Menu button (no restart).
+                    auto pairs = set2ReadSettings();
+                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_HOLD_START",
+                                                       ps2x::set2::holdStartToSetting(set2Nav.holdStart));
+                    set2WriteSettings(pairs); // false on the Mac (live-only there)
+                }
                 if (navOut.action != ps2x::set2::Action::None)
-                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d menubtn=%d marker=%d\n",
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d menubtn=%d marker=%d holdStart=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
                                  static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
                                  set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0,
                                  static_cast<int>(set2Nav.touch), static_cast<int>(set2Nav.menubtn),
-                                 set2Nav.marker ? 1 : 0);
+                                 set2Nav.marker ? 1 : 0, set2Nav.holdStart ? 1 : 0);
                 if (navOut.action == ps2x::set2::Action::Close)
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
@@ -9524,6 +9562,15 @@ void PS2Runtime::run()
                                                            ps2x::set2::menuBtnToSetting(set2Nav.menubtn));
                         set2WriteSettings(pairs);
                     }
+                    if (tapOut.action == ps2x::set2::Action::Changed &&
+                        set2Nav.sel == ps2x::set2::Row::HoldStart)
+                    {
+                        // hold-start-1: touch tap, same live persist as the pad path.
+                        auto pairs = set2ReadSettings();
+                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_HOLD_START",
+                                                           ps2x::set2::holdStartToSetting(set2Nav.holdStart));
+                        set2WriteSettings(pairs);
+                    }
                     std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
                                  static_cast<int>(tapOut.action));
                     if (tapOut.action == ps2x::set2::Action::Close)
@@ -9857,6 +9904,7 @@ void PS2Runtime::run()
                 const std::string upscaleVal(set2Nav.upscale ? "on" : "off");
                 const std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
                 const std::string menubtnVal(ps2x::set2::menuBtnName(set2Nav.menubtn));
+                const std::string holdStartVal(ps2x::set2::holdStartName(set2Nav.holdStart));
                 // shortcuts-1: restart-marked like Mode/Resolution.
                 const bool isMarkerDirty = ps2x::set2::markerDirty(set2Nav);
                 std::string markerVal(ps2x::set2::markerName(set2Nav.marker));
@@ -9892,6 +9940,8 @@ void PS2Runtime::run()
                         value = &menubtnVal;
                     else if (row == ps2x::set2::Row::Marker)
                         value = &markerVal;
+                    else if (row == ps2x::set2::Row::HoldStart)
+                        value = &holdStartVal;
                     DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
                     const int valW = MeasureText(value->c_str(), rowFont);
                     DrawText(value->c_str(),
@@ -9899,10 +9949,13 @@ void PS2Runtime::run()
                              rowCol);
                 }
                 // settings-res-1: the Menu button row explains the chord, so
-                // hiding the button never strands the user.
+                // hiding the button never strands the user. hold-start-1:
+                // the Hold Start row names its own threshold.
                 const char *hint = (set2Nav.sel == ps2x::set2::Row::MenuBtn)
                                        ? "Select + Start opens settings"
-                                       : "Up/Down move - X change - Triangle/chord close";
+                                       : (set2Nav.sel == ps2x::set2::Row::HoldStart)
+                                             ? "Hold START 0.6s opens settings"
+                                             : "Up/Down move - X change - Triangle/chord close";
                 DrawText(hint, static_cast<int>(set2dg.px) + 14,
                          static_cast<int>(set2dg.py + set2dg.ph) - rowFont - 8, rowFont,
                          Color{150, 160, 175, 255});

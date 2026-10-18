@@ -143,8 +143,9 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
 // Rows: Mode, Resolution, Perf, Upscale, Touch, Menu button, Input
-// marker. X changes the pending value (Mode/Resolution/Input marker
-// apply on restart; Perf, Upscale, Touch and Menu button are live).
+// marker, Hold Start. X changes the pending value (Mode/Resolution/Input
+// marker apply on restart; Perf, Upscale, Touch, Menu button and Hold
+// Start are live).
 // There is no Restart row: X on a clean Mode/Resolution/Input-marker row
 // applies the change and arms the restart; a second X on that row while
 // it still differs from the running value restarts (ArmRestart/DoRestart,
@@ -161,7 +162,8 @@ enum class Row : uint8_t
     Touch = 4,
     MenuBtn = 5,
     Marker = 6,
-    Count = 7
+    HoldStart = 7,
+    Count = 8
 };
 static constexpr int kRowCount = static_cast<int>(Row::Count);
 
@@ -185,6 +187,8 @@ inline const char *rowLabel(Row r)
         return "Menu button";
     case Row::Marker:
         return "Input marker";
+    case Row::HoldStart:
+        return "Hold Start";
     default:
         return "";
     }
@@ -404,13 +408,138 @@ inline const char *markerName(bool b)
     return b ? "on" : "off";
 }
 
-// config-fix-1 item 13: the shared on-device-upscale interpretation.
-// The provider defaults ON: unset, empty or anything but the literal
-// "0" is ON; only "0" is OFF. The adapter (ge1_gs.cpp) and both
-// ps2_runtime.cpp seeds use this so unset/0/1 agree everywhere.
 inline bool ondeviceUpscaleOn(const char *val)
 {
     return !val || !*val || std::strcmp(val, "0") != 0;
+}
+
+// hold-start-1: Hold Start row <-> PS2X_HOLD_START. On=default (absent),
+// Off="0". Anything but the literal "0" reads as On, so a hand-edited
+// file can't strand the user without the hold opener (the chord and the
+// "..." button keep working either way). Live like Touch/Menu button:
+// no restart, persisted immediately on change.
+inline bool holdStartFromSetting(const std::string &val)
+{
+    return val != "0";
+}
+
+inline const char *holdStartToSetting(bool b)
+{
+    return b ? "" : "0"; // On: no override line (default); Off: "0"
+}
+
+inline const char *holdStartName(bool b)
+{
+    return b ? "on" : "off";
+}
+
+// hold-start-1: single-Start hold opener. While a lone Start is held the
+// guest must not see it (pause would open ~one tap late otherwise); on
+// release before the threshold the guest gets a normal short Start pulse
+// (at least one guest frame via the latch); at the threshold the panel
+// opens and Start is never sent. Select present cancels to the chord
+// (the two-thumb path owns any Select+Start). Pure step function,
+// unit-tested alongside chordStep; the render loop merges its strip/add/
+// open with the chord's (OR open/strip, Hold owns addStart when enabled
+// so a tap pulses once, not twice). Test spans (PS2X_SET2_TEST_PAD)
+// drive the same host union, so this path is automated (and covers the
+// chord hook too).
+constexpr int kHoldStartMs = 600;
+constexpr int kHoldStartPulseFrames = 3;
+
+struct HoldStartState
+{
+    bool holding = false;   // lone Start tracked, threshold not yet hit
+    int64_t holdSinceMs = 0; // Start edge wall time
+    bool fired = false;     // opened, suppress until Start releases
+    int pulseLeft = 0;      // release pulse frames remaining
+};
+
+struct HoldStartOut
+{
+    bool openEdge = false;   // open the panel this frame
+    bool stripStart = false; // strip Start from the guest mask
+    bool addStart = false;   // OR Start into the guest mask (pulse)
+};
+
+inline HoldStartOut holdStartStep(HoldStartState &st, bool selectDown, bool startDown, int64_t nowMs,
+                                  bool enabled)
+{
+    HoldStartOut out;
+    if (!enabled)
+    {
+        st.holding = false;
+        st.fired = false;
+        st.pulseLeft = 0;
+        return out;
+    }
+    if (st.fired)
+    {
+        // Opened: never send Start; wait for the release to re-arm.
+        if (startDown)
+            out.stripStart = true;
+        else
+        {
+            st.fired = false;
+            st.holding = false;
+            st.pulseLeft = 0;
+        }
+        return out;
+    }
+    if (selectDown)
+    {
+        // Any Select: the chord owns Select+Start; drop the lone hold
+        // (and any armed pulse) so a tap pulses exactly once via chord.
+        st.holding = false;
+        st.pulseLeft = 0;
+        return out;
+    }
+    if (startDown)
+    {
+        if (!st.holding && st.pulseLeft == 0)
+        {
+            st.holding = true;
+            st.holdSinceMs = nowMs;
+        }
+        if (st.holding)
+        {
+            if (nowMs - st.holdSinceMs >= kHoldStartMs)
+            {
+                st.holding = false;
+                st.fired = true;
+                out.openEdge = true;
+                out.stripStart = true;
+            }
+            else
+            {
+                out.stripStart = true;
+            }
+        }
+        else if (st.pulseLeft > 0)
+        {
+            // Start re-pressed mid-pulse: restart the hold, drop the pulse.
+            st.pulseLeft = 0;
+            st.holding = true;
+            st.holdSinceMs = nowMs;
+            out.stripStart = true;
+        }
+        return out;
+    }
+    // Start up.
+    if (st.holding)
+    {
+        // Released before the threshold: forward a short Start pulse so
+        // the guest still sees the tap (pause keeps working).
+        st.holding = false;
+        st.pulseLeft = kHoldStartPulseFrames;
+        return out;
+    }
+    if (st.pulseLeft > 0)
+    {
+        out.addStart = true;
+        --st.pulseLeft;
+    }
+    return out;
 }
 enum class Action : uint8_t
 {
@@ -431,6 +560,7 @@ struct NavState
     Touch touch = Touch::Auto; // live (android-touch-1)
     MenuBtn menubtn = MenuBtn::Shown; // live (settings-res-1)
     bool marker = false; // pending (applied on restart; shortcuts-1: dev option, default off)
+    bool holdStart = true; // live (hold-start-1: default on)
     Mode runMode = Mode::M120; // running values, sampled at open (dirty detect)
     Res runRes = Res::Screen;
     bool runMarker = false;
@@ -554,6 +684,11 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
         out.action = Action::Changed;
         st.restartArmed = false;
         break;
+    case Row::HoldStart:
+        st.holdStart = !st.holdStart;
+        out.action = Action::Changed;
+        st.restartArmed = false;
+        break;
     default:
         break;
     }
@@ -621,6 +756,7 @@ inline bool settingsKeyAllowed(const char *key)
            k == "PS2X_VIRTUAL_PAD" || // android-touch-1: Touch row persists under its env name
            k == "PS2X_MENU_BUTTON" || // settings-res-1: Menu button row persists under its env name
            k == "PS2X_INPUT_MARKER" || // shortcuts-1: Input marker row persists under its env name
+           k == "PS2X_HOLD_START" || // hold-start-1: Hold Start row persists under its env name
            k == "GE1_ONDEVICE_UPSCALE"; // REM3 P11 Phase 2: the live toggle persists under its env name
 }
 
@@ -668,7 +804,7 @@ inline SettingsPairs parseSettingsEnv(const std::string &content)
 
 inline std::string formatSettingsEnv(const SettingsPairs &pairs)
 {
-    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Menu button/Input marker).\n"
+    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Menu button/Input marker/Hold Start).\n"
                     "# Delete lines (or this file) to return to the platform defaults.\n";
     for (const auto &kv : pairs)
         s += kv.first + "=" + kv.second + "\n";
