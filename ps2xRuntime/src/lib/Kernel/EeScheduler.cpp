@@ -2035,6 +2035,17 @@ uint32_t EeScheduler::invocationStackTop()
     });
     if (top == 0u)
     {
+        // Fatal path only: name what holds the band before the throw.
+        std::fprintf(stderr, "[ee-invstack] exhausted: thread=%d depth=%zu entries=%zu\n", owner->id, depth,
+                     m_invocationStackTops.size());
+        for (const auto &[entry, stack] : m_invocationStackTops)
+            std::fprintf(stderr, "[ee-invstack] key thread=%d depth=%u top=0x%x\n",
+                         static_cast<int>(static_cast<uint32_t>(entry >> 32u)), static_cast<uint32_t>(entry), stack);
+        for (const auto &[id, t] : m_threads)
+            for (size_t i = 0u; i < t.invocations.size(); ++i)
+                std::fprintf(stderr, "[ee-invstack] live thread=%d status=%d idx=%zu kind=%d pc=0x%x sp=0x%x\n", id,
+                             static_cast<int>(t.status), i, static_cast<int>(t.invocations[i].kind),
+                             t.invocations[i].context.pc, getRegU32(&t.invocations[i].context, 29));
         throw std::runtime_error("EE invocation stack space exhausted");
     }
     return top;
