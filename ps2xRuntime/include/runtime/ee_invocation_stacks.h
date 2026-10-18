@@ -8,7 +8,10 @@
 // slots and online's extra short-lived threads exhausted it at race load
 // ("EE invocation stack space exhausted", clean exit). A thread going
 // dormant (exit, terminate; delete requires dormant) now returns its slots
-// to a free list that the next new key takes before carving.
+// to a free list that the next new key takes before carving. When the band
+// is full anyway (online-stock-3 r5: 9 live dispatcher depths plus idle
+// caches from waiting threads fill the 19-slot LOW band), the next new key
+// evicts one idle thread's cached stack instead of throwing.
 //
 // The free list lives in the same map, under a thread-id word no guest
 // thread can have (ids are -N..255), with the stack top as the low word, so
@@ -16,11 +19,27 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
 namespace ps2_ee_invocation_stacks
 {
+// Interrupt-context nesting (iPad r5): the scheduler stacked every pending
+// invocation onto the running thread, also inside an interrupt or alarm
+// handler. On a real-time device 120 Hz vblank and timer interrupts arrive
+// while slow race-load handlers run, so one dispatcher reached depth 9
+// (alarm 0x3e5290, then interrupts 0x3c1980 -> 0x3825c0 -> 0x3f4410 ...)
+// and the next level found no stack. The EE masks interrupts while a
+// handler runs: a pending interrupt or alarm now waits until the running
+// interrupt or alarm handler returns. Other kinds nest as before.
+template <typename Kind>
+inline bool deferNested(std::optional<Kind> runningTop, Kind pending)
+{
+    const auto handler = [](Kind k) { return k == Kind::Interrupt || k == Kind::Alarm; };
+    return runningTop && handler(*runningTop) && handler(pending);
+}
+
 using Map = std::unordered_map<uint64_t, uint32_t>;
 
 inline constexpr uint32_t kFreeThreadWord = 0x7FFFFFFFu;
@@ -52,6 +71,34 @@ uint32_t take(Map &map, uint64_t k, Carve &&carve)
         top = carve();
     if (top != 0u)
         map.emplace(k, top);
+    return top;
+}
+
+// Hand `k` the stack of one idle cached entry: a non-free key whose thread
+// currently holds no live invocation, so the cached stack backs nothing.
+// Returns 0 when every cached entry belongs to a live thread (genuine
+// exhaustion). The map stays the same size: eviction reuses, never grows.
+template <typename IsLiveThread>
+uint32_t evictIdle(Map &map, uint64_t k, IsLiveThread &&isLiveThread)
+{
+    uint64_t victim = 0u;
+    uint32_t top = 0u;
+    for (const auto &[entry, stack] : map)
+    {
+        if (isFree(entry) || entry == k)
+            continue;
+        if (isLiveThread(static_cast<int>(static_cast<uint32_t>(entry >> 32u))))
+            continue;
+        if (stack > top)
+        {
+            victim = entry;
+            top = stack;
+        }
+    }
+    if (top == 0u)
+        return 0u;
+    map.erase(victim);
+    map.emplace(k, top);
     return top;
 }
 

@@ -912,6 +912,48 @@ void register_ps2_runtime_kernel_tests()
                 tops.push_back(v);
             std::sort(tops.begin(), tops.end());
             t.IsTrue(std::adjacent_find(tops.begin(), tops.end()) == tops.end(), "no stack is handed out twice");
+            // r5 shape: 9 live dispatcher depths plus idle caches from
+            // waiting threads fill the 19-slot LOW band. The 20th key must
+            // evict an idle cache, not fail.
+            {
+                st::Map full;
+                uint32_t band = 0x100000u;
+                int carved2 = 0;
+                auto carve2 = [&]() -> uint32_t {
+                    if (carved2 >= 19)
+                        return 0u;
+                    ++carved2;
+                    const uint32_t top = band;
+                    band -= 0x4000u;
+                    return top;
+                };
+                for (uint32_t d = 0u; d < 9u; ++d)
+                    t.IsTrue(st::take(full, st::key(-1, static_cast<int>(d)), carve2) != 0u,
+                             "dispatcher nests 9");
+                const int idleIds[] = {1, 1, 1, 2, 3, 3, 5, 6, 6, 6};
+                const int idleDepths[] = {0, 1, 2, 0, 0, 1, 0, 0, 1, 2};
+                for (int i = 0; i < 10; ++i)
+                    t.IsTrue(st::take(full, st::key(idleIds[i], idleDepths[i]), carve2) != 0u,
+                             "idle cache fills the band");
+                t.IsTrue(st::take(full, st::key(-1, 9), carve2) == 0u, "band exhausted");
+                auto live = [](int id) { return id == -1; };
+                const uint32_t evicted = st::evictIdle(full, st::key(-1, 9), live);
+                t.IsTrue(evicted != 0u, "idle cache evicted for the live dispatcher depth");
+                t.Equals(full.size(), static_cast<size_t>(19), "eviction reuses, never grows");
+                t.IsTrue(st::take(full, st::key(-1, 9), carve2) == evicted,
+                         "evicted key keeps its stack");
+                std::vector<uint32_t> tops2;
+                for (const auto &[k, v] : full)
+                    tops2.push_back(v);
+                std::sort(tops2.begin(), tops2.end());
+                t.IsTrue(std::adjacent_find(tops2.begin(), tops2.end()) == tops2.end(),
+                         "eviction hands out no stack twice");
+                st::Map allLive;
+                for (uint32_t d = 0u; d < 3u; ++d)
+                    allLive.emplace(st::key(-1, static_cast<int>(d)), 0x100000u - d * 0x4000u);
+                t.IsTrue(st::evictIdle(allLive, st::key(-1, 3), live) == 0u,
+                         "all-live map has nothing to evict");
+            }
         });
 
         tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)

@@ -871,7 +871,11 @@ void EeScheduler::run()
             continue;
         }
 
-        if (!m_pendingInvocations.empty())
+        if (!m_pendingInvocations.empty() &&
+            !ps2_ee_invocation_stacks::deferNested(running->invocations.empty()
+                                                       ? std::nullopt
+                                                       : std::optional(running->invocations.back().kind),
+                                                   m_pendingInvocations.front().kind))
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
@@ -2030,9 +2034,19 @@ uint32_t EeScheduler::invocationStackTop()
     const size_t depth = owner ? owner->invocations.size() : 0u;
     const uint64_t key = ps2_ee_invocation_stacks::key(owner->id, static_cast<uint32_t>(depth));
     constexpr uint32_t kInvocationStackSize = 0x4000u;
-    const uint32_t top = ps2_ee_invocation_stacks::take(m_invocationStackTops, key, [this] {
+    uint32_t top = ps2_ee_invocation_stacks::take(m_invocationStackTops, key, [this] {
         return m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
     });
+    if (top == 0u)
+    {
+        // The band is full but the peak live depth may still fit: reclaim
+        // one idle thread's cached stack (no live invocation backs it)
+        // before giving up.
+        top = ps2_ee_invocation_stacks::evictIdle(m_invocationStackTops, key, [this](int threadId) {
+            const auto it = m_threads.find(threadId);
+            return it != m_threads.end() && !it->second.invocations.empty();
+        });
+    }
     if (top == 0u)
     {
         // Fatal path only: name what holds the band before the throw.
