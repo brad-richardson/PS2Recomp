@@ -42,6 +42,11 @@ SECTOR = 2048
 SLIM_MAGIC = b'PS2XSLM2'
 MOVIE_PREFIX_SECTORS = 512  # 1 MiB; observed reads end by sector 272.
 
+# Support-bundle ARMSX2 source: the same tree prebuilt.py VENDOR names.
+# Keep them equal (test_prebuilt.py VendorAgreementTest enforces it).
+ANDROID_GE1_VENDOR_REPO = 'https://github.com/brad-richardson/armsx2.git'
+ANDROID_GE1_VENDOR_PIN = 'e8ed655ec66eeba12ae3029cc26b45927964b476'
+
 
 NDK_VERSION = '28.2.13676358'
 SDK_PACKAGES = ['platforms;android-34', 'build-tools;34.0.0',
@@ -629,8 +634,7 @@ def source(url, revision, destination):
 
 def libs(a):
     vendor = a.work / 'mac-assembly/vendor-pcsx2'
-    source('https://github.com/brad-richardson/armsx2.git',
-           'afad5a04c2668a10e12adadaa51d54c46f832236', vendor)
+    source(ANDROID_GE1_VENDOR_REPO, ANDROID_GE1_VENDOR_PIN, vendor)
     prefix = a.work / 'deps'
     brew_prefix = subprocess.check_output(['brew', '--prefix'], text=True).strip()
     prefixes = str(prefix) + ';' + brew_prefix
@@ -840,8 +844,7 @@ def android_libs(a):
     if not a.ndk or not (a.ndk / 'build/cmake/android.toolchain.cmake').is_file():
         raise ValueError('android-libs requires --ndk (NDK 28.2.13676358)')
     vendor = a.work / 'android-assembly/vendor-pcsx2'
-    source('https://github.com/brad-richardson/armsx2.git',
-           'afad5a04c2668a10e12adadaa51d54c46f832236', vendor)
+    source(ANDROID_GE1_VENDOR_REPO, ANDROID_GE1_VENDOR_PIN, vendor)
     prefix = a.work / 'android-deps'
     prefix.mkdir(exist_ok=True)
     env = os.environ.copy()
