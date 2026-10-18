@@ -14,6 +14,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -100,12 +101,33 @@ bool courseLoad(Reader &r)
         for (uint32_t i = 1; i < files.count; ++i)
             if (ft::read32(files.stock.data() + (i - 1) * 268) >= ft::read32(files.stock.data() + i * 268))
                 return r.fail("trickycourse: stock file IDs not unique/unsigned sorted");
-        const auto *overlay = ps2_cd_overlay::runtimeOverlay();
-        if (!overlay || files.names.size() != overlay->files.size())
-            return r.fail("trickycourse: overlay ID set differs");
-        for (size_t i = 0; i < files.names.size(); ++i)
-            if (files.names[i] != ft::normalized(overlay->files[i].isoPath))
-                return r.fail("trickycourse: overlay ID order differs");
+        // Fresh-process preflight precedes the first CD read, which lazily
+        // publishes the overlay. The header has already checked the ISO,
+        // manifest and overlay content identities. Validate saved IDs without
+        // causing a guest read or requiring that later publication to exist.
+        std::vector<uint32_t> keys;
+        for (uint32_t i = 0; i < files.count; ++i)
+            keys.push_back(ft::read32(files.stock.data() + i * 268));
+        for (const auto &name : files.names)
+        {
+            if (name.size() < 2 || name.back() == '/' || name != ft::normalized(name) ||
+                name.find("//") != std::string::npos || name.find("/./") != std::string::npos ||
+                name.find("/../") != std::string::npos || name.ends_with("/.") || name.ends_with("/..") ||
+                std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c >= 127; }))
+                return r.fail("trickycourse: invalid overlay ID name");
+            const uint32_t key = ft::hash(name, files.seed);
+            if (std::find(keys.begin(), keys.end(), key) != keys.end())
+                return r.fail("trickycourse: overlay ID key collision");
+            keys.push_back(key);
+        }
+        if (const auto *overlay = ps2_cd_overlay::runtimeOverlay())
+        {
+            if (files.names.size() != overlay->files.size())
+                return r.fail("trickycourse: overlay ID set differs");
+            for (size_t i = 0; i < files.names.size(); ++i)
+                if (files.names[i] != ft::normalized(overlay->files[i].isoPath))
+                    return r.fail("trickycourse: overlay ID order differs");
+        }
     }
     if (active != 0xffffffffu && active > list::kMapDonorMax)
         return r.fail("trickycourse: invalid mapped donor");

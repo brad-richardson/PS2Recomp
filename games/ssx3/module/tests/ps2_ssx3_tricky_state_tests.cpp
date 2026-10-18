@@ -49,6 +49,7 @@ void register_ps2_ssx3_tricky_state_tests()
             // A newly booted process has no host ownership image; another
             // timeline may also hold a contaminated donor snapshot.
             ft::reset(true);
+            ps2_cd_overlay::runtimeOverlay() = nullptr; // fresh process: no CD read has published it yet
             map = {}; map.snapHave[14] = true;
             std::strcpy(map.snapArchive[14], "ELYS"); std::strcpy(map.snapName[14], "Wrong timeline");
             ps2_ssx3_tricky::state().tricky = false;
@@ -61,6 +62,7 @@ void register_ps2_ssx3_tricky_state_tests()
             ps2_savestate::Writer afterValidation;
             ps2_tricky_state::trickyGemsSave(afterValidation);
             t.IsTrue(beforeValidation.buf == afterValidation.buf, "preflight validation mutates no owner");
+            t.IsTrue(ps2_cd_overlay::runtimeOverlay() == nullptr, "preflight does not publish the lazy overlay");
             ps2_savestate::Reader reader(saved.buf.data(), saved.buf.size());
             t.IsTrue(ps2_tricky_state::trickyGemsLoad(reader), reader.error());
             t.Equals(modes.owner, 1u, "explicit mode identity restored independently of donor rows");
@@ -69,6 +71,32 @@ void register_ps2_ssx3_tricky_state_tests()
             t.Equals(std::string(map.snapArchive[14]), std::string("BAM"), "donor snapshot belongs to saved timeline");
             t.Equals(std::string(map.snapName[14]), std::string("Happiness"), "stock donor name restored");
             t.Equals(map.activeEvent, 14, "mapped donor ownership restored");
+            // An unpublished overlay still rejects malformed and duplicate
+            // saved IDs, without changing ownership during failed preflight.
+            const auto loadedFiles = ft::state();
+            for (const std::string &invalid : std::vector<std::string>{"/DATA/../GARI.BIG", "/data/GARI.BIG", "/DATA//GARI.BIG", std::string("/DATA/\0GARI", 11)})
+            {
+                ft::state().names[0] = invalid;
+                ps2_savestate::Writer malformedNames; ps2_tricky_state::trickyGemsSave(malformedNames);
+                ps2_savestate::Reader invalidNames(malformedNames.buf.data(), malformedNames.buf.size());
+                invalidNames.setValidationOnly(true);
+                t.IsFalse(ps2_tricky_state::trickyGemsLoad(invalidNames), "malformed unpublished overlay ID rejected");
+                ft::state() = loadedFiles;
+            }
+            ft::state().names.push_back(ft::state().names[0]);
+            ps2_savestate::Writer duplicates; ps2_tricky_state::trickyGemsSave(duplicates);
+            ps2_savestate::Reader duplicateNames(duplicates.buf.data(), duplicates.buf.size());
+            duplicateNames.setValidationOnly(true);
+            t.IsFalse(ps2_tricky_state::trickyGemsLoad(duplicateNames), "duplicate unpublished overlay IDs rejected");
+            ft::state() = loadedFiles;
+            ps2_cd_overlay::publishRuntimeOverlay(&overlay); // first later CD read
+            overlay.files[0].isoPath = "/DATA/WORLDS/ELYS.BIG";
+            ps2_savestate::Reader wrongOrder(saved.buf.data(), saved.buf.size()); wrongOrder.setValidationOnly(true);
+            t.IsFalse(ps2_tricky_state::trickyGemsLoad(wrongOrder), "published overlay still requires exact ID order");
+            overlay.files.push_back(file);
+            ps2_savestate::Reader wrongCount(saved.buf.data(), saved.buf.size()); wrongCount.setValidationOnly(true);
+            t.IsFalse(ps2_tricky_state::trickyGemsLoad(wrongCount), "published overlay still requires exact ID count");
+            overlay.files = {file};
             t.IsTrue(ft::transition(ram.data(), ram.size(), false, msg), msg);
             t.IsTrue(std::memcmp(ram.data() + base, stock.data() + base, 500 * stride) == 0,
                      "mode-off after load restores every file-table byte");
