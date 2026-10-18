@@ -1,6 +1,6 @@
 #pragma once
 // preserve-fix-1: Tricky files do not participate in the guest's ISO boot
-// walk. Publish them into the already allocated sorted file table only at
+// walk. Publish them into free slots after the fixed stock sorted prefix only at
 // the menu's mode-on safe point; mode-off restores the pristine bytes.
 // Addresses/layout: sub_003E4040, sub_003E39A8, sub_003E4508 (USA ELF).
 #include "ps2_cd_overlay.h"
@@ -43,6 +43,7 @@ struct State
     bool enabled = false, active = false;
     uint32_t base = 0, stride = 0, seed = 0, count = 0;
     std::vector<uint8_t> stock;
+    std::vector<std::string> names; // appended IDs: count + index + 1
 };
 inline State &state() { static State s; return s; }
 
@@ -110,8 +111,6 @@ inline bool transition(uint8_t *ram, size_t size, bool on, std::string &msg)
         std::memcpy(row.data() + 12, name.data(), name.size());
         rows.push_back(std::move(row));
     }
-    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b)
-              { return read32(a.data()) < read32(b.data()); });
     // Capture all allocated slots, including the unused tail. Repeated
     // visits always restore this true stock image, never an in-mode table.
     if (s.stock.empty())
@@ -121,12 +120,37 @@ inline bool transition(uint8_t *ram, size_t size, bool on, std::string &msg)
     }
     else if (count != s.count || std::memcmp(ram + base, s.stock.data(), s.stock.size()) != 0)
     { msg = "file table: stock bytes changed since capture"; return false; }
-    for (size_t i = 0; i < rows.size(); ++i)
+    // Guest CD handles cache 1-based row indices. Never move the stock
+    // prefix or change the bsearch count: only overlay lookup uses the tail.
+    s.names.clear();
+    for (size_t i = count; i < rows.size(); ++i)
+    {
         std::memcpy(ram + base + i * stride, rows[i].data(), stride);
-    write32(ram + kCount, static_cast<uint32_t>(rows.size()));
+        s.names.emplace_back(reinterpret_cast<const char *>(rows[i].data() + 12));
+    }
     s.active = true;
-    std::fprintf(stderr, "[ssx3-files] installed base=0x%x count=%u+%zu stride=%u seed=0x%x\n",
+    std::fprintf(stderr, "[ssx3-files] appended base=0x%x stock-count=%u overlay=%zu stride=%u seed=0x%x\n",
                  base, count, ov->files.size(), stride, seed);
     return true;
+}
+// 0x3e4508 ABI: a0=query, a2=out 1-based ID, v0=found. A miss
+// delegates to the original guest lookup, including all stock queries.
+inline bool lookup(uint8_t *ram, size_t size, uint32_t query, uint32_t out)
+{
+    const auto &s = state();
+    if (!s.enabled || !s.active || !ram) return false;
+    query &= 0x1fffffffu; out &= 0x1fffffffu;
+    if (!query || query >= size || !out || uint64_t(out) + 4 > size) return false;
+    const size_t limit = std::min<size_t>(256, size - query);
+    const auto *end = static_cast<const uint8_t *>(std::memchr(ram + query, 0, limit));
+    if (!end) return false;
+    const auto name = normalized(std::string(reinterpret_cast<const char *>(ram + query), end - ram - query));
+    for (size_t i = 0; i < s.names.size(); ++i)
+        if (s.names[i] == name)
+        {
+            write32(ram + out, s.count + static_cast<uint32_t>(i) + 1);
+            return true;
+        }
+    return false;
 }
 } // namespace ps2_ssx3_file_table

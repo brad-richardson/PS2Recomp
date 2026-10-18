@@ -202,7 +202,7 @@ void register_ps2_cd_overlay_tests()
             t.IsNotNull(ov.fileFor(ov.files[0].lbn), "pseudo-LBN data remains available for mode-on");
             fs::remove_all(dir); });
 
-        tc.Run("mode files merge unsigned keys and restore every allocated byte", [](TestCase &t)
+        tc.Run("mode files preserve cached stock IDs and restore every allocated byte", [](TestCase &t)
                {
             using namespace ps2_ssx3_file_table;
             std::vector<uint8_t> ram(0x600000, 0);
@@ -210,7 +210,8 @@ void register_ps2_cd_overlay_tests()
             write32(ram.data() + kBase, base);
             write32(ram.data() + kNameBytes, 256);
             write32(ram.data() + kCount, 2);
-            write32(ram.data() + kSeed, 0x12345678);
+            write32(ram.data() + kSeed, 0x1505);
+            write32(ram.data() + base + 4, 777u);
             write32(ram.data() + base, 0x7fffffffu);
             write32(ram.data() + base + stride, 0x80000000u);
             ram[base + kCapacity * stride - 1] = 0xab;
@@ -225,27 +226,48 @@ void register_ps2_cd_overlay_tests()
             t.IsTrue(ov.listingDormant, "ISO listing remains dormant");
             std::string msg;
             t.IsTrue(transition(ram.data(), ram.size(), true, msg), msg);
-            t.Equals(read32(ram.data() + kCount), 3u, "one free slot used");
-            const auto key = hash("/DATA/WORLDS/GARI.BIG", 0x12345678);
+            t.Equals(read32(ram.data() + kCount), 2u, "stock bsearch count retained");
+            t.Equals(read32(ram.data() + base + 4), 777u, "cached file ID 1 still reads its stock LBN");
+            t.IsTrue(std::memcmp(ram.data() + base, stock.data() + base, 2 * stride) == 0, "stock prefix byte-identical");
+            const auto key = hash("/DATA/WORLDS/GARI.BIG", 0x1505);
             t.Equals(hash("/DATA/WORLDS/GARI.BIG", 0x1505u), 0x0363ef6au, "live guest table hash fixture");
-            t.Equals(key, 0xc07056bdu, "reverse-djb2 fixture with live-style seed");
+            t.Equals(key, 0x0363ef6au, "overlay key precedes stock prefix");
             bool found = false;
             for (unsigned i = 0; i < 3; ++i)
             {
                 const auto *row = ram.data() + base + i * stride;
-                if (i) t.IsTrue(read32(row - stride) < read32(row), "unsigned ordering across sign bit");
+                if (i == 1) t.IsTrue(read32(row - stride) < read32(row), "stock unsigned ordering across sign bit");
                 if (read32(row) != key) continue;
                 found = true;
+                t.Equals(i, 2u, "overlay appended after stock IDs");
                 t.Equals(read32(row + 4), 1000u, "overlay pseudo-LBN");
                 t.Equals(read32(row + 8), 5000u, "overlay byte size");
                 t.Equals(std::string(reinterpret_cast<const char *>(row + 12)), std::string("/DATA/WORLDS/GARI.BIG"), "normalized lookup name");
             }
             t.IsTrue(found, "overlay hash resolves in live table");
+            constexpr uint32_t query = 0x200000, out = 0x200200;
+            const auto lookupQuery = [&](const char *name) {
+                std::strcpy(reinterpret_cast<char *>(ram.data() + query), name);
+                return lookup(ram.data(), ram.size(), query, out);
+            };
+            t.IsTrue(lookupQuery("data\\worlds\\gari.big"), "normalized overlay-only lookup handled");
+            t.Equals(read32(ram.data() + out), 3u, "appended stable ID");
+            const auto result = read32(ram.data() + out);
+            t.Equals(read32(ram.data() + base + (result - 1) * stride + 4), 1000u, "guest read ABI resolves overlay LBN");
+            t.IsFalse(lookupQuery("data/worlds/bam.big"), "stock query delegates unchanged");
+            t.Equals(read32(ram.data() + out), 3u, "miss does not write output");
+            t.IsFalse(lookup(ram.data(), ram.size(), query, 0x5fffff), "out-of-bounds output delegates");
+            std::memset(ram.data() + query, 'x', 256);
+            t.IsFalse(lookup(ram.data(), ram.size(), query, out), "unterminated query delegates");
+            // Query scratch is unrelated to the mode-owned restore region.
+            std::memcpy(ram.data() + query, stock.data() + query, 0x204);
             const auto active = ram;
             t.IsTrue(transition(ram.data(), ram.size(), true, msg), msg);
             t.IsTrue(ram == active, "repeated mode-on is idempotent");
             t.IsTrue(transition(ram.data(), ram.size(), false, msg), msg);
             t.IsTrue(ram == stock, "mode-off restores all slots and count byte-exactly");
+            t.IsFalse(lookupQuery("data/worlds/gari.big"), "mode-off overlay query delegates");
+            std::memcpy(ram.data() + query, stock.data() + query, 0x204);
             t.IsTrue(transition(ram.data(), ram.size(), true, msg), msg);
             t.IsTrue(transition(ram.data(), ram.size(), false, msg), msg);
             t.IsTrue(ram == stock, "second visit restores true stock again");

@@ -34,6 +34,7 @@ namespace
     PS2Runtime::RecompiledFunction g_tkLuiLoad = nullptr;
     PS2Runtime::RecompiledFunction g_tkTrampoline = nullptr;
     PS2Runtime::RecompiledFunction g_tkMapInfo = nullptr;
+    PS2Runtime::RecompiledFunction g_tkFileLookup = nullptr;
     __m128i g_tkV0{}; // scePadRead's return registers across a list refresh
     __m128i g_tkV1{};
 
@@ -50,6 +51,20 @@ namespace
     void tkSetGpr(R5900Context *ctx, int reg, uint32_t value)
     {
         ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value)));
+    }
+
+    // preserve-fix-1: stock handles/count remain untouched. Only exact
+    // overlay names get IDs in appended slots while mode owns the table.
+    void tkFileLookupWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == 0x3e4508u &&
+            ps2_ssx3_file_table::lookup(ram, PS2_RAM_SIZE, getRegU32(ctx, 4), getRegU32(ctx, 6)))
+        {
+            tkSetGpr(ctx, 2, 1);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+        g_tkFileLookup(ram, ctx, runtime);
     }
 
     // Patches every CMNAMER copy in RAM (the game reads it once at boot).
@@ -425,7 +440,8 @@ void applyTrickyMenu(PS2Runtime &runtime)
     if (!knob())
         return;
     const uint8_t *ram = runtime.memory().getRDRAM();
-    if (!ram || ps2_ssx3_tricky::rd32(ram, ps2_ssx3_tricky_preview::kMapInfo) != 0x27bdf440u)
+    if (!ram || ps2_ssx3_tricky::rd32(ram, ps2_ssx3_tricky_preview::kMapInfo) != 0x27bdf440u ||
+        ps2_ssx3_tricky::rd32(ram, 0x3e4508u) != 0x27bdfea0u)
     {
         std::fprintf(stderr, "[ssx3-tricky] refused: Map info entry does not match\n");
         return;
@@ -449,7 +465,8 @@ void applyTrickyMenu(PS2Runtime &runtime)
                           {kPadReadGlue, &g_tkPadGlue, &tkPadGlueWrapper},
                           {kLuiLoad, &g_tkLuiLoad, &tkLuiLoadWrapper},
                           {kTrampoline, &g_tkTrampoline, &tkTrampolineWrapper},
-                          {ps2_ssx3_tricky_preview::kMapInfo, &g_tkMapInfo, &tkMapInfoWrapper}};
+                          {ps2_ssx3_tricky_preview::kMapInfo, &g_tkMapInfo, &tkMapInfoWrapper},
+                          {0x3e4508u, &g_tkFileLookup, &tkFileLookupWrapper}};
     for (const Hook &h : hooks)
         if (!(*h.orig = runtime.lookupFunction(h.pc)))
         {
