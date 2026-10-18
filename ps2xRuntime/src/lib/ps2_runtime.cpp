@@ -8442,6 +8442,13 @@ void PS2Runtime::run()
                                                        static_cast<int>(screenHeight));
             }
             set2Nav.res = set2DefRes;
+            // config-fix-1 item 11: seed the row from the effective base
+            // env first (tier default only as the fallback marker), so the
+            // row cannot show a 2x default while the renderer runs 1x. A
+            // persisted settings.env choice still wins below.
+            if (const char *effRes = std::getenv("GE1_UPSCALE");
+                effRes && effRes[0] != '\0')
+                set2Nav.res = ps2x::set2::resFromSetting(effRes, set2DefRes);
             for (const auto &kv : set2ReadSettings())
             {
                 if (kv.first == "GE1_UPSCALE")
