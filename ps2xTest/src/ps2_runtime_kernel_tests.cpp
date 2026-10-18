@@ -7,6 +7,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ee_tls_pool.h"
 #if PS2X_ENABLE_DET_HASH_TAP
 #define XXH_NO_XXH32
 #define XXH_NO_XXH3
@@ -766,6 +767,97 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("TLS pool stays bounded across many short-lived threads", [](TestCase &t)
+        {
+            namespace tp = ps2_tls_pool;
+            // Geometry mirrors the HLE pool (State.h): 256 x 256-byte blocks.
+            constexpr uint32_t kSlots = 256u;
+            constexpr uint32_t kBase = 0x01F20000u;
+            constexpr uint32_t kBlock = 0x100u;
+            uint32_t highWater = 0u;
+            std::vector<uint32_t> free;
+            // alloc/free mirror allocTlsAddr and the makeDormant release.
+            auto alloc = [&]() -> uint32_t {
+                uint32_t slot = tp::takeFree(free);
+                if (slot == tp::kNone)
+                {
+                    if (highWater >= kSlots)
+                        return tp::kNone;
+                    slot = highWater++;
+                }
+                return tp::addrOf(slot, kBase, kBlock);
+            };
+            auto release = [&](uint32_t addr) {
+                const uint32_t slot = tp::slotOf(addr, kBase, kBlock, kSlots);
+                if (slot != tp::kNone)
+                    tp::release(free, slot, highWater, kSlots);
+            };
+            // With an empty free list the carve order is the old ring order,
+            // so the first allocations keep identical addresses.
+            t.IsTrue(alloc() == kBase, "first carve is slot 0");
+            t.IsTrue(alloc() == kBase + kBlock, "second carve is slot 1");
+            t.IsTrue(tp::takeFree(free) == tp::kNone, "empty free list takes nothing");
+            // 2000 short-lived threads cycling ids 2..255 (online churn):
+            // each takes a block while live and returns it on death.
+            bool allServed = true;
+            for (int i = 0; i < 2000; ++i)
+            {
+                const uint32_t addr = alloc();
+                allServed = addr != tp::kNone && allServed;
+                release(addr);
+            }
+            t.IsTrue(allServed, "every short-lived thread got a block");
+            t.Equals(highWater, 3u, "3 carved total: no growth with thread churn");
+            // Overlapping lives: 6 threads alive at once hold distinct blocks.
+            std::vector<uint32_t> live;
+            for (int i = 0; i < 6; ++i)
+                live.push_back(alloc());
+            std::sort(live.begin(), live.end());
+            t.IsTrue(std::adjacent_find(live.begin(), live.end()) == live.end(),
+                     "no block is handed out twice while live");
+            for (const uint32_t addr : live)
+                release(addr);
+            t.Equals(highWater, 8u, "concurrent threads carve only the extra blocks");
+            // A reloaded state rebuilds the same free list from the
+            // high-water mark and the live blocks (savestate format
+            // unchanged: nothing new is persisted).
+            std::vector<uint32_t> reloaded;
+            const uint32_t mainSlot = tp::slotOf(kBase, kBase, kBlock, kSlots);
+            tp::rebuild(reloaded, highWater, {mainSlot}, kSlots);
+            t.Equals(static_cast<unsigned>(reloaded.size()), highWater - 1u,
+                     "every carved-but-unheld slot is free after reload");
+            const uint32_t reused = tp::takeFree(reloaded);
+            t.IsTrue(reused != tp::kNone && reused != mainSlot,
+                     "a reload reuses a freed block, never the live one");
+            // Stray releases are ignored: out-of-pool, misaligned, uncarved
+            // and double-free addresses never enter the free list.
+            const size_t before = free.size();
+            release(kBase - kBlock);
+            release(kBase + 1u);
+            release(tp::addrOf(highWater, kBase, kBlock));
+            release(kBase + kBlock);
+            release(kBase + kBlock);
+            t.Equals(static_cast<unsigned>(free.size()), static_cast<unsigned>(before + 1u),
+                     "only one valid release lands (double free ignored)");
+            // Exhaustion fails closed instead of aliasing a live block.
+            uint32_t hwFull = 0u;
+            std::vector<uint32_t> freeFull;
+            uint32_t last = tp::kNone;
+            for (uint32_t i = 0; i <= kSlots; ++i)
+            {
+                uint32_t slot = tp::takeFree(freeFull);
+                if (slot == tp::kNone)
+                {
+                    if (hwFull >= kSlots)
+                        slot = tp::kNone;
+                    else
+                        slot = hwFull++;
+                }
+                last = (slot == tp::kNone) ? tp::kNone : tp::addrOf(slot, kBase, kBlock);
+                t.IsTrue((i < kSlots) == (last != tp::kNone), "first 256 carves serve, 257th fails");
+            }
+        });
+
         tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)
         {
             SavedClockEnv restoreEnv;

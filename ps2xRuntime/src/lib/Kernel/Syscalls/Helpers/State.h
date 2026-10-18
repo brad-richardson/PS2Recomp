@@ -4,6 +4,8 @@
 #include <cstdint>
 #include "ps2_hle_pools.h"
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 // UPR1: fio descriptors live in PS2Vfs (upstream #244); this counts the ones
 // the guest holds open so a save state can refuse them (SS1).
@@ -233,6 +235,14 @@ static constexpr uint32_t kGuestSyscallTableProbeBase = 0x000002F0u;
 
 inline std::mutex g_tls_mutex;
 inline uint32_t g_tls_index = 0;
+// tls-ring-1: freed TLS slot indices, reused before carving new space.
+// Transient: never saved; rebuilt from g_tls_index plus the loaded threads'
+// tlsBase fields after a savestate load (see ee_tls_pool.h).
+inline std::vector<uint32_t> g_tls_free;
+// Staging for that rebuild: the scheduler section loads first and records
+// every loaded thread's live TLS address here; the syscalls section (which
+// loads second and owns g_tls_index) consumes and clears it.
+inline std::vector<uint32_t> g_tls_load_live;
 
 inline std::mutex g_osd_mutex;
 inline bool g_osd_config_initialized = false;

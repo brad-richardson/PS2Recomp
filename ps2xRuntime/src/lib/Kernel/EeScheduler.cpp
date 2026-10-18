@@ -28,6 +28,8 @@
 #endif
 #include "runtime/game_module.h"
 #include "runtime/ps2_pcm_ring.h"
+#include "runtime/ee_tls_pool.h" // tls-ring-1: return TLS slots on dormancy
+#include "Syscalls/Helpers/State.h" // tls-ring-1: g_tls_* pool globals
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -70,22 +72,9 @@ namespace ps2_stubs
 
 namespace
 {
-    constexpr int KE_OK = 0;
-    constexpr int KE_ERROR = -1;
-    constexpr int KE_ILLEGAL_PRIORITY = -403;
-    constexpr int KE_ILLEGAL_THID = -406;
-    constexpr int KE_UNKNOWN_THID = -407;
-    constexpr int KE_UNKNOWN_SEMID = -408;
-    constexpr int KE_UNKNOWN_EVFID = -409;
-    constexpr int KE_DORMANT = -413;
-    constexpr int KE_NOT_DORMANT = -414;
-    constexpr int KE_NOT_SUSPEND = -415;
-    constexpr int KE_NOT_WAIT = -416;
-    constexpr int KE_RELEASE_WAIT = -418;
-    constexpr int KE_SEMA_OVF = -420;
-    constexpr int KE_EVF_COND = -421;
-    constexpr int KE_WAIT_DELETE = -425;
-
+    // Kernel error codes come from Syscalls/Helpers/State.h (included for
+    // the tls-ring-1 TLS pool globals); the identical local copies lived
+    // here until they became ambiguous.
     constexpr uint32_t WEF_OR = 0x01u;
     constexpr uint32_t WEF_CLEAR = 0x10u;
     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
@@ -2626,6 +2615,21 @@ void EeScheduler::makeDormant(GuestThread &item)
     item.suspendCount = 0;
     item.wakeupCount = 0;
     item.invocations.clear();
+    // tls-ring-1: a dormant guest thread holds no TLS: return its block for
+    // reuse (dispatcher threads, id < 0, are recycled whole instead, as with
+    // the invocation stacks). Delete requires dormant, so no delete path
+    // needs its own release.
+    if (item.id > 0 && item.tlsBase != 0)
+    {
+        std::lock_guard<std::mutex> lock(g_tls_mutex);
+        const uint32_t slot = ps2_tls_pool::slotOf(item.tlsBase,
+                                                   ps2_hle_pools::place(kTlsPoolBase),
+                                                   kTlsBlockSize,
+                                                   kTlsPoolCount);
+        if (slot != ps2_tls_pool::kNone)
+            ps2_tls_pool::release(g_tls_free, slot, g_tls_index, kTlsPoolCount);
+        item.tlsBase = 0;
+    }
 }
 
 void EeScheduler::removeFromWaitObject(GuestThread &item)

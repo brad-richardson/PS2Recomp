@@ -5,7 +5,10 @@
 #include "runtime/ps2_savestate.h"
 #include "../ps2_savestate_internal.h"
 #include "ps2_fh1_full120.h"
+#include "runtime/ee_tls_pool.h" // tls-ring-1: rebuild the TLS free list
+#include "Syscalls/Helpers/State.h" // tls-ring-1: g_tls_* pool globals
 
+#include <algorithm>
 #include <string>
 #include <typeinfo>
 
@@ -308,6 +311,33 @@ bool EeSchedulerSavestate::load(EeScheduler &s, Reader &r, PS2Runtime &runtime)
     s.noteThreadContainerMutated();
     s.m_runningThread = nullptr;
     s.m_runningThreadId = -1;
+    // tls-ring-1: stage every loaded thread's live TLS address for the
+    // syscalls section (which loads second and owns g_tls_index) and take a
+    // first pass at the free list with the current index. The syscalls pass
+    // rebuilds again with the loaded index, so either section order ends
+    // with the free list derived from the loaded state. Format unchanged.
+    {
+        std::lock_guard<std::mutex> lock(g_tls_mutex);
+        g_tls_load_live.clear();
+        for (const auto &[id, t] : s.m_threads)
+        {
+            (void)id;
+            if (t.tlsBase != 0)
+                g_tls_load_live.push_back(t.tlsBase);
+        }
+        std::vector<uint32_t> liveSlots;
+        for (const uint32_t addr : g_tls_load_live)
+        {
+            const uint32_t slot = ps2_tls_pool::slotOf(addr,
+                                                       ps2_hle_pools::place(kTlsPoolBase),
+                                                       kTlsBlockSize,
+                                                       kTlsPoolCount);
+            if (slot != ps2_tls_pool::kNone)
+                liveSlots.push_back(slot);
+        }
+        std::sort(liveSlots.begin(), liveSlots.end());
+        ps2_tls_pool::rebuild(g_tls_free, g_tls_index, liveSlots, kTlsPoolCount);
+    }
     readOrdered(r, s.m_semaphores, [](Reader &rr, auto &entry) {
         EeSemaphore &v = entry.second;
         rr.pod(entry.first);

@@ -1,5 +1,6 @@
 #include "ps2_e41_trace.h" // E41 plant watch (default off)
 #include "ps2_rpl3_nv.h" // RPL3: recorded OSD timezone (padrec v3)
+#include "runtime/ee_tls_pool.h" // tls-ring-1: TLS slot free list
 #include <cstdlib> // getenv for the deterministic timezone override
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)
@@ -379,9 +380,20 @@ static uint32_t allocTlsAddr(uint8_t *rdram)
     if (!rdram || kTlsPoolCount == 0)
         return 0;
 
+    // tls-ring-1: reuse a freed block before carving new space. With an
+    // empty free list this carves slots 0, 1, ... exactly like the old ring,
+    // so the first 256 allocations keep identical addresses. Past 256 live
+    // blocks (no freed slot, high-water mark at the end) fail closed with 0
+    // instead of aliasing a live thread's block.
     std::lock_guard<std::mutex> lock(g_tls_mutex);
-    uint32_t slot = g_tls_index++ % kTlsPoolCount;
-    uint32_t addr = ps2_hle_pools::place(kTlsPoolBase) + (slot * kTlsBlockSize);
+    uint32_t slot = ps2_tls_pool::takeFree(g_tls_free);
+    if (slot == ps2_tls_pool::kNone)
+    {
+        if (g_tls_index >= kTlsPoolCount)
+            return 0;
+        slot = g_tls_index++;
+    }
+    uint32_t addr = ps2_tls_pool::addrOf(slot, ps2_hle_pools::place(kTlsPoolBase), kTlsBlockSize);
     rpcZeroRdram(rdram, addr, kTlsBlockSize);
     return addr;
 }

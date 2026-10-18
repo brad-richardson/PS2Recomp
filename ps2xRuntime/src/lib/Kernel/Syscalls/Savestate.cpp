@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "runtime/ps2_savestate.h"
 #include "runtime/ps2_vfs.h"
+#include "runtime/ee_tls_pool.h" // tls-ring-1: rebuild the TLS free list
 
 namespace
 {
@@ -91,6 +92,26 @@ namespace
         g_bootmode_pool_offset = r.u32();
         ps2_savestate::readOrderedPod(r, g_bootmode_addresses);
         g_tls_index = r.u32();
+        // tls-ring-1: the free list is transient (never saved), so rebuild
+        // it from the loaded high-water mark and the live addresses the
+        // scheduler section staged (it loads first). Old states, which have
+        // no free list either, rebuild the same way: format unchanged.
+        {
+            std::lock_guard<std::mutex> lock(g_tls_mutex);
+            std::vector<uint32_t> liveSlots;
+            for (const uint32_t addr : g_tls_load_live)
+            {
+                const uint32_t slot = ps2_tls_pool::slotOf(addr,
+                                                           ps2_hle_pools::place(kTlsPoolBase),
+                                                           kTlsBlockSize,
+                                                           kTlsPoolCount);
+                if (slot != ps2_tls_pool::kNone)
+                    liveSlots.push_back(slot);
+            }
+            std::sort(liveSlots.begin(), liveSlots.end());
+            ps2_tls_pool::rebuild(g_tls_free, g_tls_index, liveSlots, kTlsPoolCount);
+            g_tls_load_live.clear();
+        }
         g_osd_config_initialized = r.b();
         g_osd_config_raw = r.u32();
         g_osd_config2_raw = r.u32();
