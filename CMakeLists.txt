@@ -188,6 +188,13 @@ if(PS2X_BUILD_TEST)
     add_subdirectory("ps2xTest")
 endif()
 
+# ci-e2e-1: synthetic e2e smoke (hand-rolled ELF through ps2_recomp, booted
+# headless against ps2_runtime). Game-free: no disc, no game module.
+set(PS2X_E2E_OUT_DIR "" CACHE PATH "gen_e2e_elf.py output dir (e2e_image.h + codegen/); when set, builds ps2xE2ESmoke")
+if(PS2X_E2E_OUT_DIR)
+    add_subdirectory("ps2xTest/e2e")
+endif()
+
 if(PS2X_BUILD_STUDIO)
     add_subdirectory("ps2xStudio")
 endif()

@@ -1,0 +1,104 @@
+name: e2e-synth
+
+# HOME (post-public): ssx3-120/.github/workflows/e2e-synth.yml
+# Staged on fork lane branch ci-e2e-1-trial until ssx3-120 goes public
+# (follows public-fix-1 + the history rewrite). Do NOT add this file to the
+# fork's .github/workflows: the synthetic e2e lives in ssx3-120.
+#
+# Synthetic end-to-end: a hand-rolled MIPS EE ELF (no toolchain, no SDK, no
+# game bytes) through the pinned engine's recompiler, booted headless for
+# 120 vsyncs, hashed against the engine-committed expectation. No disc, no
+# cards, no private work directories.
+#
+# PREREQUISITE: the engine pin must include the ps2xTest/e2e harness (fork
+# lane ci-e2e-1). The harness-target check below fails loud until the pin
+# moves past it. The expectation file is engine-owned
+# (deps/PS2Recomp/ps2xTest/e2e/expected.txt): engine lanes that legitimately
+# change codegen re-mint it, the same way det keys re-mint.
+#
+# Residual risk (unproven until this runs hosted): hash minted on a lab Mac
+# vs GitHub macos-15 image. If the first hosted run mismatches with no code
+# change, suspect the image (toolchain/SDK drift), not the engine, and pin
+# what differs before re-minting.
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  synth:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      ENGINE: deps/PS2Recomp
+      E2E_OUT: ${{ runner.temp }}/e2e-synth
+      PS2X_GS_BACKEND: headless
+      PS2X_UNPACED: 1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install cmake ninja llvm python pkg-config autoconf automake libtool bison sdl3 libpng jpeg-turbo zstd lz4 webp freetype ffmpeg
+
+      - name: Generate synthetic ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$ENGINE/ps2xTest/e2e/gen_e2e_elf.py" "$E2E_OUT"
+          ls -la "$E2E_OUT"
+
+      - name: Build recompiler tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S "$ENGINE" -B "$E2E_OUT/build-tool" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_TEST=OFF \
+            -DPS2X_BUILD_STUDIO=OFF -DPS2X_ENABLE_SCCACHE=OFF -DPS2X_GAME_MODULE=none
+          cmake --build "$E2E_OUT/build-tool" --target ps2_recomp --parallel 4
+
+      - name: Recompile synthetic ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_OUT/codegen"
+          "$E2E_OUT/build-tool/ps2xRecomp/ps2_recomp" "$E2E_OUT/e2e.toml" | tee "$E2E_OUT/recomp.log"
+          grep -q 'Recompilation completed successfully' "$E2E_OUT/recomp.log"
+          grep -q 'Unhandled instructions: 0' "$E2E_OUT/recomp.log"
+          grep -q 'errors: 0' "$E2E_OUT/recomp.log"
+
+      - name: Harness target present at this pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$ENGINE/ps2xTest/e2e/e2e_main.cpp"
+          test -f "$ENGINE/ps2xTest/e2e/expected.txt"
+          grep -q 'PS2X_E2E_OUT_DIR' "$ENGINE/CMakeLists.txt"
+
+      - name: Build smoke harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S "$ENGINE" -B "$E2E_OUT/build-full" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF \
+            -DPS2X_ENABLE_SCCACHE=OFF -DPS2X_GAME_MODULE=none \
+            -DPS2X_ENABLE_DET_HASH_TAP=ON -DPS2X_E2E_OUT_DIR="$E2E_OUT"
+          cmake --build "$E2E_OUT/build-full" --target ps2xE2ESmoke --parallel 4
+
+      - name: Boot 120 vsyncs, compare hash (3 runs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            "$E2E_OUT/build-full/ps2xTest/e2e/ps2xE2ESmoke" "$ENGINE/ps2xTest/e2e/expected.txt" | tee "$E2E_OUT/run-$i.log"
+            grep -q '^E2E-OK 120 frames' "$E2E_OUT/run-$i.log"
+          done
