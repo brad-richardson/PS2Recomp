@@ -570,11 +570,18 @@ void register_ps2_settings_overlay_tests()
             // 1x writes 1 (it is never a default, but it is writable).
             const auto w3 = ps2x::set2::settingsForRestart({}, Res::R1x, false, false);
             t.IsTrue(w3[0].second == "1", "1x persists");
-            // A stale marker 1 becomes an explicit pending-off 0.
+            // A stale marker 1 becomes an explicit pending-off 0 (upsert
+            // keeps file order, so look up by key).
             const SettingsPairs staleOn{{"PS2X_INPUT_MARKER", "1"}};
             const auto w4 = ps2x::set2::settingsForRestart(staleOn, Res::Screen, false, false);
-            t.IsTrue(w4.size() == 3 && w4[0].second == "native" && w4[1].second == "0" &&
-                         w4[2].second == "0",
+            const auto w4get = [&](const char *key) {
+                for (const auto &kv : w4)
+                    if (kv.first == key)
+                        return kv.second;
+                return std::string();
+            };
+            t.IsTrue(w4.size() == 3 && w4get("GE1_UPSCALE") == "native" &&
+                         w4get("PS2X_SETTINGS_PERF") == "0" && w4get("PS2X_INPUT_MARKER") == "0",
                      "stale marker 1 overwritten by explicit pending off"); });
 
         tc.Run("menu button maps to its line (both persist explicit)", [](TestCase &t)
