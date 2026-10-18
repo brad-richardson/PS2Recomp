@@ -1090,28 +1090,14 @@ inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std:
     return fired && confirm;
 }
 
-// tk-banner-1: boot-served race-banner data. The guest parses
-// DATA/CONFIG/MUSIC.INF once at boot (before the first menu, so before any
-// mode-scoped alias installs) and caches TITLE/ARTIST per song for the
-// race-start banner. When PS2X_SSX3_TRICKY_MENU=1 and
-// PS2X_SSX3_TRICKY_MUSIC_INF names the host composite: serve the disc file
-// from it starting now. The boot no longer blanks the brand line (that was
-// tk-banner-2's stock regression: the blank hit every course); the brand
-// plus the cached titles/artists are rewritten per course mode by the
-// banner scope (ps2_ssx3_banner_scope.h) at mode-switch time and at a lazy
-// post-parse sync. The manifest Tricky mode's own alias row (same file)
-// re-installs the alias at menu entry and Stock clears it. Either knob
-// unset (stock): no reads, no writes. Returns true when installed.
-inline bool bootBannerFromEnv(uint8_t *ram)
-{
-    const char *menu = std::getenv("PS2X_SSX3_TRICKY_MENU");
-    const char *host = std::getenv("PS2X_SSX3_TRICKY_MUSIC_INF");
-    if (!menu || std::strcmp(menu, "1") != 0 || !host || !*host || !ram)
-        return false;
-    ps2_cd_overlay::setModeAliases({{"/DATA/CONFIG/MUSIC.INF", host}});
-    std::fprintf(stderr, "[ssx3-course] boot alias /DATA/CONFIG/MUSIC.INF -> %s\n", host);
-    return true;
-}
+// tk-banner-2: the boot serves the stock DATA/CONFIG/MUSIC.INF off the
+// disc (no boot alias; P13). The guest parses it once at boot into
+// per-slot TITLE/ARTIST/ALBUM tables, and the banner scope
+// (ps2_ssx3_banner_scope.h) rewrites those tables plus the brand per
+// course mode at switch time and at a lazy post-parse sync. The manifest
+// Tricky mode's own INF alias row re-serves the composite at menu entry
+// for any late reader; Stock clears it. Either knob unset (stock): no
+// reads, no writes.
 
 // Runtime entry: called once from loadELF. Unset or empty knob = no-op.
 inline void applyFromEnv(uint8_t *ram)
@@ -1158,8 +1144,8 @@ inline void applyFromEnv(uint8_t *ram)
     }
     if (hasPicker)
         armPicker(picker(), ram, blocks, log);
-    else if (armModes(courseModes(), ram, modes, log))
-        bootBannerFromEnv(ram);
+    else
+        armModes(courseModes(), ram, modes, log);
 }
 
 } // namespace ps2_ssx3_course

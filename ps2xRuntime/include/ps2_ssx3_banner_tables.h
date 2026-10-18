@@ -1,15 +1,16 @@
 #pragma once
 // tk-banner-2: baked banner strings (generated; do not hand-edit).
 // Regenerate: local/research/tk-banner-2/tooling/gen_banner_tables.py
-// (cwd: ssx3-120 worktree). Fact strings only (titles/artists), same class
-// as music-pool-default.tsv song names; no game bytes.
+// (cwd: ssx3-120 worktree). Fact strings only (titles/artists/albums),
+// same class as music-pool-default.tsv song names; no game bytes.
 
 namespace ps2_ssx3_course {
 namespace banner {
 
 // tk-banner-2: INF-order (guest record order) banner strings.
 // Stock: pinned ISO SSX 3 (USA) DATA/CONFIG/MUSIC.INF cipher 3c2f8eb1.
-// Tricky: music-banner-default.tsv (ssx3-120).
+// Tricky: music-banner-default.tsv (ssx3-120); Tricky albums are
+// empty (no album data on Tricky's disc: blank line 4).
 inline constexpr const char *kBannerStockTitle[35] = {
     "Deep End - Utah Saints Remix",
     "All Night",
@@ -84,6 +85,43 @@ inline constexpr const char *kBannerStockArtist[35] = {
     "John Morgan",
     "Finger Eleven",
 };
+inline constexpr const char *kBannerStockAlbum[35] = {
+    "Balance",
+    "SSX 3",
+    "Exodus",
+    "39 Minutes of Bliss",
+    "SSX 3",
+    "SSX 3",
+    "SSX 3",
+    "Ima Robot",
+    "White Noise",
+    "Aftershock",
+    "SSX 3",
+    "Omakase",
+    "Kittenz and Thee Glitz",
+    "In Silico",
+    "Songs for the Deaf",
+    "Ocean Ave",
+    "Wreakage",
+    "#1",
+    "X-ecuctioners SSX 3 Remix",
+    "SSX 3",
+    "Elephunk",
+    "Strays",
+    "Before Everything and After",
+    "Neighbourhood Watch",
+    "SSX 3",
+    "SSX 3",
+    "SSX 3",
+    "Exit",
+    "SSX 3",
+    "The Artist in the Ambulance",
+    "Make a Sound",
+    "Sleeping With Ghosts",
+    "",
+    "",
+    "Finger Eleven",
+};
 inline constexpr const char *kBannerTrickyTitle[35] = {
     "Superwoman",
     "Reality Detached",
@@ -156,6 +194,43 @@ inline constexpr const char *kBannerTrickyArtist[35] = {
     "",
     "BT",
     "The Forth",
+    "",
+};
+inline constexpr const char *kBannerTrickyAlbum[35] = {
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
     "",
 };
 // mus order: deepend.mus allnight.mus go.mus caesars.mus nerd.mus likethis.mus kinky.mus irobot.mus snowptrl.mus wobble.mus abullys.mus auto.mus felix.mus ride.mus qoftsa.mus yellow.mus screwup.mus fspoon.mus hground.mus poorleno.mus bep.mus janes.mus mxpxsong.mus dilated.mus bjaxx.mus leave.mus theman.mus kos.mus gdanse.mus thrice.mus apo.mus placebo.mus avalnch.mus buffet.mus finger.mus

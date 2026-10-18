@@ -1,5 +1,5 @@
 #pragma once
-// tk-banner-2: mode-scoped race-banner titles + brand.
+// tk-banner-2: mode-scoped race-banner titles + brand + album.
 //
 // tk-banner-1 installed a boot-scoped MUSIC.INF alias plus a rodata brand
 // blank (both gated on TRICKY_MENU=1 + TRICKY_MUSIC_INF), but the guest
@@ -9,21 +9,23 @@
 // (tk-banner-2 repro: Happiness showed blank/"Adam's Revenge"; expected
 // "EA RADIO BIG"/"Ride"/"Deepsky").
 //
-// Forensics (savestate scan, REPORT): the cache is two 35x100B NUL-padded
-// tables in INF section order (titles, then artists); no album table
-// nearby (the banner's ALBUM fallback reads the boot-served raw file, so
-// the boot keeps serving the Tricky composite whose ALBUMs are cleared).
-// No stock pool ARTIST is empty, so title+artist rewrites fully determine
-// stock banners.
+// Forensics (savestate scans, REPORT): the cache is three 35x100B
+// NUL-padded tables in INF section order (titles, artists, albums). The
+// boot serves the stock INF (P13); the rewrite installs all three tables
+// per mode, so stock races get exact stock banners (brand/title/artist/
+// album) and Tricky races get Tricky titles/artists with blank albums (no
+// album data on Tricky's disc). The Tricky album set is all empty, so the
+// album table is discovered best-effort via the stock order.
 //
-// Rule (pool-aware): titles/artists/brand follow the pool that will serve
-// the race. The Tricky set installs only when the target mode aliases
-// MUSIC.BIG to an existing host file (Android pool; the overlay carries no
-// pool files). Otherwise the stock set installs (stock courses, iOS which
-// ships no pool by design, missing composites). Table bases are discovered
-// by strict order+stride scan, never assumed: a guest-side move degrades to
-// a loud refusal with no writes. Knob off (either env unset, or no armed
-// modes): no reads, no writes (det-IDENTICAL).
+// Rule (pool-aware): titles/artists/albums/brand follow the pool that
+// will serve the race. The Tricky set installs only when the target mode
+// aliases MUSIC.BIG to an existing host file (Android pool; the overlay
+// carries no pool files). Otherwise the stock set installs (stock
+// courses, iOS which ships no pool by design, missing composites). Table
+// bases are discovered by strict order+stride scan, never assumed: a
+// guest-side move degrades to a loud refusal with no writes. Knob off
+// (either env unset, or no armed modes): no reads, no writes
+// (det-IDENTICAL).
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -41,13 +43,15 @@ namespace banner {
 inline constexpr size_t kRecords = 35u;
 inline constexpr size_t kField = 100u;
 inline constexpr uint32_t kNoTable = 0xFFFFFFFFu;
+inline constexpr uint32_t kRamBytes = 32u * 1024u * 1024u;
 inline constexpr uint32_t kBrandAddr = 0x46EAE8u;
 inline constexpr char kBrand[] = "EA RADIO BIG";
 inline constexpr char kBlank[] = "            "; // 12 spaces, same width as kBrand
 static_assert(sizeof(kBrand) == sizeof(kBlank), "brand and blank share the field width");
 
-// Same guard as bootBannerFromEnv: without the boot-served Tricky INF the
-// cache is stock and there is nothing to scope.
+// Master switch for the banner scoping (same knobs the play env sets).
+// Unsetting PS2X_SSX3_TRICKY_MUSIC_INF disables every banner write: the
+// boot serves the stock INF and the cache stays stock (env-only fallback).
 inline bool knob()
 {
     const char *menu = std::getenv("PS2X_SSX3_TRICKY_MENU");
@@ -60,6 +64,21 @@ inline bool fieldFits(const char *s)
     return std::strlen(s) < kField;
 }
 
+// True when all 35 records prefix-match with NUL terminators at the stride.
+inline bool tableMatches(const uint8_t *ram, uint32_t base, const char *const *titles)
+{
+    if (base + kRecords * kField > kRamBytes)
+        return false;
+    for (size_t i = 0; i < kRecords; ++i)
+    {
+        const size_t tl = std::strlen(titles[i]);
+        const uint8_t *rec = ram + base + i * kField;
+        if (std::memcmp(rec, titles[i], tl) != 0 || rec[tl] != 0)
+            return false;
+    }
+    return true;
+}
+
 // Strict order+stride discovery: every record must prefix-match its title
 // with a NUL terminator (rejects the raw INF text, where titles sit inside
 // TITLE = "..." lines). Anchors on the first non-empty record (some sets
@@ -67,7 +86,6 @@ inline bool fieldFits(const char *s)
 // Returns the table base or kNoTable.
 inline uint32_t findTable(const uint8_t *ram, const char *const *titles)
 {
-    static constexpr uint32_t kRamBytes = 32u * 1024u * 1024u;
     const size_t span = kRecords * kField;
     size_t anchor = 0;
     while (anchor < kRecords && titles[anchor][0] == 0)
@@ -90,14 +108,7 @@ inline uint32_t findTable(const uint8_t *ram, const char *const *titles)
             continue;
         }
         off = found - static_cast<uint32_t>(prefix);
-        bool ok = true;
-        for (size_t i = 0; ok && i < kRecords; ++i)
-        {
-            const size_t tl = std::strlen(titles[i]);
-            const uint8_t *rec = ram + off + i * kField;
-            ok = std::memcmp(rec, titles[i], tl) == 0 && rec[tl] == 0;
-        }
-        if (ok)
+        if (tableMatches(ram, off, titles))
             return off;
         off = found + 1;
     }
@@ -113,10 +124,45 @@ inline size_t anchorIndex(const char *const *titles)
     return anchor;
 }
 
+// Which set the cached tables hold: 1 tricky, 0 stock, -1 neither/torn
+// (a savestate load or guest reallocation leaves stale bases behind;
+// callers re-discover on -1 instead of writing to them). The album table
+// is checked when its base is known; the Tricky album set is all empty,
+// so a Tricky-cached album table reads as 3500 zero bytes.
+inline bool albumsMatch(const uint8_t *ram, uint32_t albumBase, bool tricky)
+{
+    if (albumBase == kNoTable)
+        return true;
+    if (albumBase + kRecords * kField > kRamBytes)
+        return false;
+    if (tricky)
+    {
+        for (size_t i = 0; i < kRecords * kField; ++i)
+            if (ram[albumBase + i] != 0)
+                return false;
+        return true;
+    }
+    return tableMatches(ram, albumBase, kBannerStockAlbum);
+}
+
+inline int cachedSet(const uint8_t *ram, uint32_t titleBase, uint32_t artistBase, uint32_t albumBase)
+{
+    const bool tt = tableMatches(ram, titleBase, kBannerTrickyTitle);
+    const bool ta = tableMatches(ram, artistBase, kBannerTrickyArtist);
+    const bool st = tableMatches(ram, titleBase, kBannerStockTitle);
+    const bool sa = tableMatches(ram, artistBase, kBannerStockArtist);
+    if (tt && ta && albumsMatch(ram, albumBase, true))
+        return 1;
+    if (st && sa && albumsMatch(ram, albumBase, false))
+        return 0;
+    return -1;
+}
+
 struct SyncState
 {
     uint32_t titleBase = kNoTable;
     uint32_t artistBase = kNoTable;
+    uint32_t albumBase = kNoTable; // best-effort: see syncForMode
     int set = -1; // -1 unknown, 0 stock, 1 tricky
     uint64_t nextTryTick = 0;
     bool refusedLogged = false;
@@ -173,16 +219,18 @@ inline bool ramHasN(const uint8_t *ram, uint32_t addr, const char *s)
     return std::memcmp(ram + addr, s, std::strlen(s)) == 0 && ram[addr + std::strlen(s)] == 0;
 }
 
-// Overwrite both tables with one set plus the brand line. Every field is
+// Overwrite the tables with one set plus the brand line. Every field is
 // length-guarded; any refusal writes nothing further and returns false.
-inline bool applySet(uint8_t *ram, bool tricky, uint32_t titleBase, uint32_t artistBase,
+// albumBase == kNoTable skips album writes (best-effort discovery).
+inline bool applySet(uint8_t *ram, bool tricky, uint32_t titleBase, uint32_t artistBase, uint32_t albumBase,
                      std::vector<std::string> *writes)
 {
     const char *const *T = tricky ? kBannerTrickyTitle : kBannerStockTitle;
     const char *const *A = tricky ? kBannerTrickyArtist : kBannerStockArtist;
+    const char *const *L = tricky ? kBannerTrickyAlbum : kBannerStockAlbum;
     for (size_t i = 0; i < kRecords; ++i)
     {
-        if (!fieldFits(T[i]) || !fieldFits(A[i]))
+        if (!fieldFits(T[i]) || !fieldFits(A[i]) || !fieldFits(L[i]))
         {
             std::fprintf(stderr, "[ssx3-course] banner: refusing over-long %s record %zu\n",
                          tricky ? "tricky" : "stock", i);
@@ -197,6 +245,12 @@ inline bool applySet(uint8_t *ram, bool tricky, uint32_t titleBase, uint32_t art
         const size_t al = std::strlen(A[i]);
         std::memcpy(ram + artistBase + i * kField, A[i], al);
         std::memset(ram + artistBase + i * kField + al, 0, kField - al);
+        if (albumBase != kNoTable)
+        {
+            const size_t ll = std::strlen(L[i]);
+            std::memcpy(ram + albumBase + i * kField, L[i], ll);
+            std::memset(ram + albumBase + i * kField + ll, 0, kField - ll);
+        }
     }
     const size_t brandLen = sizeof(kBrand) - 1;
     if (tricky)
@@ -221,9 +275,14 @@ inline bool applySet(uint8_t *ram, bool tricky, uint32_t titleBase, uint32_t art
     }
     if (writes)
     {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "banner titles: %s set @0x%06x/0x%06x + brand %s", tricky ? "tricky" : "stock",
-                      titleBase, artistBase, tricky ? "blank" : "restored");
+        char buf[160];
+        if (albumBase != kNoTable)
+            std::snprintf(buf, sizeof(buf), "banner titles: %s set @0x%06x/0x%06x/0x%06x + brand %s",
+                          tricky ? "tricky" : "stock", titleBase, artistBase, albumBase,
+                          tricky ? "blank" : "restored");
+        else
+            std::snprintf(buf, sizeof(buf), "banner titles: %s set @0x%06x/0x%06x (no album table) + brand %s",
+                          tricky ? "tricky" : "stock", titleBase, artistBase, tricky ? "blank" : "restored");
         writes->push_back(buf);
     }
     return true;
@@ -239,35 +298,49 @@ inline bool syncForMode(uint8_t *ram, const ModeT *target, std::vector<std::stri
     std::lock_guard<std::mutex> lock(mu);
     SyncState &st = syncState();
     const bool tricky = poolLive(target);
-    if (st.titleBase == kNoTable)
+    // Validate the destination before every rewrite: a savestate load or
+    // guest reallocation leaves stale bases behind. Re-discover on any
+    // mismatch instead of writing to them. The album table is
+    // best-effort (a Tricky-cached table of zeros is not locatable by
+    // content); titles/artists still heal without it.
+    if (st.titleBase == kNoTable || st.artistBase == kNoTable ||
+        cachedSet(ram, st.titleBase, st.artistBase, st.albumBase) < 0)
     {
+        st.titleBase = kNoTable;
+        st.artistBase = kNoTable;
+        st.albumBase = kNoTable;
         uint32_t t = findTable(ram, kBannerTrickyTitle);
         if (t == kNoTable)
             t = findTable(ram, kBannerStockTitle);
-        if (t == kNoTable)
-        {
-            std::fprintf(stderr, "[ssx3-course] banner: title table not found, keeping boot titles\n");
-            return false;
-        }
-        st.titleBase = t;
-    }
-    if (st.artistBase == kNoTable)
-    {
         uint32_t a = findTable(ram, kBannerTrickyArtist);
         if (a == kNoTable)
             a = findTable(ram, kBannerStockArtist);
-        if (a == kNoTable)
+        if (t == kNoTable || a == kNoTable)
         {
-            std::fprintf(stderr, "[ssx3-course] banner: artist table not found, keeping boot titles\n");
+            std::fprintf(stderr, "[ssx3-course] banner: tables not found, keeping boot titles\n");
             return false;
         }
+        uint32_t l = findTable(ram, kBannerStockAlbum);
+        if (l == kNoTable || cachedSet(ram, t, a, l) < 0)
+        {
+            if (l == kNoTable)
+                std::fprintf(stderr, "[ssx3-course] banner: album table not found, scoping titles only\n");
+            else
+            {
+                std::fprintf(stderr, "[ssx3-course] banner: tables disagree, keeping boot titles\n");
+                return false;
+            }
+        }
+        else
+            st.albumBase = l;
+        st.titleBase = t;
         st.artistBase = a;
     }
     if (!tricky && poolHostMissing(target))
     {
         std::fprintf(stderr, "[ssx3-course] banner: pool host missing, keeping stock titles\n");
     }
-    if (!applySet(ram, tricky, st.titleBase, st.artistBase, writes))
+    if (!applySet(ram, tricky, st.titleBase, st.artistBase, st.albumBase, writes))
         return false;
     st.set = tricky ? 1 : 0;
     return true;
@@ -279,6 +352,37 @@ inline bool syncForMode(uint8_t *ram, const ModeT *target, std::vector<std::stri
 // at most every 300 ticks until discovered, then fast-paths on record 0
 // (the only writer is syncForMode, so a record-0 match means in sync; a
 // savestate load shows up as a mismatch and re-syncs).
+// Fast-path equality: anchor records plus the brand line (a savestate
+// load can restore matching titles with a foreign brand).
+inline bool inSync(const uint8_t *ram, const SyncState &st, bool tricky)
+{
+    if (st.titleBase == kNoTable || st.artistBase == kNoTable || st.set != (tricky ? 1 : 0))
+        return false;
+    const char *const *T = tricky ? kBannerTrickyTitle : kBannerStockTitle;
+    const char *const *A = tricky ? kBannerTrickyArtist : kBannerStockArtist;
+    const size_t ta = anchorIndex(T);
+    const size_t aa = anchorIndex(A);
+    if (!ramHasN(ram, st.titleBase + static_cast<uint32_t>(ta * kField), T[ta]))
+        return false;
+    if (!ramHasN(ram, st.artistBase + static_cast<uint32_t>(aa * kField), A[aa]))
+        return false;
+    if (st.albumBase != kNoTable)
+    {
+        if (tricky)
+        {
+            for (size_t i = 0; i < kRecords * kField; ++i)
+                if (ram[st.albumBase + i] != 0)
+                    return false;
+        }
+        else if (!ramHasN(ram, st.albumBase, kBannerStockAlbum[0]))
+            return false;
+    }
+    const size_t brandLen = sizeof(kBrand) - 1;
+    if (tricky)
+        return std::memcmp(ram + kBrandAddr, kBlank, brandLen) == 0;
+    return std::memcmp(ram + kBrandAddr, kBrand, brandLen) == 0;
+}
+
 template <typename ModesT>
 inline void ensureSynced(uint8_t *ram, const ModesT &ms, uint64_t tick)
 {
@@ -288,16 +392,8 @@ inline void ensureSynced(uint8_t *ram, const ModesT &ms, uint64_t tick)
     const size_t cur = modeCurrent(ms, ram);
     const auto *target = cur ? &ms.modes[cur - 1u] : nullptr;
     const bool tricky = poolLive(target);
-    if (st.titleBase != kNoTable && st.artistBase != kNoTable && st.set == (tricky ? 1 : 0))
-    {
-        const char *const *T = tricky ? kBannerTrickyTitle : kBannerStockTitle;
-        const char *const *A = tricky ? kBannerTrickyArtist : kBannerStockArtist;
-        const size_t ta = anchorIndex(T);
-        const size_t aa = anchorIndex(A);
-        if (ramHasN(ram, st.titleBase + static_cast<uint32_t>(ta * kField), T[ta]) &&
-            ramHasN(ram, st.artistBase + static_cast<uint32_t>(aa * kField), A[aa]))
-            return;
-    }
+    if (inSync(ram, st, tricky))
+        return;
     if (tick < st.nextTryTick)
         return;
     st.nextTryTick = tick + 300;

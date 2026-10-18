@@ -539,38 +539,36 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(rel, (root / "rel-speech").lexically_normal().string(), "relative host resolved");
             t.Equals(abs, std::string("/abs/music-big"), "absolute host unchanged"); });
 
-        tc.Run("tk-banner-1 boot banner: knob-gated alias + brand blank, stock is a no-op", [](TestCase &t)
+        tc.Run("tk-banner-2 boot serves the stock INF (no boot alias)", [](TestCase &t)
                {
             using namespace ps2_ssx3_course;
-            std::vector<uint8_t> ram(kRamSize, 0);
-            ::unsetenv("PS2X_SSX3_TRICKY_MENU");
-            ::unsetenv("PS2X_SSX3_TRICKY_MUSIC_INF");
-            t.IsFalse(bootBannerFromEnv(ram.data()), "unset knobs install nothing");
-            t.IsFalse(bootBannerFromEnv(nullptr), "null ram installs nothing");
-            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "no pending alias");
+            namespace fs = std::filesystem;
+            const fs::path root = fs::temp_directory_path() / "tkb2-no-boot-alias";
+            fs::remove_all(root);
+            fs::create_directories(root);
+            const fs::path mf = root / "m-stock.txt";
+            {
+                std::ofstream out(mf, std::ios::binary);
+                out << "mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                       "poke = 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big\n";
+            }
+            auto ram = stockTables();
+            const char oldPoke[] = "data/ui/courspic.big";
+            std::memcpy(&ram[0x47BDB0], oldPoke, sizeof(oldPoke) - 1);
+            ::setenv("PS2X_SSX3_COURSE_MANIFEST", mf.string().c_str(), 1);
+            ::setenv("PS2X_SSX3_COURSE_PICKER", "1", 1);
             ::setenv("PS2X_SSX3_TRICKY_MENU", "1", 1);
-            t.IsFalse(bootBannerFromEnv(ram.data()), "menu without composite installs nothing");
             ::setenv("PS2X_SSX3_TRICKY_MUSIC_INF", "/host/music-inf-tricky-big", 1);
-            t.IsTrue(bootBannerFromEnv(ram.data()), "menu + composite installs");
-            auto pending = ps2_cd_overlay::pendingAliases();
-            t.Equals(pending.size(), static_cast<size_t>(1), "one pending alias");
-            t.Equals(pending[0].first, std::string("/DATA/CONFIG/MUSIC.INF"), "disc path");
-            t.Equals(pending[0].second, std::string("/host/music-inf-tricky-big"), "host path");
-            // tk-banner-2: the boot no longer blanks the brand (that hit
-            // every course); the brand follows the mode via the banner
-            // scope. The boot leaves guest bytes alone.
-            const char brand[] = "EA RADIO BIG";
-            std::memcpy(&ram[0x46EAE8], brand, sizeof(brand) - 1);
-            t.IsTrue(bootBannerFromEnv(ram.data()), "brand present: still installs");
-            t.Equals(std::string(reinterpret_cast<const char *>(&ram[0x46EAE8]), sizeof(brand) - 1),
-                     std::string(brand, sizeof(brand) - 1), "brand untouched");
-            ::setenv("PS2X_SSX3_TRICKY_MENU", "0", 1);
-            ps2_cd_overlay::clearModeAlias();
-            t.IsFalse(bootBannerFromEnv(ram.data()), "menu off installs nothing");
-            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "still off");
+            applyFromEnv(ram.data());
+            t.IsTrue(courseModes().armed, "modes still arm");
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "no boot alias: stock INF off disc");
+            ::unsetenv("PS2X_SSX3_COURSE_MANIFEST");
+            ::unsetenv("PS2X_SSX3_COURSE_PICKER");
             ::unsetenv("PS2X_SSX3_TRICKY_MENU");
             ::unsetenv("PS2X_SSX3_TRICKY_MUSIC_INF");
-            ps2_cd_overlay::clearModeAlias(); });
+            courseModes() = Modes{};
+            ps2_cd_overlay::clearModeAlias();
+            fs::remove_all(root); });
 
         tc.Run("tk-banner-2 tables: 35+35 INF-order strings, all fit the 100B fields", [](TestCase &t)
                {
@@ -581,8 +579,11 @@ void register_ps2_ssx3_course_manifest_tests()
             {
                 t.IsTrue(fieldFits(kBannerStockTitle[i]), "stock title fits");
                 t.IsTrue(fieldFits(kBannerStockArtist[i]), "stock artist fits");
+                t.IsTrue(fieldFits(kBannerStockAlbum[i]), "stock album fits");
                 t.IsTrue(fieldFits(kBannerTrickyTitle[i]), "tricky title fits");
                 t.IsTrue(fieldFits(kBannerTrickyArtist[i]), "tricky artist fits");
+                t.IsTrue(fieldFits(kBannerTrickyAlbum[i]), "tricky album fits");
+                t.IsTrue(std::strlen(kBannerTrickyAlbum[i]) == 0, "tricky albums empty");
             }
             // INF-order spot checks (deepend/allnight/go/nerd/ride/finger).
             t.Equals(std::string(kBannerStockTitle[0]), std::string("Deep End - Utah Saints Remix"), "stock[0]");
@@ -590,6 +591,8 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(std::string(kBannerStockArtist[13]), std::string("Deepsky"), "stock artist ride");
             t.Equals(std::string(kBannerTrickyTitle[13]), std::string("Adam's Revenge"), "tricky title ride");
             t.Equals(std::string(kBannerTrickyArtist[13]), std::string(""), "tricky artist ride empty");
+            t.Equals(std::string(kBannerStockAlbum[13]), std::string("In Silico"), "stock album ride");
+            t.Equals(std::string(kBannerStockAlbum[2]), std::string("Exodus"), "stock album go");
             t.Equals(std::string(kBannerStockTitle[34]), std::string("Good Times"), "stock[34]");
             t.Equals(std::string(kBannerTrickyTitle[34]), std::string("Superwoman"), "tricky[34]"); });
 
@@ -598,19 +601,22 @@ void register_ps2_ssx3_course_manifest_tests()
             using namespace ps2_ssx3_course;
             using namespace ps2_ssx3_course::banner;
             std::vector<uint8_t> ram(kRamSize, 0);
-            const uint32_t tBase = 0x500000, aBase = 0x600000;
+            const uint32_t tBase = 0x500000, aBase = 0x600000, lBase = 0x700000;
             for (size_t i = 0; i < kRecords; ++i)
             {
                 const size_t tl = std::strlen(kBannerTrickyTitle[i]);
                 std::memcpy(&ram[tBase + i * kField], kBannerTrickyTitle[i], tl);
                 const size_t al = std::strlen(kBannerTrickyArtist[i]);
                 std::memcpy(&ram[aBase + i * kField], kBannerTrickyArtist[i], al);
+                const size_t ll = std::strlen(kBannerStockAlbum[i]);
+                std::memcpy(&ram[lBase + i * kField], kBannerStockAlbum[i], ll);
             }
             // Raw INF text elsewhere must not match (titles inside TITLE lines).
             const char raw[] = "#### Leave Home\r\n[Leave]\r\n    TITLE = \"Top Bomb\"\r\n";
-            std::memcpy(&ram[0x700000], raw, sizeof(raw) - 1);
+            std::memcpy(&ram[0x800000], raw, sizeof(raw) - 1);
             t.Equals(findTable(ram.data(), kBannerTrickyTitle), tBase, "title table found");
             t.Equals(findTable(ram.data(), kBannerTrickyArtist), aBase, "artist table found");
+            t.Equals(findTable(ram.data(), kBannerStockAlbum), lBase, "album table found");
             t.Equals(findTable(ram.data(), kBannerStockTitle), kNoTable, "stock order absent");
             std::vector<uint8_t> zero(kRamSize, 0);
             t.Equals(findTable(zero.data(), kBannerTrickyTitle), kNoTable, "garbage refused");
@@ -623,32 +629,37 @@ void register_ps2_ssx3_course_manifest_tests()
             using namespace ps2_ssx3_course;
             using namespace ps2_ssx3_course::banner;
             std::vector<uint8_t> ram(kRamSize, 0);
-            const uint32_t tBase = 0x500000, aBase = 0x600000;
+            const uint32_t tBase = 0x500000, aBase = 0x600000, lBase = 0x700000;
             for (size_t i = 0; i < kRecords; ++i)
             {
                 const size_t tl = std::strlen(kBannerStockTitle[i]);
                 std::memcpy(&ram[tBase + i * kField], kBannerStockTitle[i], tl);
                 const size_t al = std::strlen(kBannerStockArtist[i]);
                 std::memcpy(&ram[aBase + i * kField], kBannerStockArtist[i], al);
+                const size_t ll = std::strlen(kBannerStockAlbum[i]);
+                std::memcpy(&ram[lBase + i * kField], kBannerStockAlbum[i], ll);
             }
             const char brand[] = "EA RADIO BIG";
             std::memcpy(&ram[kBrandAddr], brand, sizeof(brand) - 1);
             std::vector<std::string> writes;
-            t.IsTrue(applySet(ram.data(), true, tBase, aBase, &writes), "tricky applies");
+            t.IsTrue(applySet(ram.data(), true, tBase, aBase, lBase, &writes), "tricky applies");
             t.IsTrue(ramHasN(ram.data(), tBase + 13 * 100, "Adam's Revenge"), "ride title tricky");
             t.IsTrue(ramHasN(ram.data(), aBase + 13 * 100, ""), "ride artist cleared");
+            t.IsTrue(ramHasN(ram.data(), lBase + 13 * 100, ""), "ride album cleared");
             t.IsTrue(ramHasN(ram.data(), tBase, "Superwoman"), "record 0 tricky");
             t.Equals(std::string(reinterpret_cast<const char *>(&ram[kBrandAddr]), sizeof(brand) - 1),
                      std::string(sizeof(brand) - 1, ' '), "brand blanked");
-            t.IsTrue(applySet(ram.data(), true, tBase, aBase, nullptr), "re-apply idempotent");
-            t.IsTrue(applySet(ram.data(), false, tBase, aBase, &writes), "stock restores");
+            t.IsTrue(applySet(ram.data(), true, tBase, aBase, lBase, nullptr), "re-apply idempotent");
+            t.IsTrue(applySet(ram.data(), false, tBase, aBase, lBase, &writes), "stock restores");
             t.IsTrue(ramHasN(ram.data(), tBase + 13 * 100, "Ride"), "ride title stock");
             t.IsTrue(ramHasN(ram.data(), aBase + 13 * 100, "Deepsky"), "ride artist stock");
+            t.IsTrue(ramHasN(ram.data(), lBase + 13 * 100, "In Silico"), "ride album stock");
+            t.IsTrue(ramHasN(ram.data(), lBase + 2 * 100, "Exodus"), "go album stock");
             t.Equals(std::string(reinterpret_cast<const char *>(&ram[kBrandAddr]), sizeof(brand) - 1),
                      std::string(brand, sizeof(brand) - 1), "brand restored");
             // Unknown brand blocks only the brand step's contract.
             std::memcpy(&ram[kBrandAddr], "EA RADIO BIZ", sizeof(brand) - 1);
-            t.IsFalse(applySet(ram.data(), true, tBase, aBase, nullptr), "strange brand refused");
+            t.IsFalse(applySet(ram.data(), true, tBase, aBase, lBase, nullptr), "strange brand refused");
             t.IsTrue(ramHasN(ram.data(), tBase, "Superwoman"), "titles still written"); });
 
         tc.Run("tk-banner-2 pool-aware: tricky needs a live MUSIC.BIG alias", [](TestCase &t)
@@ -681,5 +692,111 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsFalse(syncForMode(ram.data(), &m, &writes), "unknown layout refused");
             t.IsTrue(writes.empty(), "no write lines");
             t.IsTrue(ram[0x500000] == 0, "ram untouched");
+            resetForTest(); });
+
+        tc.Run("tk-banner-2 cachedSet names the held set, torn reads -1", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            using namespace ps2_ssx3_course::banner;
+            std::vector<uint8_t> ram(kRamSize, 0);
+            const uint32_t tBase = 0x500000, aBase = 0x600000, lBase = 0x700000;
+            auto put = [&](const char *const *T, const char *const *A, const char *const *L)
+            {
+                for (size_t i = 0; i < kRecords; ++i)
+                {
+                    const size_t tl = std::strlen(T[i]);
+                    std::memcpy(&ram[tBase + i * kField], T[i], tl);
+                    std::memset(&ram[tBase + i * kField + tl], 0, kField - tl);
+                    const size_t al = std::strlen(A[i]);
+                    std::memcpy(&ram[aBase + i * kField], A[i], al);
+                    std::memset(&ram[aBase + i * kField + al], 0, kField - al);
+                    const size_t ll = std::strlen(L[i]);
+                    std::memcpy(&ram[lBase + i * kField], L[i], ll);
+                    std::memset(&ram[lBase + i * kField + ll], 0, kField - ll);
+                }
+            };
+            t.Equals(cachedSet(ram.data(), tBase, aBase, lBase), -1, "zeros read -1");
+            put(kBannerTrickyTitle, kBannerTrickyArtist, kBannerTrickyAlbum);
+            t.Equals(cachedSet(ram.data(), tBase, aBase, lBase), 1, "tricky reads 1");
+            put(kBannerStockTitle, kBannerStockArtist, kBannerStockAlbum);
+            t.Equals(cachedSet(ram.data(), tBase, aBase, lBase), 0, "stock reads 0");
+            put(kBannerTrickyTitle, kBannerStockArtist, kBannerStockAlbum);
+            t.Equals(cachedSet(ram.data(), tBase, aBase, lBase), -1, "torn reads -1");
+            put(kBannerTrickyTitle, kBannerTrickyArtist, kBannerStockAlbum);
+            t.Equals(cachedSet(ram.data(), tBase, aBase, lBase), -1, "album mismatch reads -1");
+            t.Equals(cachedSet(ram.data(), tBase, aBase, kNoTable), 1, "unknown album base skips check");
+            t.IsFalse(tableMatches(ram.data(), kNoTable, kBannerStockTitle), "wild base refused"); });
+
+        tc.Run("tk-banner-2 stale bases re-discover instead of writing", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            using namespace ps2_ssx3_course::banner;
+            resetForTest();
+            std::vector<uint8_t> ram(kRamSize, 0);
+            const uint32_t b1 = 0x500000, b2 = 0x900000, a1 = 0x600000, a2 = 0xA00000;
+            const uint32_t l1 = 0x700000, l2 = 0xB00000;
+            auto put = [&](uint32_t tb, uint32_t ab, uint32_t lb)
+            {
+                for (size_t i = 0; i < kRecords; ++i)
+                {
+                    const size_t tl = std::strlen(kBannerStockTitle[i]);
+                    std::memcpy(&ram[tb + i * kField], kBannerStockTitle[i], tl);
+                    const size_t al = std::strlen(kBannerStockArtist[i]);
+                    std::memcpy(&ram[ab + i * kField], kBannerStockArtist[i], al);
+                    const size_t ll = std::strlen(kBannerStockAlbum[i]);
+                    std::memcpy(&ram[lb + i * kField], kBannerStockAlbum[i], ll);
+                }
+            };
+            const char brand[] = "EA RADIO BIG";
+            std::memcpy(&ram[kBrandAddr], brand, sizeof(brand) - 1);
+            put(b1, a1, l1);
+            Mode m;
+            std::vector<std::string> writes;
+            t.IsTrue(syncForMode(ram.data(), &m, &writes), "first sync discovers b1");
+            // Guest reallocates: tables move, old bases poisoned.
+            put(b2, a2, l2);
+            std::memset(&ram[b1], 0xAB, kRecords * kField);
+            std::memset(&ram[a1], 0xAB, kRecords * kField);
+            std::memset(&ram[l1], 0xAB, kRecords * kField);
+            writes.clear();
+            t.IsTrue(syncForMode(ram.data(), &m, &writes), "stale bases re-discover b2");
+            t.IsTrue(ramHasN(ram.data(), b2, "Deep End - Utah Saints Remix"), "b2 rewritten");
+            t.IsTrue(ramHasN(ram.data(), l2 + 13 * 100, "In Silico"), "albums follow");
+            t.IsTrue(ram[b1] == 0xAB, "stale base untouched");
+            resetForTest(); });
+
+        tc.Run("tk-banner-2 inSync covers anchors and brand", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            using namespace ps2_ssx3_course::banner;
+            resetForTest();
+            std::vector<uint8_t> ram(kRamSize, 0);
+            const uint32_t tBase = 0x500000, aBase = 0x600000, lBase = 0x700000;
+            for (size_t i = 0; i < kRecords; ++i)
+            {
+                const size_t tl = std::strlen(kBannerStockTitle[i]);
+                std::memcpy(&ram[tBase + i * kField], kBannerStockTitle[i], tl);
+                const size_t al = std::strlen(kBannerStockArtist[i]);
+                std::memcpy(&ram[aBase + i * kField], kBannerStockArtist[i], al);
+                const size_t ll = std::strlen(kBannerStockAlbum[i]);
+                std::memcpy(&ram[lBase + i * kField], kBannerStockAlbum[i], ll);
+            }
+            const char brand[] = "EA RADIO BIG";
+            std::memcpy(&ram[kBrandAddr], brand, sizeof(brand) - 1);
+            SyncState st;
+            st.titleBase = tBase;
+            st.artistBase = aBase;
+            st.albumBase = lBase;
+            st.set = 0;
+            t.IsTrue(inSync(ram.data(), st, false), "stock in sync");
+            t.IsFalse(inSync(ram.data(), st, true), "wrong set fails");
+            ram[tBase] = 'X';
+            t.IsFalse(inSync(ram.data(), st, false), "title change fails");
+            ram[tBase] = 'D';
+            ram[lBase] = 'X';
+            t.IsFalse(inSync(ram.data(), st, false), "album change fails");
+            ram[lBase] = 'B';
+            std::memcpy(&ram[kBrandAddr], "            ", sizeof(brand) - 1);
+            t.IsFalse(inSync(ram.data(), st, false), "brand change fails");
             resetForTest(); });
         }); }
