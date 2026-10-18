@@ -114,7 +114,7 @@ void loadPs2xEnvFile()
 #endif
 }
 
-void loadSettingsEnvFile()
+void loadSettingsEnvFile(bool explicitInputMarker)
 {
     // SET2: the user settings layer (<files dir>/settings.env, written by
     // the in-game panel) reads last, over every layer above. Allowlisted to
@@ -132,10 +132,19 @@ void loadSettingsEnvFile()
                 // Upscale row too (same iPhone-bug class as the iOS mirror:
                 // without this the panel's Upscale choice never survives a
                 // restart on Android either).
+                // shortcuts-1: Input marker row persists under its env name;
+                // an explicit PS2X_INPUT_MARKER (lab use) wins over the file,
+                // mirroring the iOS launcherKeys carve-out.
                 if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF" &&
                     entry.first != "PS2X_VIRTUAL_PAD" && entry.first != "PS2X_MENU_BUTTON" &&
-                    entry.first != "GE1_ONDEVICE_UPSCALE")
+                    entry.first != "PS2X_INPUT_MARKER" && entry.first != "GE1_ONDEVICE_UPSCALE")
                     continue;
+                if (entry.first == "PS2X_INPUT_MARKER" && explicitInputMarker)
+                {
+                    __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
+                                        "settings.env: PS2X_INPUT_MARKER kept from explicit env");
+                    continue;
+                }
                 setenv(entry.first.c_str(), entry.second.c_str(), 1);
                 __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
                                     (std::string("settings.env: set ") + entry.first).c_str());
@@ -155,6 +164,11 @@ struct Ps2xEnvLoader
 {
     Ps2xEnvLoader()
     {
+        // shortcuts-1: capture an explicit PS2X_INPUT_MARKER before any
+        // layer applies (no preset or compiled default sets it, so present
+        // here means the launcher/lab set it); the settings file must not
+        // overwrite it below.
+        const bool explicitInputMarker = (std::getenv("PS2X_INPUT_MARKER") != nullptr);
         loadPs2xEnvFile();
         // CF2 S1: compiled P3 play defaults for keys the file did not set
         // (runs even when the file is missing: a missing/empty env must
@@ -174,7 +188,7 @@ struct Ps2xEnvLoader
         std::snprintf(summary, sizeof(summary), "ps2x.env: %u compiled defaults applied",
                       static_cast<unsigned>(applied));
         __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, summary);
-        loadSettingsEnvFile(); // SET2: the user layer reads last (skipped under reference above)
+        loadSettingsEnvFile(explicitInputMarker); // SET2: the user layer reads last (skipped under reference above)
     }
 };
 

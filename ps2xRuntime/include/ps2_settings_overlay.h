@@ -141,13 +141,14 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf, Upscale, Touch, Menu button. X changes
-// the pending value (Mode/Resolution apply on restart; Perf, Upscale,
-// Touch and Menu button are live). There is no Restart row: X on a clean
-// Mode/Resolution row applies the change and arms the restart; a second X
-// on that row while it still differs from the running value restarts
-// (ArmRestart/DoRestart, reusing the old one-line confirm). X anywhere
-// else, or moving off the row, disarms. Triangle or the chord closes.
+// Rows: Mode, Resolution, Perf, Upscale, Touch, Menu button, Input
+// marker. X changes the pending value (Mode/Resolution/Input marker
+// apply on restart; Perf, Upscale, Touch and Menu button are live).
+// There is no Restart row: X on a clean Mode/Resolution/Input-marker row
+// applies the change and arms the restart; a second X on that row while
+// it still differs from the running value restarts (ArmRestart/DoRestart,
+// reusing the old one-line confirm). X anywhere else, or moving off the
+// row, disarms. Triangle or the chord closes.
 // Row::Count drives the geometry, hit test and draw loops, so appending
 // a row needs no layout change.
 enum class Row : uint8_t
@@ -158,7 +159,8 @@ enum class Row : uint8_t
     Upscale = 3,
     Touch = 4,
     MenuBtn = 5,
-    Count = 6
+    Marker = 6,
+    Count = 7
 };
 static constexpr int kRowCount = static_cast<int>(Row::Count);
 
@@ -180,6 +182,8 @@ inline const char *rowLabel(Row r)
         return "Touch";
     case Row::MenuBtn:
         return "Menu button";
+    case Row::Marker:
+        return "Input marker";
     default:
         return "";
     }
@@ -374,6 +378,28 @@ inline bool menuButtonShown(MenuBtn b)
 {
     return b == MenuBtn::Shown;
 }
+
+// shortcuts-1: Input marker row <-> PS2X_INPUT_MARKER. On="1", Off=absent
+// (upsert drops empty, so a stale "1" cannot survive an Off restart).
+// Only the literal "1" arms (same strict check as lim1Apply); unset or
+// anything else reads as Off, so a hand-edited file can't arm it. The
+// code default is off; the row shows the effective env at open (explicit
+// env wins: the Android/iOS settings layers never overwrite an explicit
+// PS2X_INPUT_MARKER).
+inline bool markerFromSetting(const std::string &val)
+{
+    return val == "1";
+}
+
+inline const char *markerToSetting(bool b)
+{
+    return b ? "1" : ""; // Off: no override line
+}
+
+inline const char *markerName(bool b)
+{
+    return b ? "on" : "off";
+}
 enum class Action : uint8_t
 {
     None = 0,
@@ -392,8 +418,10 @@ struct NavState
     bool upscale = false;     // live (REM3 P11 Phase 2)
     Touch touch = Touch::Auto; // live (android-touch-1)
     MenuBtn menubtn = MenuBtn::Shown; // live (settings-res-1)
+    bool marker = false; // pending (applied on restart; shortcuts-1: dev option, default off)
     Mode runMode = Mode::M120; // running values, sampled at open (dirty detect)
     Res runRes = Res::Screen;
+    bool runMarker = false;
     unsigned nativeH = 0; // measured device height px, sampled at open (order + Screen label)
     bool restartArmed = false;
 };
@@ -406,6 +434,11 @@ inline bool modeDirty(const NavState &st)
 inline bool resDirty(const NavState &st)
 {
     return st.res != st.runRes;
+}
+
+inline bool markerDirty(const NavState &st)
+{
+    return st.marker != st.runMarker;
 }
 
 struct NavOut
@@ -460,7 +493,7 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
         }
         st.mode = (st.mode == Mode::M120) ? Mode::M60 : Mode::M120;
         out.action = Action::Changed;
-        st.restartArmed = modeDirty(st) || resDirty(st);
+        st.restartArmed = modeDirty(st) || resDirty(st) || markerDirty(st);
         break;
     case Row::Res:
         if (st.restartArmed && resDirty(st))
@@ -470,7 +503,24 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
         }
         st.res = resNext(st.res, st.nativeH);
         out.action = Action::Changed;
-        st.restartArmed = modeDirty(st) || resDirty(st);
+        st.restartArmed = modeDirty(st) || resDirty(st) || markerDirty(st);
+        break;
+    case Row::Marker:
+        // shortcuts-1 (Brad 10-18): the input marker is a developer
+        // option, default off. No live arm exists (wrapping is a boot
+        // table apply with no disarm path), so it restarts like
+        // Mode/Resolution; the reboot arms the exact PS2X_INPUT_MARKER=1
+        // path. A second X while still dirty restarts; otherwise toggle
+        // (toggling back to the running value disarms when nothing else
+        // is dirty).
+        if (st.restartArmed && markerDirty(st))
+        {
+            out.action = Action::DoRestart;
+            break;
+        }
+        st.marker = !st.marker;
+        out.action = Action::Changed;
+        st.restartArmed = modeDirty(st) || resDirty(st) || markerDirty(st);
         break;
     case Row::Perf:
         st.perf = !st.perf;
@@ -558,6 +608,7 @@ inline bool settingsKeyAllowed(const char *key)
     return k == "GE1_UPSCALE" || k == "PS2X_SETTINGS_PERF" ||
            k == "PS2X_VIRTUAL_PAD" || // android-touch-1: Touch row persists under its env name
            k == "PS2X_MENU_BUTTON" || // settings-res-1: Menu button row persists under its env name
+           k == "PS2X_INPUT_MARKER" || // shortcuts-1: Input marker row persists under its env name
            k == "GE1_ONDEVICE_UPSCALE"; // REM3 P11 Phase 2: the live toggle persists under its env name
 }
 
@@ -605,7 +656,7 @@ inline SettingsPairs parseSettingsEnv(const std::string &content)
 
 inline std::string formatSettingsEnv(const SettingsPairs &pairs)
 {
-    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Menu button).\n"
+    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Menu button/Input marker).\n"
                     "# Delete lines (or this file) to return to the platform defaults.\n";
     for (const auto &kv : pairs)
         s += kv.first + "=" + kv.second + "\n";
@@ -613,10 +664,11 @@ inline std::string formatSettingsEnv(const SettingsPairs &pairs)
 }
 
 // What the restart persists: the PENDING Resolution choice (never the
-// effective env) plus the live Perf flag. Pure so the write path is
-// unit-tested (Brad 10-17 iPhone bug: a stale choice must not survive the
-// restart — the file must carry exactly what the rows show).
-inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf);
+// effective env) plus the live Perf flag plus the PENDING Input-marker
+// choice. Pure so the write path is unit-tested (Brad 10-17 iPhone bug:
+// a stale choice must not survive the restart — the file must carry
+// exactly what the rows show).
+inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf, bool marker);
 
 // Upsert one key (empty val removes it). Keeps file order, appends new keys.
 inline SettingsPairs upsertSettings(SettingsPairs cur, const std::string &key, const std::string &val)
@@ -664,10 +716,11 @@ inline const char *resToUpscale(Res r)
     }
 }
 
-inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf)
+inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf, bool marker)
 {
     SettingsPairs out = upsertSettings(pairs, "GE1_UPSCALE", resToUpscale(res));
     out = upsertSettings(out, "PS2X_SETTINGS_PERF", perf ? "1" : "0");
+    out = upsertSettings(out, "PS2X_INPUT_MARKER", markerToSetting(marker));
     return out;
 }
 

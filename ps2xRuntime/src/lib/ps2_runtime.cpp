@@ -3066,9 +3066,10 @@ void ps2x::set2::set2NoteExecArgs(int argc, char **argv)
 
 namespace
 {
-// Re-exec the runner with Mode/Resolution applied through the env (the Mac
-// has no settings file). Returns false when exec fails (caller stays open).
-bool set2MacRestart(bool want120, const char *upscaleOrNull)
+// Re-exec the runner with Mode/Resolution/Input-marker applied through the
+// env (the Mac has no settings file). Returns false when exec fails
+// (caller stays open).
+bool set2MacRestart(bool want120, const char *upscaleOrNull, bool markerOn)
 {
     if (g_set2Argc < 1 || !g_set2Argv || !g_set2Argv[0])
         return false;
@@ -3076,10 +3077,11 @@ bool set2MacRestart(bool want120, const char *upscaleOrNull)
     for (char **e = environ; e && *e; ++e)
     {
         const std::string entry(*e);
-        // Fresh boot: new Mode/Resolution, and the diag test spans
-        // + shot must not fire again (else the reboot would re-open and
-        // loop).
+        // Fresh boot: new Mode/Resolution/Input-marker, and the diag test
+        // spans + shot must not fire again (else the reboot would re-open
+        // and loop).
         if (entry.compare(0, 18, "PS2X_SSX3_FULL120=") == 0 || entry.compare(0, 12, "GE1_UPSCALE=") == 0 ||
+            entry.compare(0, 18, "PS2X_INPUT_MARKER=") == 0 ||
             entry.compare(0, 19, "PS2X_SET2_TEST_PAD=") == 0 ||
             entry.compare(0, 15, "PS2X_SET2_SHOT=") == 0)
             continue;
@@ -3088,12 +3090,15 @@ bool set2MacRestart(bool want120, const char *upscaleOrNull)
     keep.push_back(want120 ? "PS2X_SSX3_FULL120=events" : "PS2X_SSX3_FULL120=");
     if (upscaleOrNull && upscaleOrNull[0] != '\0')
         keep.push_back(std::string("GE1_UPSCALE=") + upscaleOrNull);
+    if (markerOn)
+        keep.push_back("PS2X_INPUT_MARKER=1");
     std::vector<char *> envp;
     for (std::string &s : keep)
         envp.push_back(s.data());
     envp.push_back(nullptr);
-    std::fprintf(stderr, "[set2] mac re-exec %s (120=%d upscale=%s)\n", g_set2Argv[0],
-                 want120 ? 1 : 0, upscaleOrNull && upscaleOrNull[0] ? upscaleOrNull : "(default)");
+    std::fprintf(stderr, "[set2] mac re-exec %s (120=%d upscale=%s marker=%d)\n", g_set2Argv[0],
+                 want120 ? 1 : 0, upscaleOrNull && upscaleOrNull[0] ? upscaleOrNull : "(default)",
+                 markerOn ? 1 : 0);
     // Flush: exec keeps thefds but a buffered line could be lost on failure paths.
     std::fflush(nullptr);
     execve(g_set2Argv[0], g_set2Argv, envp.data());
@@ -7908,6 +7913,12 @@ void PS2Runtime::run()
         set2Nav.touch = vpadTouchMode;
         const char *menubtn = std::getenv("PS2X_MENU_BUTTON");
         set2Nav.menubtn = ps2x::set2::menuBtnFromSetting(menubtn ? menubtn : "");
+        // shortcuts-1: Input marker row seeds from the effective env (the
+        // Android/iOS settings layers already merged settings.env, explicit
+        // env winning; the Mac has no settings file). Code default off.
+        const char *marker = std::getenv("PS2X_INPUT_MARKER");
+        set2Nav.marker = ps2x::set2::markerFromSetting(marker ? marker : "");
+        set2Nav.runMarker = set2Nav.marker;
     }
     // tk-menu-1 Part 2: the Tricky course list. Knob off: one cached-bool
     // check per host frame in the block below; the guest is untouched.
@@ -8429,6 +8440,10 @@ void PS2Runtime::run()
                     set2Nav.menubtn = ps2x::set2::menuBtnFromSetting(kv.second);
             }
             set2Nav.runRes = set2Nav.res;
+            // shortcuts-1: the marker row re-seeds clean at every open
+            // (pending never survives a close without a restart, like
+            // Mode/Resolution); the env cannot change mid-session.
+            set2Nav.marker = set2Nav.runMarker;
             set2Nav.nativeH = set2MeasuredH;
             set2Nav.perf = set2Perf;
             set2Nav.upscale = set2Upscale;
@@ -8505,12 +8520,13 @@ void PS2Runtime::run()
         auto set2DoRestart = [&] {
             const bool want120 = set2Nav.mode == ps2x::set2::Mode::M120;
             const char *upscale = ps2x::set2::resToUpscale(set2Nav.res); // pending choice, always explicit
-            std::fprintf(stderr, "[set2] restart want120=%d upscale=%s\n", want120 ? 1 : 0,
-                         upscale[0] ? upscale : "(default)");
+            std::fprintf(stderr, "[set2] restart want120=%d upscale=%s marker=%d\n", want120 ? 1 : 0,
+                         upscale[0] ? upscale : "(default)", set2Nav.marker ? 1 : 0);
 #if defined(PS2X_IOS)
             // settings-res-1: the persisted file carries the pending rows
             // (settingsForRestart, unit-tested) — never the effective env.
-            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf);
+            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf,
+                                                        set2Nav.marker);
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8525,7 +8541,8 @@ void PS2Runtime::run()
             std::fflush(nullptr);
             std::_Exit(0);
 #elif defined(__ANDROID__)
-            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf);
+            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf,
+                                                        set2Nav.marker);
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8540,7 +8557,7 @@ void PS2Runtime::run()
             // On success the process dies inside toHz.
 #else
 #if defined(__APPLE__)
-            if (!set2MacRestart(want120, upscale))
+            if (!set2MacRestart(want120, upscale, set2Nav.marker))
             {
                 std::fprintf(stderr, "[set2] restart: re-exec failed, staying open\n");
                 ps2x::ui::toast("Restart failed", 3.0f);
@@ -8668,11 +8685,12 @@ void PS2Runtime::run()
                     set2WriteSettings(pairs); // false on the Mac (live-only there)
                 }
                 if (navOut.action != ps2x::set2::Action::None)
-                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d menubtn=%d\n",
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d menubtn=%d marker=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
                                  static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
                                  set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0,
-                                 static_cast<int>(set2Nav.touch), static_cast<int>(set2Nav.menubtn));
+                                 static_cast<int>(set2Nav.touch), static_cast<int>(set2Nav.menubtn),
+                                 set2Nav.marker ? 1 : 0);
                 if (navOut.action == ps2x::set2::Action::Close)
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
@@ -9822,6 +9840,13 @@ void PS2Runtime::run()
                 const std::string upscaleVal(set2Nav.upscale ? "on" : "off");
                 const std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
                 const std::string menubtnVal(ps2x::set2::menuBtnName(set2Nav.menubtn));
+                // shortcuts-1: restart-marked like Mode/Resolution.
+                const bool isMarkerDirty = ps2x::set2::markerDirty(set2Nav);
+                std::string markerVal(ps2x::set2::markerName(set2Nav.marker));
+                if (set2Nav.restartArmed && isMarkerDirty)
+                    markerVal = restartHint;
+                else if (isMarkerDirty)
+                    markerVal += "  (restart)";
                 for (int i = 0; i < ps2x::set2::kRowCount; ++i)
                 {
                     if (static_cast<int>(set2Nav.sel) == i)
@@ -9848,6 +9873,8 @@ void PS2Runtime::run()
                         value = &touchVal;
                     else if (row == ps2x::set2::Row::MenuBtn)
                         value = &menubtnVal;
+                    else if (row == ps2x::set2::Row::Marker)
+                        value = &markerVal;
                     DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
                     const int valW = MeasureText(value->c_str(), rowFont);
                     DrawText(value->c_str(),

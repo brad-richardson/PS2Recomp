@@ -194,11 +194,11 @@ void register_ps2_settings_overlay_tests()
 
     MiniTest::Case("Set2Nav", [](TestCase &tc)
                    {
-        tc.Run("Up/Down wrap across the six rows", [](TestCase &t)
+        tc.Run("Up/Down wrap across the seven rows", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             auto up = ps2x::set2::navStep(st, true, false, false, false, false);
-            t.IsTrue(up.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::MenuBtn, "wrap to Menu button");
+            t.IsTrue(up.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Marker, "wrap to Input marker");
             auto down = ps2x::set2::navStep(st, false, true, false, false, false);
             t.IsTrue(down.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Mode, "wrap to Mode"); });
 
@@ -259,6 +259,44 @@ void register_ps2_settings_overlay_tests()
             auto o2 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(o2.action == ps2x::set2::Action::Changed && st.menubtn == ps2x::set2::MenuBtn::Shown,
                      "hidden -> shown"); });
+
+        tc.Run("dirty Input-marker row arms; a second X restarts; toggle back disarms", [](TestCase &t)
+               {
+            // shortcuts-1: restart-marked like Mode/Resolution (no live
+            // arm exists), default off.
+            ps2x::set2::NavState st;
+            st.runMarker = false;
+            st.marker = false;
+            st.sel = ps2x::set2::Row::Marker;
+            auto arm = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(arm.action == ps2x::set2::Action::Changed && st.marker, "first X turns on");
+            t.IsTrue(st.restartArmed, "dirty marker arms");
+            auto go = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(go.action == ps2x::set2::Action::DoRestart, "second X restarts (no third toggle)");
+            t.IsTrue(st.marker, "pending kept for the restart");
+            (void)ps2x::set2::navStep(st, false, true, false, false, false);
+            t.IsTrue(!st.restartArmed, "Down disarms");
+            // Toggling back to the running value disarms when nothing else is dirty.
+            st.sel = ps2x::set2::Row::Marker;
+            auto back = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(back.action == ps2x::set2::Action::Changed && !st.marker,
+                     "toggle back off");
+            t.IsTrue(!st.restartArmed, "clean again disarms");
+            // A dirty marker keeps the arm when a Mode toggle returns clean.
+            st.marker = true; // still dirty (runMarker false)
+            st.sel = ps2x::set2::Row::Mode;
+            st.runMode = ps2x::set2::Mode::M120;
+            st.mode = ps2x::set2::Mode::M120;
+            (void)ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(st.mode == ps2x::set2::Mode::M60 && st.restartArmed, "Mode dirty + armed");
+            (void)ps2x::set2::navStep(st, false, true, false, false, false);
+            (void)ps2x::set2::navStep(st, true, false, false, false, false);
+            st.sel = ps2x::set2::Row::Mode;
+            auto mback = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(mback.action == ps2x::set2::Action::Changed &&
+                         st.mode == ps2x::set2::Mode::M120,
+                     "Mode back to running");
+            t.IsTrue(st.restartArmed, "dirty marker keeps the arm"); });
 
         tc.Run("dirty Mode/Res rows arm; a second X restarts; nav away disarms", [](TestCase &t)
                {
@@ -330,19 +368,20 @@ void register_ps2_settings_overlay_tests()
         tc.Run("row labels are short and complete (panel-polish-1, no truncation)", [](TestCase &t)
                {
             using ps2x::set2::Row;
-            t.Equals(ps2x::set2::kRowCount, 6, "six rows");
+            t.Equals(ps2x::set2::kRowCount, 7, "seven rows");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Mode)) == "Mode", "mode");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Res)) == "Resolution", "resolution");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Perf)) == "Perf", "perf");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Upscale)) == "Upscale", "upscale");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Touch)) == "Touch", "touch");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::MenuBtn)) == "Menu button", "menu button");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Marker)) == "Input marker", "input marker");
             for (int i = 0; i < ps2x::set2::kRowCount; ++i)
             {
                 const std::string label(
                     ps2x::set2::rowLabel(static_cast<Row>(i)));
                 // Labels draw left-aligned with the value right-aligned, so
-                // nothing truncates; 12 covers "Menu button" (11).
+                // nothing truncates; 12 covers "Input marker" (12).
                 t.IsTrue(!label.empty() && label.size() <= 12, "short non-empty label");
             } });
 
@@ -429,13 +468,14 @@ void register_ps2_settings_overlay_tests()
         tc.Run("parses owned keys only, trims, skips comments and junk", [](TestCase &t)
                {
             const auto e = ps2x::set2::parseSettingsEnv(
-                "# panel file\n  GE1_UPSCALE = 2 \nPS2X_SETTINGS_PERF=1\nGE1_ONDEVICE_UPSCALE=1\nPS2X_VIRTUAL_PAD=0\nPS2X_MENU_BUTTON=0\nPS2X_SOUND=1\nnoequals\n=novalue\n");
-            t.Equals(e.size(), static_cast<size_t>(5), "allowlisted keys only");
+                "# panel file\n  GE1_UPSCALE = 2 \nPS2X_SETTINGS_PERF=1\nGE1_ONDEVICE_UPSCALE=1\nPS2X_VIRTUAL_PAD=0\nPS2X_MENU_BUTTON=0\nPS2X_INPUT_MARKER=1\nPS2X_SOUND=1\nnoequals\n=novalue\n");
+            t.Equals(e.size(), static_cast<size_t>(6), "allowlisted keys only");
             t.IsTrue(e[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("2")), "trimmed UPSCALE");
             t.IsTrue(e[1] == std::make_pair(std::string("PS2X_SETTINGS_PERF"), std::string("1")), "PERF");
             t.IsTrue(e[2] == std::make_pair(std::string("GE1_ONDEVICE_UPSCALE"), std::string("1")), "ODU");
             t.IsTrue(e[3] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("0")), "VPAD");
-            t.IsTrue(e[4] == std::make_pair(std::string("PS2X_MENU_BUTTON"), std::string("0")), "MENUBTN"); });
+            t.IsTrue(e[4] == std::make_pair(std::string("PS2X_MENU_BUTTON"), std::string("0")), "MENUBTN");
+            t.IsTrue(e[5] == std::make_pair(std::string("PS2X_INPUT_MARKER"), std::string("1")), "MARKER"); });
 
         tc.Run("no row persists PS2X_NET (online stays on; just don't pick Online)", [](TestCase &t)
                {
@@ -510,21 +550,29 @@ void register_ps2_settings_overlay_tests()
             const SettingsPairs stale{{"GE1_UPSCALE", "native"},
                                       {"PS2X_SETTINGS_PERF", "0"},
                                       {"PS2X_VIRTUAL_PAD", "1"}};
-            const auto w1 = ps2x::set2::settingsForRestart(stale, Res::R3x, true);
-            t.Equals(w1.size(), static_cast<size_t>(3), "row count kept");
+            const auto w1 = ps2x::set2::settingsForRestart(stale, Res::R3x, true, true);
+            t.Equals(w1.size(), static_cast<size_t>(4), "row count kept + marker on");
             t.IsTrue(w1[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("3")),
                      "pending 3x wins over stale native");
             t.IsTrue(w1[1] == std::make_pair(std::string("PS2X_SETTINGS_PERF"), std::string("1")),
                      "live perf flag");
             t.IsTrue(w1[2] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("1")),
                      "untouched row kept");
-            // Screen writes native explicitly (no default-clearing choice).
-            const auto w2 = ps2x::set2::settingsForRestart({}, Res::Screen, false);
+            t.IsTrue(w1[3] == std::make_pair(std::string("PS2X_INPUT_MARKER"), std::string("1")),
+                     "pending marker on persists");
+            // Screen writes native explicitly (no default-clearing choice);
+            // marker off writes no line (absent = off).
+            const auto w2 = ps2x::set2::settingsForRestart({}, Res::Screen, false, false);
             t.IsTrue(w2.size() == 2 && w2[0].second == "native" && w2[1].second == "0",
                      "empty file gains both lines");
             // 1x writes 1 (it is never a default, but it is writable).
-            const auto w3 = ps2x::set2::settingsForRestart({}, Res::R1x, false);
-            t.IsTrue(w3[0].second == "1", "1x persists"); });
+            const auto w3 = ps2x::set2::settingsForRestart({}, Res::R1x, false, false);
+            t.IsTrue(w3[0].second == "1", "1x persists");
+            // A stale marker 1 does not survive a pending-off restart.
+            const SettingsPairs staleOn{{"PS2X_INPUT_MARKER", "1"}};
+            const auto w4 = ps2x::set2::settingsForRestart(staleOn, Res::Screen, false, false);
+            t.IsTrue(w4.size() == 2 && w4[0].second == "native" && w4[1].second == "0",
+                     "stale marker 1 cleared by pending off"); });
 
         tc.Run("menu button maps to its line (shown clears it)", [](TestCase &t)
                {
@@ -536,6 +584,23 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(std::string(ps2x::set2::menuBtnToSetting(MenuBtn::Hidden)) == "0", "hidden -> 0");
             t.IsTrue(std::string(ps2x::set2::menuBtnToSetting(MenuBtn::Shown)).empty(), "shown clears");
             t.IsTrue(ps2x::set2::settingsKeyAllowed("PS2X_MENU_BUTTON"), "key allowlisted"); });
+
+        tc.Run("input marker maps to its line (off clears it); default off", [](TestCase &t)
+               {
+            // shortcuts-1 (Brad 10-18): dev option, off unless the env or
+            // the setting turns it on. Only the literal "1" arms, matching
+            // lim1Apply's strict check.
+            t.IsTrue(ps2x::set2::markerFromSetting("1"), "1 -> on");
+            t.IsTrue(!ps2x::set2::markerFromSetting(""), "unset -> off");
+            t.IsTrue(!ps2x::set2::markerFromSetting("0"), "0 -> off");
+            t.IsTrue(!ps2x::set2::markerFromSetting("junk"), "junk -> off");
+            t.IsTrue(std::string(ps2x::set2::markerToSetting(true)) == "1", "on -> 1");
+            t.IsTrue(std::string(ps2x::set2::markerToSetting(false)).empty(), "off clears");
+            t.IsTrue(std::string(ps2x::set2::markerName(true)) == "on", "on label");
+            t.IsTrue(std::string(ps2x::set2::markerName(false)) == "off", "off label");
+            t.IsTrue(ps2x::set2::settingsKeyAllowed("PS2X_INPUT_MARKER"), "key allowlisted");
+            const ps2x::set2::NavState st;
+            t.IsTrue(!st.marker && !st.runMarker, "pending + running default off"); });
 
         tc.Run("touch maps to the VIRTUAL_PAD line (auto clears it)", [](TestCase &t)
                {
