@@ -84,6 +84,12 @@ namespace
             s.tricky = false;
             tkLog(runtime, msg.empty() ? "mode: Tricky off (main menu)" : msg);
         }
+        // Part 4: picker world swaps (applyCourseMap) are per-launch; put
+        // every mapped donor record back when the frontend rebuilds so a
+        // stock event never rides a dirty record. Skips clean records, so
+        // knob-off and picker-unused boots write nothing here.
+        if (!ps2_ssx3_tricky_list::restoreAllCourseMaps(rdram, PS2_RAM_SIZE))
+            tkLog(runtime, "map restore refused at menu build");
         // The build calls this once per row: scan FEAMER (reloaded at each
         // frontend entry) once per tick.
         static uint64_t helpTick = ~0ull;

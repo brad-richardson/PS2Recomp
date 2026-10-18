@@ -8766,9 +8766,14 @@ void PS2Runtime::run()
                 else if (prog.aborted)
                 {
                     tkl::driveDisarm();
-                    ps2x::ui::toast("Tricky list: couldn't reach it", 3.0f);
-                    std::fprintf(stderr, "[tklist] tick=%llu aborted after %d presses\n",
-                                 static_cast<unsigned long long>(tkTick), prog.presses);
+                    // Part 4: a refused row (locked?) fails fast with the
+                    // overlay left open; the tries-cap tail keeps the old
+                    // line so logs tell them apart.
+                    ps2x::ui::toast(prog.refused ? "Tricky list: that course is locked" : "Tricky list: couldn't reach it",
+                                    3.0f);
+                    std::fprintf(stderr, "[tklist] tick=%llu aborted%s after %d presses\n",
+                                 static_cast<unsigned long long>(tkTick), prog.refused ? " (refused)" : "",
+                                 prog.presses);
                 }
                 else if (prog.driving)
                 {

@@ -67,8 +67,9 @@ FeView evView(uint32_t peak, uint32_t type, uint8_t row)
 
 // P4: scripted guest whose Peak cursor resets to `reset` on every
 // triangle-back (the gari5 stock behavior), or persists (`persist`:
-// the p4-gari2 shape) . Goal Garibaldi Slopestyle {peak 1, type 1,
-// row 0} on donor ev 6; clamps, no wrap (hard model).
+// the p4-gari2 shape). Part 4 goal Garibaldi Slopestyle {peak 0,
+// type 1, row 3} on donor ev 14; clamps, no wrap (hard model). The
+// Event cursor is tracked too: Cross leaves only on the goal row.
 struct ResetDrive
 {
     int phase = 0;
@@ -79,10 +80,11 @@ ResetDrive driveResetPeak(int reset, bool persist = false)
 {
     int cursorPeak = reset, acceptedPeak = reset;
     int cursorType = 0, acceptedType = 0;
+    int cursorRow = 0;
     int screen = 0;
     bool left = false;
     NavState n;
-    navStart(n, kCourses[0].opts[1], 6, 0);
+    navStart(n, kCourses[0].opts[1], 14, 0);
     uint64_t tick = 0;
     uint16_t lastOut = 0;
     const auto view = [&]() {
@@ -90,23 +92,30 @@ ResetDrive driveResetPeak(int reset, bool persist = false)
         if (left)
             return v;
         auto ram = viewRam(static_cast<uint32_t>(screen), static_cast<uint32_t>(acceptedPeak),
-                           static_cast<uint32_t>(acceptedType), 0, 0x600000, 0x601000, 0x602000);
+                           static_cast<uint32_t>(acceptedType), static_cast<uint8_t>(cursorRow), 0x600000,
+                           0x601000, 0x602000);
         return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
     };
     const auto apply = [&](uint16_t mask) {
+        // Part 4: the guest wraps (measured live: Down from Peak 1 lands
+        // Peak 3); the old clamp was harder than reality.
         if (mask == kPadDown)
         {
             if (screen == 0)
-                cursorPeak = cursorPeak < 2 ? cursorPeak + 1 : 2;
+                cursorPeak = (cursorPeak + 1) % 3;
             else if (screen == 1)
                 cursorType = cursorType < 1 ? cursorType + 1 : 1;
+            else
+                cursorRow = (cursorRow + 1) % 5;
         }
         else if (mask == kPadUp)
         {
             if (screen == 0)
-                cursorPeak = cursorPeak > 0 ? cursorPeak - 1 : 0;
+                cursorPeak = (cursorPeak + 2) % 3;
             else if (screen == 1)
                 cursorType = cursorType > 0 ? cursorType - 1 : 0;
+            else
+                cursorRow = (cursorRow + 4) % 5;
         }
         else if (mask == kPadCross)
         {
@@ -120,7 +129,7 @@ ResetDrive driveResetPeak(int reset, bool persist = false)
                 acceptedType = cursorType;
                 screen = 2;
             }
-            else
+            else if (cursorRow == 3)
                 left = true;
         }
         else if (mask == kPadTriangle && screen == 1)
@@ -215,19 +224,20 @@ void register_ps2_ssx3_tricky_list_tests()
                                   "Aloha Ice Jam", "Pipedream", "Untracked", "Tokyo Megaplex", "Alaska"};
             for (uint32_t i = 0; i < 10; ++i)
                 t.Equals(std::strcmp(kCourses[i].name, want[i]), 0, "Tricky order");
-            // Single-type targets (peak, type, row) from ssx3-events-nav.txt.
-            t.Equals(kCourses[0].opts[0].peak, 0, "Garibaldi P1");
+            // Part 4: every goal is Peak 1 (fresh-card selectable). Singles
+            // keep their native rows; dual-mode Races share P1 Race row 0
+            // (ev0), Slopestyles share P1 Free row 3 (ev14).
+            for (uint32_t i = 0; i < 10; ++i)
+                for (uint32_t m = 0; m < kCourses[i].nOpts; ++m)
+                    t.Equals(kCourses[i].opts[m].peak, 0, "all goals Peak 1");
             t.Equals(kCourses[0].opts[0].row, 0, "Garibaldi row 0");
-            t.Equals(kCourses[3].opts[0].peak, 1, "Mesablanca P2");
-            t.Equals(kCourses[4].opts[0].peak, 2, "Merqury P3");
             t.Equals(kCourses[6].opts[0].type, 1, "Pipedream freestyle");
             t.Equals(kCourses[6].opts[0].row, 2, "Pipedream row 2");
-            t.Equals(kCourses[7].opts[0].peak, 2, "Untracked P3");
             t.Equals(kCourses[9].opts[0].type, 1, "Alaska freestyle");
             // Dual-type courses share one event id; Race is the default.
             t.Equals(kCourses[2].nOpts, 2, "Elysium dual");
             t.Equals(kCourses[2].event, 16, "Elysium event 16 both rows");
-            t.Equals(kCourses[2].opts[0].row, 1, "Elysium race row 1");
+            t.Equals(kCourses[2].opts[0].row, 0, "Elysium race row 0");
             t.Equals(kCourses[2].opts[1].row, 3, "Elysium jam row 3");
             t.Equals(kCourses[5].opts[0].row, 2, "Aloha race row 2");
             t.Equals(kCourses[5].opts[1].row, 3, "Aloha jam row 3");
@@ -236,37 +246,55 @@ void register_ps2_ssx3_tricky_list_tests()
             ListState s;
             t.Equals(listGoal(s).row, 0, "step 0 goal is opts[0]");
             s.sel = 2;
-            t.Equals(listGoal(s).row, 1, "Elysium step 0 is the Race row");
+            t.Equals(listGoal(s).row, 0, "Elysium step 0 is the Race row");
             s.step = 1;
             s.mode = 1;
             t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Slopestyle row");
             s.mode = 0;
-            t.Equals(listGoal(s).row, 1, "step 1 mode 0 is Race");
+            t.Equals(listGoal(s).row, 0, "step 1 mode 0 is Race");
             t.Equals(std::strcmp(kCourses[2].modeName[1], "Slopestyle"), 0, "Jam mode name");
             t.Equals(kCourses[6].nOpts, 1, "Pipedream single-mode"); });
 
-        tc.Run("Part 3 table: four Slopestyle modes mapped onto ev6", [](TestCase &t)
+        tc.Run("Part 4 table: remapped goals share two fresh P1 cells", [](TestCase &t)
                {
-            const int mapped[] = {0, 1, 3, 4};
-            const char *arch[] = {"GARI", "SNOW", "MESA", "MERQ"};
-            const char *names[] = {"Garibaldi", "Snowdream", "Mesablanca", "Merqury City"};
+            // Race options share P1 Race row 0 (loaded ev0); Slopestyle
+            // options share P1 Free row 3 (loaded ev14). Each mapped
+            // option carries map{loadedEv, ownArchive, ownName}.
+            const int raceMapped[] = {2, 3, 4, 8};
+            const char *raceArch[] = {"ELYS", "MESA", "MERQ", "MEGA"};
+            const char *raceNames[] = {"Elysium Alps", "Mesablanca", "Merqury City", "Tokyo Megaplex"};
             for (int k = 0; k < 4; ++k)
             {
-                const int i = mapped[k];
-                t.Equals(kCourses[i].nOpts, 2, "mapped course dual-mode");
-                t.Equals(std::strcmp(kCourses[i].modeName[1], "Slopestyle"), 0, "second mode label");
-                t.Equals(kCourses[i].opts[1].peak, 1, "donor P2");
-                t.Equals(kCourses[i].opts[1].type, 1, "donor freestyle");
-                t.Equals(kCourses[i].opts[1].row, 0, "donor row 0 (ev6)");
-                t.Equals(kCourses[i].opts[1].map.event, 6, "donor ev6");
-                t.Equals(std::strcmp(kCourses[i].opts[1].map.archive, arch[k]), 0, "world archive");
-                t.Equals(std::strcmp(kCourses[i].opts[1].map.name, names[k]), 0, "world name");
-                t.Equals(kCourses[i].opts[0].map.event, -1, "race row native");
+                const int i = raceMapped[k];
+                t.Equals(kCourses[i].opts[0].peak, 0, "race donor P1");
+                t.Equals(kCourses[i].opts[0].type, 0, "donor race list");
+                t.Equals(kCourses[i].opts[0].row, 0, "donor row 0 (ev0)");
+                t.Equals(kCourses[i].opts[0].map.event, 0, "loaded ev0");
+                t.Equals(std::strcmp(kCourses[i].opts[0].map.archive, raceArch[k]), 0, "world archive");
+                t.Equals(std::strcmp(kCourses[i].opts[0].map.name, raceNames[k]), 0, "world name");
             }
-            const int native[] = {2, 5, 6, 7, 8, 9};
-            for (int k = 0; k < 6; ++k)
-                for (int m = 0; m < 2; ++m)
-                    t.Equals(kCourses[native[k]].opts[m].map.event, -1, "Jam/single rows unmapped"); });
+            const int jamMapped[] = {0, 1, 2, 3, 4, 7, 8, 9};
+            const char *jamArch[] = {"GARI", "SNOW", "ELYS", "MESA", "MERQ", "UNTRACK", "MEGA", "ALASKA"};
+            const char *jamNames[] = {"Garibaldi", "Snowdream", "Elysium Alps", "Mesablanca",
+                                      "Merqury City", "Untracked", "Tokyo Megaplex", "Alaska"};
+            for (int k = 0; k < 8; ++k)
+            {
+                const int i = jamMapped[k];
+                const int opt = (kCourses[i].nOpts == 2) ? 1 : 0;
+                t.Equals(kCourses[i].opts[opt].peak, 0, "jam donor P1");
+                t.Equals(kCourses[i].opts[opt].type, 1, "donor freestyle list");
+                t.Equals(kCourses[i].opts[opt].row, 3, "donor row 3 (ev14)");
+                t.Equals(kCourses[i].opts[opt].map.event, 14, "loaded ev14");
+                t.Equals(std::strcmp(kCourses[i].opts[opt].map.archive, jamArch[k]), 0, "world archive");
+                t.Equals(std::strcmp(kCourses[i].opts[opt].map.name, jamNames[k]), 0, "world name");
+            }
+            // The five native rows stay unmapped: both Aloha rows, both
+            // Garibaldi/Snowdream Race rows, Pipedream.
+            t.Equals(kCourses[0].opts[0].map.event, -1, "Garibaldi race native");
+            t.Equals(kCourses[1].opts[0].map.event, -1, "Snowdream race native");
+            t.Equals(kCourses[5].opts[0].map.event, -1, "Aloha race native");
+            t.Equals(kCourses[5].opts[1].map.event, -1, "Aloha jam native");
+            t.Equals(kCourses[6].opts[0].map.event, -1, "Pipedream native"); });
 
         tc.Run("list nav wraps per step; single-mode cursor stays put", [](TestCase &t)
                {
@@ -307,17 +335,17 @@ void register_ps2_ssx3_tricky_list_tests()
 
         tc.Run("navigator rides Mesablanca from the Event screen", [](TestCase &t)
                {
-            // Goal: P2 Race row 0 (event 2). The overlay opened on the Event
-            // screen, so Sync Triangles back to Peak first.
+            // Part 4 goal: P1 Race row 0, mapped ev0. The overlay opened
+            // on the Event screen, so Sync Triangles back to Peak first.
             FakeGuest g;
             g.screen = 2;
             g.peak = 0;
             g.type = 0;
             g.row = 1;
             g.goal = kCourses[3].opts[0];
-            g.goalEvent = 2;
+            g.goalEvent = 0;
             NavState n;
-            navStart(n, g.goal, 2, 0);
+            navStart(n, g.goal, 0, 0);
             uint64_t tick = 0;
             uint16_t lastOut = 0;
             // Part 2: 4 Cross accepts x 150-tick blind already fill the old cap.
@@ -332,7 +360,7 @@ void register_ps2_ssx3_tricky_list_tests()
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "handoff completes");
             t.IsTrue(n.handedOff, "Done via Accept");
-            t.Equals(g.peak, 1, "accepted P2");
+            t.Equals(g.peak, 0, "accepted P1");
             t.Equals(g.screen, 2, "accepted from the Event screen"); });
 
         tc.Run("navigator steps the Event row monotonically and verifies the event", [](TestCase &t)
@@ -379,17 +407,18 @@ void register_ps2_ssx3_tricky_list_tests()
 
         tc.Run("Accept edge flags apply for mapped goals, restore for native", [](TestCase &t)
                {
-            // Garibaldi Slopestyle: donor ev6 at P2 Free row 0.
+            // Part 4: Garibaldi Slopestyle shares P1 Free row 3 (loaded
+            // ev14); the Accept edge swaps ev14 to GARI.
             FakeGuest g;
             g.screen = 2;
             g.peak = 0;
             g.type = 0;
             g.row = 0;
             g.goal = kCourses[0].opts[1];
-            g.goalEvent = 6;
+            g.goalEvent = 14;
             NavState n;
-            navStart(n, g.goal, 0, 0);
-            t.Equals(n.event, 6, "mapped goal verifies the donor event");
+            navStart(n, g.goal, 14, 0);
+            t.Equals(n.event, 14, "mapped goal verifies the donor event");
             uint64_t tick = 0;
             uint16_t lastOut = 0;
             bool sawApply = false, sawRestore = false;
@@ -465,6 +494,33 @@ void register_ps2_ssx3_tricky_list_tests()
             MapSpec empty{6, "", "Snowdream"};
             t.IsFalse(applyCourseMap(ram.data(), size, empty), "empty archive refused");
             t.IsFalse(applyCourseMap(ram.data(), 64, spec), "short RAM refused"); });
+
+        tc.Run("restoreAll puts back every donor mapped this boot", [](TestCase &t)
+               {
+            // Part 4 shares P1 donor cells across combos: two launches in
+            // one boot dirty two records; the menu-return restore must
+            // clean both, and clean menus must write nothing.
+            // ev1/ev14: no other test maps them, so their snapshots are
+            // this test's own clean bytes whatever the run order (the
+            // driveOnRead guest leaves nonprintable bytes at ev0's
+            // archive field, which mapWrite rightly refuses).
+            const uint32_t size = kMapEventBase + 14u * kMapEventStride + kMapArchiveOff + kMapArchiveLen;
+            std::vector<uint8_t> ram(size, 0);
+            auto field = [&](int ev, uint32_t off) -> uint8_t * { return ram.data() + kMapEventBase + ev * kMapEventStride + off; };
+            std::memcpy(field(1, kMapArchiveOff), "SNOW", 5);
+            std::memcpy(field(1, kMapNameOff), "Snowdream", 10);
+            std::memcpy(field(14, kMapArchiveOff), "ALOHA", 6);
+            std::memcpy(field(14, kMapNameOff), "Aloha Ice Jam", 13);
+            MapSpec e1{1, "ELYS", "Elysium Alps"};
+            MapSpec e14{14, "MEGA", "Tokyo Megaplex"};
+            t.IsTrue(applyCourseMap(ram.data(), size, e1), "map ev1");
+            t.IsTrue(applyCourseMap(ram.data(), size, e14), "map ev14");
+            t.IsTrue(restoreAllCourseMaps(ram.data(), size), "restore all");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(1, kMapArchiveOff)), "SNOW"), 0,
+                     "ev1 archive stock again");
+            t.Equals(std::strcmp(reinterpret_cast<const char *>(field(14, kMapNameOff)), "Aloha Ice Jam"), 0,
+                     "ev14 name stock again");
+            t.IsTrue(restoreAllCourseMaps(ram.data(), size), "second restore no-op"); });
 
         tc.Run("navigator aborts with the pad released when the view goes blind", [](TestCase &t)
                {
@@ -682,11 +738,16 @@ void register_ps2_ssx3_tricky_list_tests()
                {
             // The Setup->Peak journey eats accepts (no screen change): the
             // navigator retries instead of the two-strike give-up. Guest
-            // eats the first 3 Peak accepts, then answers (60-tick flips).
+            // eats the first Peak accept, then answers (60-tick flips).
+            // Part 4: at most one fully-static eat is tolerated now (P6
+            // evidence: +48 ticks < one 150-tick retry spacing); a screen
+            // that stays static across 3 retries is a refused row and
+            // fails fast (next test), because no real transition holds a
+            // settled screen still that long.
             const CourseOption goal = kCourses[0].opts[0]; // Garibaldi P1 Race
             NavState n;
             navStart(n, goal, 0, 0);
-            int screen = 0, eatsLeft = 3;
+            int screen = 0, eatsLeft = 1;
             int pending = -1;
             uint64_t flipAt = 0;
             bool left = false;
@@ -733,23 +794,51 @@ void register_ps2_ssx3_tricky_list_tests()
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "rides after retries");
             t.IsTrue(n.handedOff, "handoff");
-            t.Equals(n.presses, 6, "3 eaten + Peak + Mode + Event accepts"); });
+            t.Equals(n.presses, 4, "1 eaten + Peak + Mode + Event accepts"); });
 
-        tc.Run("endlessly-eaten accepts abort at the tries cap", [](TestCase &t)
+        tc.Run("a fully static screen aborts fast as refused", [](TestCase &t)
                {
-            // Nothing ever lands: the tries cap (not the press budget)
-            // bounds the patience.
+            // Part 4 fail-fast: the row refuses (locked) and no accept
+            // will ever land. The view never changes, so the streak
+            // fires on the 3rd identical retry read instead of grinding
+            // to the tries cap (Round-3 tails: 19 presses / ~50 s).
             NavState n;
             navStart(n, kCourses[0].opts[0], 0, 0);
             auto ram = viewRam(0, 0, 0, 0, 0x600000, 0x601000, 0x602000);
             FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
             uint64_t tick = 0;
+            uint64_t abortTick = 0;
             for (int i = 0; i < 4000 && n.phase != NavPhase::Aborted; ++i)
             {
                 navStep(n, v, tick, false, false);
                 ++tick;
+                if (n.phase == NavPhase::Aborted && abortTick == 0)
+                    abortTick = tick;
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "aborts");
+            t.IsTrue(n.refused, "refused flag names the streak abort");
+            t.IsTrue(n.presses <= 4, "fails fast (sub-1 + two retries)");
+            t.IsTrue(abortTick <= 600, "within ~10 s of ticks, ~5 s live"); });
+
+        tc.Run("moving views still reach the tries cap, not refused", [](TestCase &t)
+               {
+            // The transition stays in flight: the peak word flips on
+            // every issued press but nothing lands. The streak never
+            // builds, so the tries cap (not the press budget) still
+            // bounds the patience, and refused stays clear.
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            uint64_t tick = 0;
+            for (int i = 0; i < 6000 && n.phase != NavPhase::Aborted; ++i)
+            {
+                auto ram = viewRam(0, static_cast<uint32_t>(n.presses % 2), 0, 0, 0x600000, 0x601000,
+                                   0x602000);
+                FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+                navStep(n, v, tick, false, false);
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "aborts");
+            t.IsFalse(n.refused, "cap abort is not a refusal");
             t.Equals(n.tries, kPeakTries, "tries cap binds");
             t.Equals(n.presses, kPeakTries, "one press per try"); });
 
@@ -782,10 +871,10 @@ void register_ps2_ssx3_tricky_list_tests()
             g.peak = 1;
             g.type = 0;
             g.row = 0;
-            g.goal = kCourses[3].opts[0]; // Mesablanca P2 Race row 0
-            g.goalEvent = 2;
+            g.goal = kCourses[3].opts[0]; // Mesablanca P1 Race row 0, mapped ev0
+            g.goalEvent = 0;
             driveDisarm();
-            driveArm(g.goal, 2, 0);
+            driveArm(g.goal, 0, 0);
             uint64_t tick = 0;
             uint16_t lastOut = 0;
             bool done = false, handedOff = false, aborted = false;
@@ -816,6 +905,7 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsFalse(aborted, "no abort");
             DriveProgress p = driveProgress();
             t.IsTrue(p.done, "progress stays Done until disarmed");
+            t.IsFalse(p.refused, "success is not a refusal");
             driveDisarm();
             p = driveProgress();
             t.Equals(static_cast<int>(p.phase), static_cast<int>(NavPhase::Idle), "disarm resets"); });
@@ -823,15 +913,18 @@ void register_ps2_ssx3_tricky_list_tests()
         tc.Run("accept-only Peak falls back to step-accept-verify and retries", [](TestCase &t)
                {
             // The guest reports the ACCEPTED peak/type (cursor invisible).
-            // Goal Merqury P3 Race row 0: Down+Cross accepts P2 (wrong),
-            // Triangle backs out, Down+Cross accepts P3, then Mode, Event.
-            // The Peak cursor wraps here (flip coverage is the next test).
+            // Synthetic P2 Race row 0 goal (Part 4 moved every table goal
+            // to P1, so the stepping path needs a non-table goal here):
+            // Down+Cross accepts P1 (wrong), Triangle backs out, Down+Cross
+            // accepts P2, then Mode, Event. The Peak cursor wraps here
+            // (flip coverage is the next test).
             int cursorPeak = 0, acceptedPeak = 0;
             int cursorType = 0, acceptedType = 0;
             int screen = 2, row = 0;
             bool left = false;
             NavState n;
-            navStart(n, kCourses[4].opts[0], 4, 0);
+            const CourseOption p2goal{1, 0, 0};
+            navStart(n, p2goal, 2, 0);
             uint64_t tick = 0;
             uint16_t lastOut = 0;
             const auto view = [&]() {
@@ -886,7 +979,7 @@ void register_ps2_ssx3_tricky_list_tests()
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "fallback completes");
             t.IsTrue(n.handedOff, "handoff");
-            t.Equals(acceptedPeak, 2, "P3 accepted after one retry");
+            t.Equals(acceptedPeak, 1, "P2 accepted after one retry");
             t.Equals(n.tries, 0, "tries reset on the verified accept"); });
 
         tc.Run("accept-only Peak flips direction when the cursor is stuck", [](TestCase &t)
@@ -946,33 +1039,33 @@ void register_ps2_ssx3_tricky_list_tests()
             const ResetDrive d = driveResetPeak(0);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from top");
             t.IsTrue(d.handedOff, "handoff");
-            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+            t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
         tc.Run("P4 reset cursor at Peak 2 still rides Garibaldi Slopestyle", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(1);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from reset value");
             t.IsTrue(d.handedOff, "handoff");
-            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+            t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
         tc.Run("P4 reset cursor at last row still rides Garibaldi Slopestyle", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(2);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from last row");
             t.IsTrue(d.handedOff, "handoff");
-            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+            t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
         tc.Run("P5 persisting cursor from last row still rides Garibaldi Slopestyle", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(2, true);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done despite persist");
             t.IsTrue(d.handedOff, "handoff");
-            t.Equals(d.acceptedPeak, 1, "P2 accepted"); });
+            t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
         tc.Run("press budget aborts a stuck drive", [](TestCase &t)
                {
             NavState n;
-            navStart(n, kCourses[4].opts[0], 4, 0); // Merqury P3
+            navStart(n, kCourses[4].opts[0], 0, 0); // Merqury P1 Race row 0
             auto ram = viewRam(0, 0, 0, 0, 0x600000, 0x601000, 0x602000);
             FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
             uint64_t tick = 0;

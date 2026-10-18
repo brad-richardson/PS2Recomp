@@ -87,20 +87,26 @@ struct Course
 };
 
 inline constexpr Course kCourses[10] = {
-    // Part 3: Garibaldi/Snowdream/Mesablanca/Merqury gain a Slopestyle mode
-    // via ev6 (native slopestyle, P2 Free row 0); the Jam rows, the native
-    // slopestyles and Pipedream stay unmapped. Archive codes verified live
-    // (preview course() gate); names are display strings (<= 31 chars).
-    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {1, 1, 0, {6, "GARI", "Garibaldi"}}}, 2, {"Race", "Slopestyle"}},
-    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {1, 1, 0, {6, "SNOW", "Snowdream"}}}, 2, {"Race", "Slopestyle"}},
-    {"Elysium Alps", "ELYS", 16, {{2, 0, 1}, {2, 1, 3}}, 2, {"Race", "Slopestyle"}},
-    {"Mesablanca", "MESA", 2, {{1, 0, 0}, {1, 1, 0, {6, "MESA", "Mesablanca"}}}, 2, {"Race", "Slopestyle"}},
-    {"Merqury City", "MERQ", 4, {{2, 0, 0}, {1, 1, 0, {6, "MERQ", "Merqury City"}}}, 2, {"Race", "Slopestyle"}},
+    // Part 4: every goal is Peak 1 (selectable on a fresh card; P2/P3 rows
+    // refuse with LOCKED and the game never advances). All Race options
+    // share P1 Race row 0 (ev0, proven fresh by Garibaldi Race); all
+    // Slopestyle options share P1 Free row 3 (ev14, proven fresh by Aloha
+    // Slopestyle): same (cell, rules-kind) pairings as the validated legs,
+    // only the world/name swap target changes. Each mapped option carries
+    // map{loadedEv, ownArchive, ownName}; the five native rows stay
+    // unmapped. Archive codes verified live (preview course() gate, except
+    // MEGA which ships in preset/worlds); names are display strings
+    // (<= 31 chars).
+    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 1, 3, {14, "GARI", "Garibaldi"}}}, 2, {"Race", "Slopestyle"}},
+    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 1, 3, {14, "SNOW", "Snowdream"}}}, 2, {"Race", "Slopestyle"}},
+    {"Elysium Alps", "ELYS", 16, {{0, 0, 0, {0, "ELYS", "Elysium Alps"}}, {0, 1, 3, {14, "ELYS", "Elysium Alps"}}}, 2, {"Race", "Slopestyle"}},
+    {"Mesablanca", "MESA", 2, {{0, 0, 0, {0, "MESA", "Mesablanca"}}, {0, 1, 3, {14, "MESA", "Mesablanca"}}}, 2, {"Race", "Slopestyle"}},
+    {"Merqury City", "MERQ", 4, {{0, 0, 0, {0, "MERQ", "Merqury City"}}, {0, 1, 3, {14, "MERQ", "Merqury City"}}}, 2, {"Race", "Slopestyle"}},
     {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Slopestyle"}},
     {"Pipedream", "PIPE", 11, {{0, 1, 2}, {0, 0, 0}}, 1, {"Super Pipe", nullptr}},
-    {"Untracked", "UNTRACK", 7, {{2, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
-    {"Tokyo Megaplex", nullptr, 15, {{1, 0, 2}, {1, 1, 3}}, 2, {"Race", "Slopestyle"}},
-    {"Alaska", "ALASKA", 6, {{1, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
+    {"Untracked", "UNTRACK", 7, {{0, 1, 3, {14, "UNTRACK", "Untracked"}}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
+    {"Tokyo Megaplex", nullptr, 15, {{0, 0, 0, {0, "MEGA", "Tokyo Megaplex"}}, {0, 1, 3, {14, "MEGA", "Tokyo Megaplex"}}}, 2, {"Race", "Slopestyle"}},
+    {"Alaska", "ALASKA", 6, {{0, 1, 3, {14, "ALASKA", "Alaska"}}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
 };
 
 inline constexpr uint32_t kCourseCount = 10u;
@@ -262,6 +268,15 @@ struct NavState
     int dir = 0;      // adaptive step direction (+1/-1), 0 = undecided
     int lastPos = -2; // peak/type/row seen at the last evaluation
     int tries = 0;    // accept-only attempts (ToPeak/ToMode fallback)
+    // Part 4 fail-fast: consecutive identical settled retry reads. A real
+    // transition always moves something (screen, words, entries); a fully
+    // static Peak/Mode screen across retries means the row refuses (locked)
+    // and no further accept will land. stillWhere keys the (phase, sub) of
+    // the last note, so any branch or phase change restarts the count.
+    int stillStreak = 0;
+    int stillKey = 0;
+    int stillWhere = -1;
+    bool refused = false; // streak abort fired (locked row?): toast says so
     int sub = 0;      // accept-only sub-step (0 step, 1 accept, 2 verify, 3 back,
                       // 4 give up, 6 post-back-out accept, 7 directed step)
     uint64_t goneSince = 0; // Accept: first tick the Event widget read dead
@@ -343,6 +358,34 @@ inline void navBackOut(NavState &n, uint64_t tick)
 }
 
 inline void navReset(NavState &n) { n = NavState{}; }
+
+// Abort on the 3rd identical settled retry read: at the measured 150-tick
+// retry spacing that is ~5 s after the loop goes static (vs ~50 s for the
+// 16-try cap). Call only where a retry press is actually issued (the
+// hold/gap early-returns filter every other evaluation, so each call is one
+// guest-visible decision).
+inline constexpr int kRefusedStreak = 2;
+inline bool stillRefused(NavState &n, const FeView &v)
+{
+    const int peakW = v.peakOk ? static_cast<int>(v.peak) : 3;
+    const int typeW = v.typeOk ? static_cast<int>(v.type) : 3;
+    const int rowW = v.row + 1 < 0 ? 0 : (v.row + 1 > 63 ? 63 : v.row + 1);
+    const int key = ((((v.screen + 2) * 4 + peakW) * 4 + typeW) * 64 + rowW);
+    const int where = static_cast<int>(n.phase) * 8 + n.sub;
+    if (n.stillWhere != where || n.stillKey != key)
+    {
+        n.stillWhere = where;
+        n.stillKey = key;
+        n.stillStreak = 0;
+        return false;
+    }
+    if (++n.stillStreak >= kRefusedStreak)
+    {
+        n.refused = true;
+        return true;
+    }
+    return false;
+}
 
 inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive, bool modeLive)
 {
@@ -617,6 +660,11 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             // give-up: a landed accept changes the screen, so a screen-0
             // retry is always safe (the Setup->Peak journey outlasts any
             // fixed blind; the word/entries/object signals all lead it).
+            // Part 4: a fully static screen across retries is a refused
+            // row (locked), not an eaten accept: fail fast with the
+            // overlay left open instead of grinding to the tries cap.
+            if (stillRefused(n, v))
+                return abort(); // refused (locked?): toast names it
             if (++n.tries >= kPeakTries)
                 return abort(); // never converging (or locked)
             n.sub = 2;
@@ -741,6 +789,9 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         if (n.sub == 2 || n.sub == 6)
         {
             // Still on Mode: same ate-by-transition patience as the peak.
+            // Part 4: static-screen fail-fast, same as ToPeak.
+            if (stillRefused(n, v))
+                return abort(); // refused (locked?): toast names it
             if (++n.tries >= kModeTries)
                 return abort(); // never converging
             n.sub = 2;
@@ -931,9 +982,14 @@ inline constexpr int kMapDonorMax = 22;
 
 struct MapState
 {
-    bool snapTaken = false;
-    char snapArchive[kMapArchiveLen] = {};
-    char snapName[kMapNameLen] = {};
+    // Part 4: stock snapshots are per donor event (several donors are
+    // mapped across launches in one boot now that goals share P1 cells).
+    // snapHave also gates all writes: with no mapped donor the restore
+    // paths return before touching RAM (knob-off and picker-unused boots
+    // stay write-free).
+    bool snapHave[kMapDonorMax + 1] = {};
+    char snapArchive[kMapDonorMax + 1][kMapArchiveLen] = {};
+    char snapName[kMapDonorMax + 1][kMapNameLen] = {};
     int activeEvent = -1; // donor currently mapped, or -1
 };
 
@@ -999,13 +1055,13 @@ inline bool applyCourseMap(uint8_t *ram, uint32_t size, const MapSpec &spec)
     if (!aSrc || !nSrc)
         return false;
     MapState &st = mapState();
-    if (!st.snapTaken)
+    if (!st.snapHave[spec.event])
     {
-        mapRead(st.snapArchive, kMapArchiveLen, aSrc);
-        mapRead(st.snapName, kMapNameLen, nSrc);
-        st.snapTaken = true;
-        std::fprintf(stderr, "[tklist] map ev%d stock archive=\"%s\" name=\"%s\"\n", spec.event, st.snapArchive,
-                     st.snapName);
+        mapRead(st.snapArchive[spec.event], kMapArchiveLen, aSrc);
+        mapRead(st.snapName[spec.event], kMapNameLen, nSrc);
+        st.snapHave[spec.event] = true;
+        std::fprintf(stderr, "[tklist] map ev%d stock archive=\"%s\" name=\"%s\"\n", spec.event,
+                     st.snapArchive[spec.event], st.snapName[spec.event]);
     }
     if (st.activeEvent == spec.event)
     {
@@ -1031,16 +1087,54 @@ inline bool applyCourseMap(uint8_t *ram, uint32_t size, const MapSpec &spec)
 inline bool restoreCourseMap(uint8_t *ram, uint32_t size)
 {
     MapState &st = mapState();
-    if (!st.snapTaken || st.activeEvent < 0)
+    if (st.activeEvent < 0 || st.activeEvent > kMapDonorMax || !st.snapHave[st.activeEvent])
         return true;
-    if (!mapWrite(ram, size, st.activeEvent, kMapArchiveOff, kMapArchiveLen, st.snapArchive))
+    if (!mapWrite(ram, size, st.activeEvent, kMapArchiveOff, kMapArchiveLen, st.snapArchive[st.activeEvent]))
         return false;
-    if (!mapWrite(ram, size, st.activeEvent, kMapNameOff, kMapNameLen, st.snapName))
+    if (!mapWrite(ram, size, st.activeEvent, kMapNameOff, kMapNameLen, st.snapName[st.activeEvent]))
         return false;
-    std::fprintf(stderr, "[tklist] map ev%d restored archive=\"%s\" name=\"%s\"\n", st.activeEvent, st.snapArchive,
-                 st.snapName);
+    std::fprintf(stderr, "[tklist] map ev%d restored archive=\"%s\" name=\"%s\"\n", st.activeEvent,
+                 st.snapArchive[st.activeEvent], st.snapName[st.activeEvent]);
     st.activeEvent = -1;
     return true;
+}
+
+// Part 4: restore every donor mapped this boot (main-menu rebuild: a stock
+// event must never ride a record dirtied by an earlier picker launch).
+// Skips records already holding their stock values, so picker-unused boots
+// (no snapshots) and already-clean menus write nothing.
+inline bool restoreAllCourseMaps(uint8_t *ram, uint32_t size)
+{
+    MapState &st = mapState();
+    bool ok = true;
+    for (int ev = 0; ev <= kMapDonorMax; ++ev)
+    {
+        if (!st.snapHave[ev])
+            continue;
+        const uint8_t *aSrc = mapField(ram, size, ev, kMapArchiveOff, kMapArchiveLen);
+        const uint8_t *nSrc = mapField(ram, size, ev, kMapNameOff, kMapNameLen);
+        if (!aSrc || !nSrc)
+        {
+            ok = false;
+            continue;
+        }
+        char curA[kMapArchiveLen];
+        char curN[kMapNameLen];
+        mapRead(curA, kMapArchiveLen, aSrc);
+        mapRead(curN, kMapNameLen, nSrc);
+        if (std::strcmp(curA, st.snapArchive[ev]) == 0 && std::strcmp(curN, st.snapName[ev]) == 0)
+            continue;
+        if (!mapWrite(ram, size, ev, kMapArchiveOff, kMapArchiveLen, st.snapArchive[ev]) ||
+            !mapWrite(ram, size, ev, kMapNameOff, kMapNameLen, st.snapName[ev]))
+        {
+            ok = false;
+            continue;
+        }
+        std::fprintf(stderr, "[tklist] map ev%d restored archive=\"%s\" name=\"%s\"\n", ev, st.snapArchive[ev],
+                     st.snapName[ev]);
+    }
+    st.activeEvent = -1;
+    return ok;
 }
 
 // ---- Cross-thread drive (game-thread merge, ONL10 precedent) -------------
@@ -1108,6 +1202,7 @@ struct DriveProgress
     bool done = false;
     bool handedOff = false;
     bool aborted = false;
+    bool refused = false; // Part 4: streak abort (locked row?) vs tries cap
     int presses = 0;
 };
 
@@ -1121,6 +1216,7 @@ inline DriveProgress driveProgress()
     p.done = d.nav.phase == NavPhase::Done;
     p.handedOff = d.nav.handedOff;
     p.aborted = d.nav.phase == NavPhase::Aborted;
+    p.refused = d.nav.refused;
     p.presses = d.nav.presses;
     return p;
 }
