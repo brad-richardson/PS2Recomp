@@ -51,6 +51,24 @@ namespace
                       "unterminated guest target is preserved");
         });
 
+        tc.Run("navigator cancel ignores buttons held at arm time", [](TestCase &t)
+        {
+            using ps2_net_protocol::qpNavNewPress;
+            constexpr uint16_t kNone = 0xFFFFu, kCross = 0x4000u, kCircle = 0x2000u;
+            const auto down = [](uint16_t mask) { return static_cast<uint16_t>(0xFFFFu & ~mask); };
+            uint16_t ignore = kCross; // Cross still down from choosing Online
+            t.IsFalse(qpNavNewPress(down(kCross), ignore), "held Cross from the Online pick: no cancel");
+            t.IsFalse(qpNavNewPress(down(kCross), ignore), "still held: no cancel");
+            t.IsTrue(qpNavNewPress(down(kCross | kCircle), ignore), "a new button while Cross is held cancels");
+            ignore = kCross;
+            t.IsFalse(qpNavNewPress(kNone, ignore), "release: no cancel");
+            t.Equals(static_cast<unsigned>(ignore), 0u, "released button leaves the ignore set");
+            t.IsTrue(qpNavNewPress(down(kCross), ignore), "pressing Cross again cancels");
+            ignore = 0u;
+            t.IsFalse(qpNavNewPress(kNone, ignore), "idle pad: no cancel");
+            t.IsTrue(qpNavNewPress(down(kCircle), ignore), "any fresh press cancels");
+        });
+
         tc.Run("ONL11 arming consumes each Online entry once", [](TestCase &t)
         {
             t.Equals(ps2_net_protocol::navMode(nullptr, "online"), 0, "quickplay off");

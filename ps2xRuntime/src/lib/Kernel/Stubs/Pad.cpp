@@ -1239,6 +1239,9 @@ namespace ps2_stubs
             bool aborted = false;
             bool cancelled = false;
             bool armLogged = false;
+            // Buttons held at arm time, ignored by the cancel gate until
+            // released (qpNavNewPress).
+            uint16_t heldAtArm = 0u;
             // Per-step relative floors (guest ticks) + holds, from atMs.
             uint64_t gaps[kQpNavSteps]{};
             uint64_t holds[kQpNavSteps]{};
@@ -1429,7 +1432,7 @@ namespace ps2_stubs
         }
 
         void qpNavOnRead(PadInputState &state, uint64_t guestVsyncTick, PS2Runtime *runtime, int port,
-                         bool userActive)
+                         uint16_t userButtons)
         {
             qpNavEnsureInit();
             // ONL11 addendum: menu label on sight, online mode only, ahead
@@ -1502,13 +1505,15 @@ namespace ps2_stubs
             if (!g_qpNav.armLogged)
             {
                 g_qpNav.armLogged = true;
+                g_qpNav.heldAtArm = static_cast<uint16_t>(~userButtons);
                 std::fprintf(stderr, "[qpnav] armed route=%llu steps uncalibrated-menu=%llu\n",
                              static_cast<unsigned long long>(kQpNavSteps),
                              static_cast<unsigned long long>(g_qpNav.uncalibrated));
             }
-            // Any real user pad input (pre-merge port-0 buttons, so pad
-            // scripts never trip this) cancels the navigator immediately.
-            if (userActive)
+            // A new real user press (pre-merge port-0 buttons, so pad
+            // scripts never trip this) cancels the navigator immediately;
+            // buttons held since arming are ignored until released.
+            if (ps2_net_protocol::qpNavNewPress(userButtons, g_qpNav.heldAtArm))
             {
                 g_qpNav.cancelled = true;
                 // ONL11: backing out disarms until the next Online entry.
@@ -3346,12 +3351,12 @@ namespace ps2_stubs
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
             // ONL10: capture pre-merge user input for the navigator cancel
             // gate (pad scripts merge below, so they never trip it).
-            // Knob-off cost: one word compare; guest-identical.
-            const bool qpNavUserActive =
-                (port == 0) && (state.buttons != 0xFFFFu);
+            // Knob-off cost: one word copy; guest-identical.
+            const uint16_t qpNavUserButtons =
+                (port == 0) ? state.buttons : static_cast<uint16_t>(0xFFFFu);
             padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
             qpNavOnRead(state, guestVsyncTick, runtime, port,
-                        qpNavUserActive); // ONL10: no-op unless NAV=1+QUICKPLAY=1
+                        qpNavUserButtons); // ONL10: no-op unless NAV=1+QUICKPLAY=1
             tkListDriveOnRead(state, guestVsyncTick, runtime,
                               port); // tk-menu-1: no-op unless TRICKY_LIST=1 and armed
             if (port == 0 && runtime != nullptr)

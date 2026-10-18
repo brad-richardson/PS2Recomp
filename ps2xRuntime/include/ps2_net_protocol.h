@@ -24,6 +24,17 @@ namespace ps2_net_protocol
         return mode == 2 && !armed && count != 0u && count != seen;
     }
 
+    // ONL10 navigator cancel gate (Brad 10-17, live on iOS): only a new
+    // press cancels. Buttons already held when the navigator armed (the
+    // Cross that chose Online, still down at netw/crea) are ignored until
+    // released; pressing one again then cancels. Active-low pad word.
+    inline bool qpNavNewPress(uint16_t buttons, uint16_t &ignore)
+    {
+        const uint16_t pressed = static_cast<uint16_t>(~buttons);
+        ignore = static_cast<uint16_t>(ignore & pressed);
+        return static_cast<uint16_t>(pressed & static_cast<uint16_t>(~ignore)) != 0u;
+    }
+
     inline bool parseLoginLine(std::string line, std::string &name, std::string &pass)
     {
         if (line.size() > 256u)
