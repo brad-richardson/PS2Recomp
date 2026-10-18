@@ -599,6 +599,85 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done, not Aborted");
             t.IsTrue(n.handedOff, "slow transitions still hand off"); });
 
+        tc.Run("setup waits for the Peak entry, then syncs", [](TestCase &t)
+               {
+            // Production entry is driveArm (phase SetupConfirm); navStart
+            // still opens at Sync so the flow tests below are unaffected.
+            // Guest: Setup Character reading screen 0, peak word 0; the
+            // Continue accept flips the word ~40 ticks later (entry).
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            n.phase = NavPhase::SetupConfirm;
+            int word = 0;
+            uint64_t flipAt = UINT64_MAX;
+            const auto view = [&]() {
+                auto ram = viewRam(0, static_cast<uint32_t>(word), 0, 0, 0x600000, 0x601000, 0x602000);
+                return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            };
+            uint64_t tick = 0;
+            uint16_t lastOut = 0;
+            bool sawCross = false;
+            // Settle (150) idles inside Sync, so run to ToPeak, not just
+            // past SetupConfirm.
+            for (int i = 0; i < 900 && n.phase != NavPhase::ToPeak && n.phase != NavPhase::Aborted; ++i)
+            {
+                if (tick >= flipAt)
+                    word = 1;
+                NavOut o = navStep(n, view(), tick, false, false);
+                if (o.mask == kPadCross)
+                    sawCross = true;
+                if (lastOut != 0 && o.mask == 0)
+                    flipAt = tick + 40; // Continue accepted; entry follows
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.IsTrue(sawCross, "Continue pressed");
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::ToPeak), "syncs after entry"); });
+
+        tc.Run("setup skips with no press when the Peak word is already set", [](TestCase &t)
+               {
+            // Slow tapper: the guest already entered Select Peak (word 1).
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            n.phase = NavPhase::SetupConfirm;
+            auto ram = viewRam(0, 1, 0, 0, 0x600000, 0x601000, 0x602000);
+            FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            // ToPeak presses on first sight by design (sub0->sub1 accept in
+            // one evaluation); the skip is proven by no SetupConfirm try.
+            navStep(n, v, 0, false, false);
+            t.Equals(n.tries, 0, "no SetupConfirm try spent");
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::ToPeak), "straight to ToPeak"); });
+
+        tc.Run("setup gives up after kSetupTries stills", [](TestCase &t)
+               {
+            // The word never changes (Continue never lands): bounded tries,
+            // then abort with the pad released; the user takes over.
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            n.phase = NavPhase::SetupConfirm;
+            auto ram = viewRam(0, 0, 0, 0, 0x600000, 0x601000, 0x602000);
+            FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            uint64_t tick = 0;
+            for (int i = 0; i < 2000 && n.phase != NavPhase::Aborted; ++i)
+            {
+                navStep(n, v, tick, false, false);
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "aborts");
+            t.Equals(n.presses, kSetupTries, "bounded presses"); });
+
+        tc.Run("setup aborts when the words go dark", [](TestCase &t)
+               {
+            // Backed out to the main menu mid-setup: no blind to wait out on
+            // the first evaluation, so abort at once with pad released.
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            n.phase = NavPhase::SetupConfirm;
+            FeView v; // mapLive false
+            NavOut o = navStep(n, v, 0, false, false);
+            t.IsTrue(o.aborted, "aborts");
+            t.Equals(o.mask, 0, "pad released"); });
+
         tc.Run("back-out Triangles until the Map screens are left", [](TestCase &t)
                {
             NavState n;

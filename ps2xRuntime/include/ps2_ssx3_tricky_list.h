@@ -223,6 +223,10 @@ inline constexpr uint64_t kSettleTicks = 10u;
 inline constexpr uint64_t kBlindTicks = 30u; // screen transitions may pass through non-Map states
 inline constexpr uint64_t kAcceptBlindTicks = 150u; // accept-driven screen changes (Peak->Mode, Mode->Event) outlast the press blind: the old screen still reads at +48 (P6 Garibaldi), so a fallback accept that is still in flight looks exactly like one that did not take
 inline constexpr uint64_t kGoneDoneTicks = 60u; // a dead Event widget this long after accept = handed off
+inline constexpr int kSetupTries = 4; // Setup-Continue accepts before giving up
+inline constexpr uint64_t kSetupBlindTicks = 300u; // Setup->Peak journey per press (traces: the peak word
+                                                   // flips ~150 after the Continue accept, the screen follows)
+inline constexpr uint64_t kSetupSettleTicks = 150u; // the words lead the screen; settle past the flip
 inline constexpr int kPressBudget = 48;
 inline constexpr int kPeakTries = 12; // accept-only fallback attempts (P3: 8 exhausted on walker-messed states)
 inline constexpr int kModeTries = 10; // (P3: 6 exhausted the same way: 6 tries x 4 presses = 24)
@@ -231,6 +235,7 @@ enum class NavPhase : uint8_t
 {
     Idle = 0, // overlay browsing (no driving)
     Sync,     // Triangle back until the Select Peak screen
+    SetupConfirm, // first: leave Setup Character (Continue) and reach Select Peak
     ToPeak,   // step the peak, X to accept
     ToMode,   // step the mode type, X to accept
     ToEvent,  // step the event row, X to accept
@@ -265,6 +270,8 @@ struct NavState
                       // (m4) and the re-entry cursor resets (P4), so the
                       // fallback never trusts a counted position.
     bool handedOff = false; // Done via Accept (race loading), else backed out
+    uint32_t setupPeak = 0;  // peak word at arm (Setup reads 0; a change proves Peak entry)
+    bool setupArmed = false; // first SetupConfirm evaluation consumed
 };
 
 struct NavOut
@@ -284,6 +291,8 @@ inline const char *navPhaseName(NavPhase p)
         return "Idle";
     case NavPhase::Sync:
         return "Sync";
+    case NavPhase::SetupConfirm:
+        return "SetupConfirm";
     case NavPhase::ToPeak:
         return "ToPeak";
     case NavPhase::ToMode:
@@ -421,6 +430,53 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         return out;
     switch (n.phase)
     {
+    case NavPhase::SetupConfirm:
+        // Overlay launch lands the guest in Setup Character (the menu row
+        // enters the stock single-event flow), but the Map words read
+        // screen 0 there too — a raw Sync would fire into Setup. Press
+        // Cross (Continue) and wait for the Peak entry, proven by a
+        // peak-word change; an already-entered Peak skips with no press.
+        if (!v.mapLive)
+        {
+            if (tick < n.blindUntil)
+                return out;
+            return abort();
+        }
+        if (v.screen == 1 || v.screen == 2)
+        {
+            // Launched mid-flow (or a stray advance): Sync re-syncs.
+            n.phase = NavPhase::Sync;
+            return navStep(n, v, tick, peakLive, modeLive);
+        }
+        if (v.screen != 0)
+            return abort();
+        if (!n.setupArmed)
+        {
+            n.setupArmed = true;
+            n.setupPeak = v.peakOk ? v.peak : 0u;
+            if (n.setupPeak != 0u)
+            {
+                n.phase = NavPhase::Sync;
+                return navStep(n, v, tick, peakLive, modeLive);
+            }
+        }
+        if (v.peakOk && v.peak != n.setupPeak)
+        {
+            // Peak entry observed. The words lead the screen, so settle
+            // past the flip before trusting the cursor.
+            n.phase = NavPhase::Sync;
+            n.settleUntil = tick + kSetupSettleTicks;
+            return navStep(n, v, tick, peakLive, modeLive);
+        }
+        if (n.tries >= kSetupTries)
+            return abort();
+        ++n.tries;
+        {
+            NavOut setup = pressAccept(kPadCross);
+            if (!setup.aborted)
+                n.blindUntil = tick + kSetupBlindTicks;
+            return setup;
+        }
     case NavPhase::Sync:
         // Triangle back until the Select Peak screen (at most Event->Mode->
         // Peak). Already there: advance with no press.
@@ -1024,6 +1080,8 @@ inline void driveArm(const CourseOption &goal, int event, uint64_t tick)
     d.goal = goal;
     d.event = event;
     navStart(d.nav, goal, event, tick);
+    // The overlay launches from Setup Character, not Select Peak.
+    d.nav.phase = NavPhase::SetupConfirm;
 }
 
 inline void driveArmBackOut(uint64_t tick)
@@ -1120,6 +1178,29 @@ inline uint16_t driveOnRead(uint8_t *ram, uint32_t size, uint32_t controller, ui
         d.armed = false;
         aborted = true;
         return 0u;
+    }
+    // TEMP-DIAG (lane scratch, revert before commit): per-read EVAL trace.
+    static const bool tknavTrace = std::getenv("PS2X_TKNAV_TRACE") != nullptr;
+    if (tknavTrace)
+    {
+        uint32_t sobj = 0, sobj38 = 0, sobj3c = 0;
+        if (controller + 0x2ecu <= size - 4u)
+        {
+            sobj = ps2_ssx3_tricky::rd32(ram, controller + 0x2e8u);
+            if (sobj + 0x40u <= size && sobj >= 0x1000u)
+            {
+                sobj38 = ps2_ssx3_tricky::rd32(ram, sobj + 0x38u);
+                sobj3c = ps2_ssx3_tricky::rd32(ram, sobj + 0x3cu);
+            }
+        }
+        std::fprintf(stderr,
+                     "[tknav] tick=%llu phase=%d screen=%d peakOk=%d peak=%u typeOk=%d type=%u row=%d sub=%d "
+                     "tries=%d blind=%llu mask=%04x sobj=%x+%x/%x entries=%llu\n",
+                     static_cast<unsigned long long>(tick), static_cast<int>(d.nav.phase), v.screen,
+                     v.peakOk ? 1 : 0, v.peakOk ? v.peak : 0u, v.typeOk ? 1 : 0, v.typeOk ? v.type : 0u, v.row,
+                     d.nav.sub, d.nav.tries, static_cast<unsigned long long>(d.nav.blindUntil), o.mask, sobj,
+                     sobj38, sobj3c,
+                     static_cast<unsigned long long>(ps2_ssx3_tricky::state().mapEntries));
     }
     return o.mask;
 }
