@@ -10,6 +10,10 @@
      I8: CFBundleName set to the executable name (was empty): devicectl
      install rejects bundles with neither CFBundleName nor
      CFBundleDisplayName (device wall; simctl did not check).
+     odin-testapp-1 (addendum 2): CFBundleDisplayName is the Xcode build
+     setting PS2X_APP_DISPLAY_NAME (default 'SSX3 120' via the CMake cache
+     var below); lab test builds pass their own label so two installs never
+     look identical.
      I25: landscape only, UILaunchScreen (without it iOS runs the app in
      legacy screen-size mode), status bar hidden, full screen, and
      Documents visible in the Files app (for an overriding ps2x.env).
@@ -45,7 +49,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 	<key>CFBundleDisplayName</key>
-	<string>SSX3 PS2X</string>
+	<string>$(PS2X_APP_DISPLAY_NAME)</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

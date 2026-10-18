@@ -1253,6 +1253,14 @@ if(PS2X_IS_IOS)
     set_target_properties(ps2EntryRunner PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"
     )
+    # odin-testapp-1 (addendum 2): the home-screen name. The Info.plist
+    # template reads $(PS2X_APP_DISPLAY_NAME); Xcode expands it from this
+    # build setting (same mechanism as $(EXECUTABLE_NAME) above). Override
+    # with -DPS2X_APP_DISPLAY_NAME=... ; lab test builds pass their own
+    # label (e.g. 'SSX3 120 Test') so two installs never look identical.
+    # Desktop-inert: PS2X_IS_IOS-gated.
+    set(PS2X_APP_DISPLAY_NAME "SSX3 120" CACHE STRING "iOS home-screen name (Info.plist CFBundleDisplayName)")
+    set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_PS2X_APP_DISPLAY_NAME "${PS2X_APP_DISPLAY_NAME}")
     # IP1: universal device family so iPadOS runs full screen (was: Xcode default 1, iPhone compat box).
     set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
     # ICO1: app icon = the Android launcher mountain (tools/make_ios_icon.swift renders the PNG).
