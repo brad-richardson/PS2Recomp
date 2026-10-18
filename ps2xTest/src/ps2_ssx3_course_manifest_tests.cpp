@@ -655,6 +655,7 @@ void register_ps2_ssx3_course_manifest_tests()
                {
             using namespace ps2_ssx3_course;
             using namespace ps2_ssx3_course::banner;
+            namespace fs = std::filesystem;
             auto root = fs::temp_directory_path() / "tkb2-pool";
             fs::create_directories(root);
             auto pool = root / "music-tricky-big";

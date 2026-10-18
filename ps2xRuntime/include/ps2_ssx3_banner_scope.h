@@ -279,14 +279,14 @@ inline bool syncForMode(uint8_t *ram, const ModeT *target, std::vector<std::stri
 // at most every 300 ticks until discovered, then fast-paths on record 0
 // (the only writer is syncForMode, so a record-0 match means in sync; a
 // savestate load shows up as a mismatch and re-syncs).
-template <typename ModesT, typename ModeT>
+template <typename ModesT>
 inline void ensureSynced(uint8_t *ram, const ModesT &ms, uint64_t tick)
 {
     if (!knob())
         return;
     SyncState &st = syncState();
     const size_t cur = modeCurrent(ms, ram);
-    const ModeT *target = cur ? &ms.modes[cur - 1u] : nullptr;
+    const auto *target = cur ? &ms.modes[cur - 1u] : nullptr;
     const bool tricky = poolLive(target);
     if (st.titleBase != kNoTable && st.artistBase != kNoTable && st.set == (tricky ? 1 : 0))
     {
