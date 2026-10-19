@@ -1245,6 +1245,36 @@ void register_ps2_ssx3_tricky_list_tests()
                 t.IsTrue(g.selectY + g.selectH <= h, "bar inside screen");
             } });
 
+        tc.Run("one-tap ride default is Race, toggle cycles dual courses", [](TestCase &t)
+               {
+            ListState s;
+            t.Equals(listDefMode(s), 0, "Garibaldi defaults Race");
+            t.IsTrue(std::strcmp(listDefaultModeName(s), "Race") == 0, "Garibaldi default name");
+            t.Equals(listDefaultGoal(s).peak, 0, "Garibaldi Race peak");
+            t.Equals(listDefaultGoal(s).type, 0, "Garibaldi Race type");
+            t.Equals(listDefaultGoal(s).row, 0, "Garibaldi Race row");
+            t.Equals(listCycleMode(s), 1, "toggle to Slopestyle");
+            t.IsTrue(std::strcmp(listDefaultModeName(s), "Slopestyle") == 0, "toggled name");
+            t.Equals(listDefaultGoal(s).type, 1, "Slopestyle type");
+            t.Equals(listDefaultGoal(s).row, 3, "Slopestyle row");
+            t.Equals(listCycleMode(s), 0, "toggle wraps to Race");
+            // Single-mode course: the toggle is a no-op, the goal is fixed.
+            ListState p;
+            p.sel = 6; // Pipedream, Super Pipe only
+            t.Equals(listCycleMode(p), 0, "single stays 0");
+            t.IsTrue(std::strcmp(listDefaultModeName(p), "Super Pipe") == 0, "pipe name");
+            t.Equals(listDefaultGoal(p).row, 2, "pipe row");
+            // Defaults are per course: cycling Garibaldi leaves Snowdream.
+            ListState m;
+            m.sel = 0;
+            listCycleMode(m);
+            m.sel = 1;
+            t.Equals(listDefMode(m), 0, "Snowdream untouched");
+            // Clamp: a stale default index falls back to the first mode.
+            m.sel = 6;
+            m.modeDef[6] = 5;
+            t.Equals(listDefMode(m), 0, "clamped to 0"); });
+
         // tk-menu-2 shared font module: synthetic TKFONT1 (no game bytes).
         auto tkfontBlob = [](uint32_t w1, uint32_t h1, uint32_t w4, uint32_t h4,
                              const std::vector<ps2_tk_font::Glyph> &gs) {

@@ -121,6 +121,10 @@ struct ListState
     uint8_t sel = 0;  // highlighted course 0..9 (kept across re-opens)
     uint8_t step = 0; // 0 courses, 1 modes
     uint8_t mode = 0; // highlighted mode 0..nOpts-1 on step 1
+    // tricky-picker-2: per-course one-tap ride default (touch). Index 0 =
+    // the course's first mode (Race where offered); the touch toggle cycles
+    // it. Controller flow (step/mode) is untouched.
+    uint8_t modeDef[10] = {};
 };
 
 inline void listMove(ListState &s, bool up)
@@ -138,6 +142,49 @@ inline const CourseOption &listGoal(const ListState &s)
 {
     const Course &c = kCourses[s.sel];
     return c.opts[s.step == 1 ? s.mode : 0];
+}
+
+// ---- One-tap ride default (tricky-picker-2, touch) -------------------------
+//
+// A tap on the highlighted course (or Select) rides immediately with the
+// course's default mode instead of opening the mode step. The touch toggle
+// (hit 10) cycles the default for dual-mode courses; single-mode courses
+// always ride their only mode.
+inline const Course &listCourse(const ListState &s)
+{
+    return kCourses[s.sel < kCourseCount ? s.sel : 0];
+}
+
+inline uint8_t listDefMode(const ListState &s)
+{
+    const Course &c = listCourse(s);
+    const uint8_t d = s.modeDef[s.sel < kCourseCount ? s.sel : 0];
+    return d < c.nOpts ? d : 0;
+}
+
+inline const CourseOption &listDefaultGoal(const ListState &s)
+{
+    const Course &c = listCourse(s);
+    return c.opts[listDefMode(s)];
+}
+
+inline const char *listDefaultModeName(const ListState &s)
+{
+    const Course &c = listCourse(s);
+    const char *name = c.modeName[listDefMode(s)];
+    return name ? name : "?";
+}
+
+// Cycle the selected course's ride default; returns the new default index
+// (0 for single-mode courses, which never change).
+inline uint8_t listCycleMode(ListState &s)
+{
+    const Course &c = listCourse(s);
+    if (c.nOpts < 2)
+        return 0;
+    const uint8_t idx = static_cast<uint8_t>(s.sel < kCourseCount ? s.sel : 0);
+    s.modeDef[idx] = static_cast<uint8_t>((listDefMode(s) + 1u) % c.nOpts);
+    return s.modeDef[idx];
 }
 
 // ---- Guest FE view (read each tick; the navigator derives from this) ----
