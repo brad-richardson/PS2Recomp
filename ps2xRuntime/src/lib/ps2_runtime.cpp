@@ -8778,6 +8778,9 @@ void PS2Runtime::run()
             // (sub stays 2 with a dead widget through loading, race and
             // results), so a live Event widget is required on screen 2. The
             // open/close evaluation suspends while a drive owns the guest.
+            // A stalled BackOut (no new press: the game thread went quiet)
+            // completes here so the done path below can close the overlay.
+            tkl::driveWatchdog(tkTick);
             const tkl::DriveProgress tkProgEarly = tkl::driveProgress();
             const bool tkTarget =
                 tkMapLive && (tkView.screen != 2 || tkView.row >= 0) &&

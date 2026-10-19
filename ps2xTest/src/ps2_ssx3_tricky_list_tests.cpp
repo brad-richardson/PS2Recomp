@@ -943,6 +943,41 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(n.presses, kBackOutPresses, "press count binds");
             t.IsFalse(n.handedOff, "counted back-out is not a handoff"); });
 
+        tc.Run("stalled back-out completes via the watchdog", [](TestCase &t)
+               {
+            driveDisarm();
+            driveArmBackOut(0);
+            driveWatchdog(0);
+            DriveProgress early = driveProgress();
+            t.IsTrue(early.driving, "still driving inside the window");
+            driveWatchdog(static_cast<uint64_t>(kBackOutStallTicks) - 1u);
+            t.IsFalse(driveProgress().done, "no trip before the window");
+            driveWatchdog(static_cast<uint64_t>(kBackOutStallTicks));
+            DriveProgress p = driveProgress();
+            t.IsTrue(p.done, "stalled drive completes");
+            t.IsFalse(p.handedOff, "stall is not a handoff");
+            t.IsFalse(p.driving, "completed drive no longer drives");
+            driveDisarm(); });
+
+        tc.Run("healthy back-out presses never trip the watchdog", [](TestCase &t)
+               {
+            driveDisarm();
+            driveArmBackOut(0);
+            auto ram = viewRam(2, 0, 0, 0, 0x600000, 0x601000, 0x602000);
+            bool done = false, handedOff = false, aborted = false;
+            uint64_t tick = 0;
+            for (int i = 0; i < 3; ++i)
+            {
+                const uint16_t mask = driveOnRead(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000,
+                                                  tick, true, true, true, done, handedOff, aborted);
+                t.Equals(mask, kPadTriangle, "keeps pressing while live");
+                driveWatchdog(tick + 200u);
+                t.IsFalse(driveProgress().done, "progress resets the window");
+                tick += 100u;
+            }
+            t.IsFalse(done, "game thread still driving");
+            driveDisarm(); });
+
         tc.Run("driveOnRead arms, drives and reports Done through the shared struct", [](TestCase &t)
                {
             FakeGuest g;

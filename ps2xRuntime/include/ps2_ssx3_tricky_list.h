@@ -1218,6 +1218,8 @@ struct Drive
     CourseOption goal = {};
     int event = -1;
     NavState nav; // game-thread-owned while armed (render reads progress)
+    int stallPresses = -1; // watchdog cursor: last press count seen + tick
+    uint64_t stallSince = 0;
 };
 
 inline Drive &drive()
@@ -1235,6 +1237,8 @@ inline void driveArm(const CourseOption &goal, int event, uint64_t tick)
     d.backOut = false;
     d.goal = goal;
     d.event = event;
+    d.stallPresses = -1;
+    d.stallSince = 0u;
     navStart(d.nav, goal, event, tick);
     // The overlay launches from Setup Character, not Select Peak.
     d.nav.phase = NavPhase::SetupConfirm;
@@ -1247,6 +1251,8 @@ inline void driveArmBackOut(uint64_t tick)
     d.armed = true;
     d.backOut = true;
     d.event = -1;
+    d.stallPresses = -1;
+    d.stallSince = 0u;
     navBackOut(d.nav, tick);
 }
 
@@ -1257,7 +1263,38 @@ inline void driveDisarm()
     std::lock_guard<std::mutex> lock(d.mu);
     d.armed = false;
     d.backOut = false;
+    d.stallPresses = -1;
+    d.stallSince = 0u;
     navReset(d.nav);
+}
+
+inline constexpr int kBackOutStallTicks = 300; // a BackOut walk finishes
+    // in ~150 ticks; a drive with no new press this long is stalled (the
+    // game-thread evals went quiet, e.g. the menu teardown cleared the
+    // merge flag), so complete it instead of holding the overlay open.
+
+// Render thread, every frame: complete a stalled BackOut drive. Without
+// this the overlay stays open (its close evaluation suspends while
+// driving) and the pad never returns, even though the guest left long
+// ago. Progress (a new press) restarts the window, so healthy walks never
+// trip it; the existing done path closes the overlay on the next read.
+inline void driveWatchdog(uint64_t tick)
+{
+    Drive &d = drive();
+    std::lock_guard<std::mutex> lock(d.mu);
+    if (!d.armed || !d.backOut || d.nav.phase != NavPhase::BackOut)
+        return;
+    if (d.nav.presses != d.stallPresses)
+    {
+        d.stallPresses = d.nav.presses;
+        d.stallSince = tick;
+        return;
+    }
+    if (tick - d.stallSince >= static_cast<uint64_t>(kBackOutStallTicks))
+    {
+        d.nav.handedOff = false;
+        d.nav.phase = NavPhase::Done;
+    }
 }
 
 struct DriveProgress
