@@ -9421,8 +9421,9 @@ void PS2Runtime::run()
                     // opens its mode list (single-mode courses ride
                     // directly); pad Cross on a mode rides; Triangle steps
                     // back (out of the overlay on step 0). Left/Right do
-                    // nothing. Touch taps use tkBrowseTap (one-tap default
-                    // ride + toggle); ride actions are defined above.
+                    // nothing. Touch taps act on one press (picker-3: a
+                    // course tap opens its mode screen, else rides; a mode
+                    // tap rides); tkBrowseTap still serves driving retargets.
                     // tricky-direct: tkArmRide itself takes the direct path
                     // when PS2X_SSX3_TRICKY_DIRECT covers this cell.
                     const uint16_t tkEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
@@ -9434,8 +9435,10 @@ void PS2Runtime::run()
                         tkTriangle();
                     else if (tkEdge & ps2x::vpad::kCross)
                         tkCross();
-                    // Touch: row taps highlight, then one-tap ride the
-                    // default; the toggle cycles it; select/back act per step.
+                    // Touch: every row tap acts at once (a course tap opens
+                    // the mode screen when the course has modes, else rides;
+                    // a mode tap rides). Select/back act per step. Pad keys
+                    // keep the two-step flow above; the toggle is gone.
                     const tkl::ListGeom tkGeom = tkl::listLayout(screenWidth, screenHeight);
                     ps2x::vpad::TouchPoint tkts[8];
                     const int tkn = set2SampleTouches(tkts);
@@ -9446,7 +9449,36 @@ void PS2Runtime::run()
                         if (std::find(tkDown.begin(), tkDown.end(), tkts[i].id) != tkDown.end())
                             continue;
                         tkDown.push_back(tkts[i].id);
-                        tkBrowseTap(tkl::listHit(tkGeom, tkts[i].x, tkts[i].y));
+                        const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
+                        if (tkList.step == 0)
+                        {
+                            if (hit >= 0 && hit <= 9)
+                            {
+                                // One tap acts (Brad 10-19): no separate
+                                // highlight step. tkCross opens the mode
+                                // screen for multi-mode courses, else rides.
+                                tkList.sel = static_cast<uint8_t>(hit);
+                                tkCross();
+                            }
+                            else if (hit == 11)
+                                tkCross();
+                            else if (hit == 12)
+                                tkTriangle();
+                        }
+                        else
+                        {
+                            const int nModes = tkl::kCourses[tkList.sel].nOpts;
+                            if (hit >= 0 && hit < nModes)
+                            {
+                                // A mode tap launches it at once.
+                                tkList.mode = static_cast<uint8_t>(hit);
+                                tkArmRide();
+                            }
+                            else if (hit == 11)
+                                tkArmRide();
+                            else if (hit == 12)
+                                tkTriangle();
+                        }
                     }
                     std::vector<int64_t> tkLeft;
                     for (int64_t id : tkDown)
@@ -9800,27 +9832,13 @@ void PS2Runtime::run()
                 }
                 if (!tkDirect)
                     BeginTextureMode(tkTex);
-                // Backdrop: staged disc mountain art, dimmed for legibility.
-                if (tkArt)
-                {
-                    TkAtlasRect tkm;
-                    if (tkSpr("moun", tkm))
-                        DrawTexturePro(tkAtlasTex, Rectangle{tkm.x, tkm.y, tkm.w, tkm.h},
-                                       Rectangle{0, 0, screenWidth, screenHeight}, Vector2{0, 0}, 0.0f,
-                                       WHITE);
-                    else
-                        DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
-                                      Color{10, 18, 38, 255});
-                    DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
-                                  Color{6, 10, 24, 120});
-                }
-                else
-                {
-                    DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
-                                  Color{10, 18, 38, 255});
-                    DrawRectangle(0, 0, static_cast<int>(screenWidth),
-                                  static_cast<int>(tkg.titleY + tkg.titleH), Color{16, 28, 56, 255});
-                }
+                // Backdrop v0 (Brad 10-19): opaque solid fill, same pass as
+                // the panels, so no stock menu shows through. The native
+                // stock-backdrop look is post-v0.
+                DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                              Color{10, 18, 38, 255});
+                DrawRectangle(0, 0, static_cast<int>(screenWidth),
+                              static_cast<int>(tkg.titleY + tkg.titleH), Color{16, 28, 56, 255});
                 // Title bar (stock bar colour 154,62,2 sampled D t21250).
                 // Part 2: title and subtitle each get their own band inside
                 // the bar (title 8..48%, subtitle 52..76% of the bar height),
@@ -9927,29 +9945,8 @@ void PS2Runtime::run()
                                    static_cast<int>(tkg.paneW), static_cast<int>(tkg.paneH), Color{154, 62, 2, 255});
                 {
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
-                    // Step 0 names every mode the course has (data-driven);
-                    // step 1 the highlighted one. On step 0 the one-tap
-                    // default (tricky-picker-2) reads in brackets.
-                    std::string tkModeList;
-                    const int tkDefMode = (tkList.step == 0) ? static_cast<int>(tkl::listDefMode(tkList)) : -1;
-                    for (int m = 0; m < c.nOpts; ++m)
-                    {
-                        if (m)
-                            tkModeList += " / ";
-                        const char *tkModeName = c.modeName[m] ? c.modeName[m] : "?";
-                        if (m == tkDefMode)
-                        {
-                            tkModeList += "[";
-                            tkModeList += tkModeName;
-                            tkModeList += "]";
-                        }
-                        else
-                            tkModeList += tkModeName;
-                    }
-                    const char *etype = (tkList.step == 1 && c.modeName[tkList.mode])
-                                            ? c.modeName[tkList.mode]
-                                            : tkModeList.c_str();
                     // Preview quad (Megaplex sel 8: text card, no preview).
+                    // No mode line (Brad 10-19: the mode screen owns modes).
                     float tkPy = tkg.paneY + 8;
                     char tkpn[16];
                     std::snprintf(tkpn, sizeof(tkpn), "prev%d", tkList.sel);
@@ -9963,9 +9960,6 @@ void PS2Runtime::run()
                         tkDraw("No preview on disc", tkg.paneX + 10, tkPy + tkq * 0.4f,
                                static_cast<float>(tkSmall) * 1.6f, Color{200, 210, 225, 255}, false);
                     tkPy += tkq + 6;
-                    const float tkEh = static_cast<float>(tkRow) * 0.9f;
-                    tkDraw(etype, tkg.paneX + 10, tkPy, tkEh, Color{255, 170, 60, 255}, false);
-                    tkPy += tkEh;
                     const float tkCh = static_cast<float>(tkTitle) * 0.8f;
                     tkDraw(c.name, tkg.paneX + 10, tkPy + 2, tkCh, RAYWHITE, false);
                     // No Peak/event line (Brad 10-16: not needed) and no

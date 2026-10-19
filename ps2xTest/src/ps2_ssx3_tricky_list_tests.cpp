@@ -1322,14 +1322,21 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(std::strncmp(readFilecode(ram.data(), 0x2000000u, 0), "ARA1", 4), 0,
                      "code bytes match"); });
 
-        tc.Run("geometry hits rows, toggle and legends", [](TestCase &t)
+        tc.Run("geometry hits rows and legends, no toggle", [](TestCase &t)
                {
             ListGeom g = listLayout(640.0f, 480.0f);
             t.Equals(listHit(g, g.rowX + 4, g.rowY[3] + 2), 3, "row tap");
             t.Equals(listHit(g, g.rowX - 4, g.rowY[3] + 2), -1, "miss left");
             t.Equals(listHit(g, g.selectX + 2, g.selectY + 2), 11, "select legend");
             t.Equals(listHit(g, g.backX + 2, g.backY + 2), 12, "back legend");
-            t.Equals(listHit(g, g.toggleX + 2, g.toggleY + 2), 10, "toggle"); });
+            // The old toggle sat on the pane header: now a miss (Brad 10-19).
+            t.Equals(listHit(g, g.paneX + g.paneW * 0.79f, g.paneY + 4), -1, "no toggle");
+            // One-tap rule: multi-mode courses open the mode screen,
+            // single-mode courses ride straight away.
+            t.IsTrue(listCourseOpensModes(0), "Garibaldi opens modes");
+            t.IsFalse(listCourseOpensModes(6), "Pipedream rides at once");
+            t.IsFalse(listCourseOpensModes(9), "Alaska rides at once");
+            t.IsFalse(listCourseOpensModes(10), "out of range rides nowhere"); });
 
         tc.Run("help-bar buttons label the 11/12 zones per step", [](TestCase &t)
                {

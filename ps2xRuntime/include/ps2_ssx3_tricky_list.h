@@ -281,6 +281,14 @@ inline uint8_t listCycleMode(ListState &s)
     return s.modeDef[idx];
 }
 
+// One-tap rule (Brad 10-19): a course tap opens the mode screen when the
+// course has more than one mode, else it rides straight away. Pure so the
+// render loop and the unit tests share it.
+inline bool listCourseOpensModes(uint8_t sel)
+{
+    return sel < kCourseCount && kCourses[sel].nOpts > 1;
+}
+
 // Render thread: park a tap-to-ride request for the game thread. The overlay
 // closes at the tap (host owns it); the game thread queues loading from pad
 // glue and keeps directActive set so the overlay cannot reopen mid-flight.
@@ -1194,17 +1202,16 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
 // Full-screen list: title bar, 10 course rows (Tricky order) on the left,
 // the preview/event pane on the right, the help bar with X/Select and
 // Triangle/Previous legends at the foot, drawn as real buttons over hits
-// 11/12 (tricky-back-1). Hit values: 0..9 = row tap (same as navigating
-// there; a tap on the highlighted row rides), 10 = the event-type toggle
-// (dual courses), 11 = the Select button (ride), 12 = the Previous button
-// (back), -1 = miss.
+// 11/12 (tricky-back-1). One-tap rule (Brad 10-19): a course tap acts at
+// once (multi-mode opens the mode screen, single-mode rides); a mode tap
+// rides at once. No toggle (removed 10-19). Hit values: 0..9 = course row,
+// 11 = the Select button, 12 = the Previous button (back), -1 = miss.
 struct ListGeom
 {
     float titleX = 0, titleY = 0, titleW = 0, titleH = 0;
     float rowX = 0, rowW = 0, rowH = 0;
     float rowY[10] = {};
     float paneX = 0, paneY = 0, paneW = 0, paneH = 0;
-    float toggleX = 0, toggleY = 0, toggleW = 0, toggleH = 0;
     float selectX = 0, selectY = 0, selectW = 0, selectH = 0;
     float backX = 0, backY = 0, backW = 0, backH = 0;
 };
@@ -1230,11 +1237,7 @@ inline ListGeom listLayout(float w, float h)
     g.paneW = w * 0.32f;
     g.paneY = rowsTop;
     g.paneH = g.rowH * 6.0f;
-    // Toggle sits on the pane header (dual courses); legends on the help bar.
-    g.toggleX = g.paneX + g.paneW * 0.62f;
-    g.toggleW = g.paneW * 0.34f;
-    g.toggleY = g.paneY + 2.0f;
-    g.toggleH = g.rowH * 0.9f;
+    // Legends on the help bar (the toggle is gone: Brad 10-19).
     g.selectX = w * 0.60f;
     g.selectW = w * 0.18f;
     g.backX = w * 0.80f;
@@ -1250,8 +1253,6 @@ inline int listHit(const ListGeom &g, float x, float y)
         return 11;
     if (x >= g.backX && x < g.backX + g.backW && y >= g.backY && y < g.backY + g.backH)
         return 12;
-    if (x >= g.toggleX && x < g.toggleX + g.toggleW && y >= g.toggleY && y < g.toggleY + g.toggleH)
-        return 10;
     if (x < g.rowX || x >= g.rowX + g.rowW)
         return -1;
     for (int i = 0; i < 10; ++i)
