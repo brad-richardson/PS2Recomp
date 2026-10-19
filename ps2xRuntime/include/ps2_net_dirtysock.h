@@ -98,6 +98,10 @@ namespace ps2_net
     // save (PSCD10088slogin); called by the navigator to answer the save
     // prompt (Yes only when no save exists). Read-only: never writes.
     bool qpCardHasEaLogin();
+    // online-card-1: true when Quick Play credentials are loaded (login
+    // file or first-entry creation); the navigator skips the typing dance
+    // only then (the HLE prefill carries the submit either way).
+    bool qpLoginReady();
     // online-v0-1: the G6 first-run privacy card, once per install (flag
     // beside the Quick Play login path); Quick Play netplay posts it on its
     // first entry since its menu never reaches the DirtySock path.

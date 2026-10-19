@@ -10075,6 +10075,37 @@ void PS2Runtime::run()
                 }
             }
         }
+        else if (ps2_stubs::qpNavOverlayShowing())
+        {
+            // online-card-1: Quick Play walk overlay (draw-only). The
+            // navigator drives behind this panel from Online entry to the
+            // Quick Matchup filter; any real button press or tap cancels
+            // the walk through the existing cancel gate, which lifts this
+            // panel. Plain raylib draws so every backend composites it
+            // (no FBO: vpad proves the direct path on each backend).
+            const int qpW = static_cast<int>(screenWidth);
+            const int qpH = static_cast<int>(screenHeight);
+            DrawRectangle(0, 0, qpW, qpH, Color{10, 18, 38, 255});
+            const char *qpTitle = "Connecting to Quick Play...";
+            const int qpTitleSize = std::max(28, qpH / 18);
+            DrawText(qpTitle, (qpW - MeasureText(qpTitle, qpTitleSize)) / 2, qpH / 3,
+                     qpTitleSize, RAYWHITE);
+            const char *qpSub = "Signing in and opening the Quick Matchup screen";
+            const int qpSubSize = std::max(18, qpH / 30);
+            DrawText(qpSub, (qpW - MeasureText(qpSub, qpSubSize)) / 2,
+                     qpH / 3 + qpTitleSize + qpSubSize / 2, qpSubSize,
+                     Color{200, 210, 225, 255});
+            const char *qpCancel = "Cancel: press any button or tap the screen";
+            const int qpCancelSize = std::max(18, qpH / 30);
+            DrawText(qpCancel, (qpW - MeasureText(qpCancel, qpCancelSize)) / 2,
+                     qpH * 2 / 3, qpCancelSize, Color{200, 210, 225, 255});
+            static bool qpDrawLogged = false;
+            if (!qpDrawLogged)
+            {
+                qpDrawLogged = true;
+                std::fprintf(stderr, "[qpnav] overlay: Connecting shown %dx%d\n", qpW, qpH);
+            }
+        }
         else if (set2Open)
         {
             // SET2: the panel owns the pad. Touches hit-test the panel (row

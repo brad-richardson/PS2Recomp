@@ -165,6 +165,8 @@ namespace ps2_stubs
     // PR3: emit the open span and fflush now (BG1 pause, so a force-stop
     // after backgrounding keeps every row). No-op when the recorder is off.
     void padRecordFlushNow(const char *reason);
+    // online-card-1: Quick Play walk overlay state (see Pad.cpp).
+    bool qpNavOverlayShowing();
 
     // split-input-1 #5: generic pad services the game module's input marker
     // calls (definitions stay in Pad.cpp; SSX 3 policy moved to the module).

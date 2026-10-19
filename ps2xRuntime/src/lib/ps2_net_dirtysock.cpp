@@ -967,6 +967,11 @@ namespace ps2_net
         return qpCardHasEaLoginImpl();
     }
 
+    bool qpLoginReady()
+    {
+        return g_loginOn;
+    }
+
     void firstRunNotice()
     {
         maybeFirstRunNotice();

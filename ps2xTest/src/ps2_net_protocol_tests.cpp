@@ -91,6 +91,40 @@ namespace
             t.IsFalse(ps2_net_protocol::shouldArmOnline(1, false, 2, seen), "launch mode has no rearm");
         });
 
+        tc.Run("online-card-1: typing skip fires only on the typing screen with loaded credentials", [](TestCase &t)
+        {
+            using ps2_net_protocol::qpNavShouldSkipTyping;
+            t.IsTrue(qpNavShouldSkipTyping(3u, 0x16u, true, 0u), "typing screen + login ready: skip");
+            t.IsFalse(qpNavShouldSkipTyping(3u, 0x04u, true, 0u), "submit area: no skip (dance owns it)");
+            t.IsFalse(qpNavShouldSkipTyping(4u, 0x0cu, true, 0u), "config screen: never skip");
+            t.IsFalse(qpNavShouldSkipTyping(2u, 9u, true, 0u), "menus: never skip");
+            t.IsFalse(qpNavShouldSkipTyping(0u, 0u, true, 0u), "unreadable words: never skip");
+            t.IsFalse(qpNavShouldSkipTyping(3u, 0x16u, false, 0u), "no credentials: keep the dance");
+            t.IsFalse(qpNavShouldSkipTyping(3u, 0x16u, true, 3934u), "early auth: card-path shortcut owns it");
+        });
+
+        tc.Run("online-card-1: outrun catch-up rejoins the guest at persona or filter", [](TestCase &t)
+        {
+            using ps2_net_protocol::qpNavFilterShowing;
+            using ps2_net_protocol::qpNavPersonaShowing;
+            t.IsTrue(qpNavPersonaShowing(4u, 0x02u), "persona screen: catch up");
+            t.IsFalse(qpNavPersonaShowing(3u, 0x16u), "login screen: no persona jump");
+            t.IsFalse(qpNavPersonaShowing(4u, 0x04u), "online main: no persona jump");
+            t.IsFalse(qpNavPersonaShowing(0u, 0u), "unreadable words: no jump");
+            t.IsTrue(qpNavFilterShowing(7u, 0x16u), "filter screen: catch up");
+            t.IsFalse(qpNavFilterShowing(4u, 0x04u), "online main: no filter jump");
+            t.IsFalse(qpNavFilterShowing(0u, 0u), "unreadable words: no jump");
+        });
+
+        tc.Run("online-card-1: title detector gates the dance recovery", [](TestCase &t)
+        {
+            using ps2_net_protocol::qpNavTitleShowing;
+            t.IsTrue(qpNavTitleShowing(1u, 7u), "title words: recover");
+            t.IsFalse(qpNavTitleShowing(2u, 9u), "menus: no recovery");
+            t.IsFalse(qpNavTitleShowing(3u, 0x16u), "login: no recovery");
+            t.IsFalse(qpNavTitleShowing(0u, 0u), "unreadable words: no recovery");
+        });
+
         tc.Run("online-stock-2: ST keep-alives are state only when STOCK120 is on", [](TestCase &t)
         {
             const uint8_t st[] = {'O', '5', 'K', 'A', 'S', 'T', 1, 2, 3};

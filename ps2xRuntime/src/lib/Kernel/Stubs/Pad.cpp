@@ -1230,6 +1230,13 @@ namespace ps2_stubs
             // ONL11 addendum: card-path shortcut indices.
             size_t submitOkIdx = 0u;
             size_t personaPickIdx = 0u;
+            // online-card-1: typing-skip target (first submit-navigation
+            // step; the HLE prefill carries the submit, so the blind
+            // typing dance is skipped when the typing screen is up).
+            size_t submitDown1Idx = 0u;
+            // online-card-1: outrun catch-up target (guest reached the
+            // filter on its own; completes through the done path).
+            size_t filterStopIdx = 0u;
             size_t idx = 0u;
             uint64_t stepStart = 0u;
             uint64_t lastFire = 0u;
@@ -1348,9 +1355,14 @@ namespace ps2_stubs
             // submit) jumps to persona-pick, skipping typing + save.
             g_qpNav.submitOkIdx = qpNavFindStep("submit-ok");
             g_qpNav.personaPickIdx = qpNavFindStep("persona-pick");
+            // online-card-1: typing-skip target (see above).
+            g_qpNav.submitDown1Idx = qpNavFindStep("submit-down-1");
+            // online-card-1: outrun catch-up target (see above).
+            g_qpNav.filterStopIdx = qpNavFindStep("filter-stop");
             if (g_qpNav.danceFrom >= g_qpNav.danceTo || g_qpNav.danceTo >= kQpNavSteps ||
                 g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.loginDown1Idx >= kQpNavSteps ||
-                g_qpNav.submitOkIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps)
+                g_qpNav.submitOkIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps ||
+                g_qpNav.submitDown1Idx >= kQpNavSteps || g_qpNav.filterStopIdx >= kQpNavSteps)
             {
                 std::fprintf(stderr, "[qpnav] dance/jump targets unresolved: disarmed\n");
                 g_qpNav.armed = false;
@@ -1586,6 +1598,26 @@ namespace ps2_stubs
             {
                 return;
             }
+            // online-card-1: dance title-recovery (save-card back-out
+            // overshoot). A blind Triangle that leaves the main menu
+            // lands on the title (menu 1/7); firing the step's press
+            // there is lost input, so press Start to re-enter and retry
+            // the step instead. Pre-crea dance only (online mode starts
+            // at wait-crea); the title-start step owns idx 0 itself. The
+            // step gap above rate-limits the recovery; the step timeout
+            // above still guards a wedge.
+            if (g_qpNav.idx > 0u && g_qpNav.idx < g_qpNav.waitCreaIdx && s.press != 0u && rdram &&
+                ps2_net_protocol::qpNavTitleShowing(menuMain, menuSub))
+            {
+                state.buttons = static_cast<uint16_t>(state.buttons & ~kPadBtnStart);
+                g_qpNav.holdMask = kPadBtnStart;
+                g_qpNav.holdUntil = guestVsyncTick + g_qpNav.holds[g_qpNav.idx];
+                std::fprintf(stderr, "[qpnav] dance-title-recover %s (Start) at tick=%llu\n",
+                             s.name, static_cast<unsigned long long>(guestVsyncTick));
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.stepStart = guestVsyncTick;
+                return;
+            }
             // A failed lobby connect aborts whatever the current step is
             // (the game shows "Connecting to your ISP..." instead of the
             // login flow; OFL1 default, untouched by the knob).
@@ -1595,6 +1627,35 @@ namespace ps2_stubs
                 g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
                 std::fprintf(stderr, "QP-NAV abort %s (sess-conn-failed) at tick=%llu\n", s.name,
                              static_cast<unsigned long long>(guestVsyncTick));
+                return;
+            }
+            // online-card-1: guest-outrun catch-up (before gate+phase:
+            // the departed screen's gate/phase fails by construction, so
+            // these must run while the current step's own checks unmet).
+            // The guest sometimes auto-submits the prefilled login and
+            // runs ahead to persona or the filter on its own; rejoin it
+            // instead of timing out. Ranges keep the config cluster and
+            // the targets themselves on the normal path.
+            if (ps2_net_protocol::qpNavPersonaShowing(menuMain, menuSub) &&
+                g_qpNav.idx >= g_qpNav.loginDown1Idx && g_qpNav.idx < g_qpNav.personaPickIdx)
+            {
+                std::fprintf(stderr, "[qpnav] jump %s -> persona-pick (outrun catch-up @%llu)\n",
+                             s.name, static_cast<unsigned long long>(guestVsyncTick));
+                g_qpNav.idx = g_qpNav.personaPickIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.holdMask = 0u;
+                return;
+            }
+            if (ps2_net_protocol::qpNavFilterShowing(menuMain, menuSub) &&
+                g_qpNav.idx >= g_qpNav.loginDown1Idx && g_qpNav.idx < g_qpNav.filterStopIdx)
+            {
+                std::fprintf(stderr, "[qpnav] jump %s -> filter-stop (outrun catch-up @%llu)\n",
+                             s.name, static_cast<unsigned long long>(guestVsyncTick));
+                g_qpNav.idx = g_qpNav.filterStopIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.holdMask = 0u;
                 return;
             }
             if (!qpNavGateHolds(s, m, rdram))
@@ -1624,12 +1685,34 @@ namespace ps2_stubs
             // and wait at persona-pick, whose phase gate fires the pick
             // when 4/2 is up. Typing-path auth lands past submit-ok, so
             // this never fires there.
+            // online-card-1: the menu-gated catch-up above usually rejoins
+            // first — this arm covers a gameAuth that lands without
+            // readable persona words.
             if (m.gameAuth != 0u && g_qpNav.idx >= g_qpNav.loginDown1Idx &&
                 g_qpNav.idx <= g_qpNav.submitOkIdx)
             {
                 std::fprintf(stderr, "[qpnav] jump %s -> persona-pick (early auth @%llu)\n",
                              s.name, static_cast<unsigned long long>(m.gameAuth));
                 g_qpNav.idx = g_qpNav.personaPickIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.holdMask = 0u;
+                return;
+            }
+            // online-card-1: typing skip (see qpNavShouldSkipTyping).
+            // The HLE prefill + submit-fill carry the stored login, so
+            // when the typing screen is up with credentials loaded, jump
+            // to the submit navigation instead of the ~100 blind typing
+            // steps. The submit steps still move focus and press OK, so
+            // auth proceeds identically; any other screen keeps the
+            // dance. Range excludes submit-down-1 itself (no self-loop).
+            if (g_qpNav.idx >= g_qpNav.loginDown1Idx && g_qpNav.idx < g_qpNav.submitDown1Idx &&
+                ps2_net_protocol::qpNavShouldSkipTyping(menuMain, menuSub, ps2_net::qpLoginReady(),
+                                                        m.gameAuth))
+            {
+                std::fprintf(stderr, "[qpnav] jump %s -> submit-down-1 (typing skip @%llu)\n",
+                             s.name, static_cast<unsigned long long>(guestVsyncTick));
+                g_qpNav.idx = g_qpNav.submitDown1Idx;
                 g_qpNav.stepStart = guestVsyncTick;
                 g_qpNav.lastFire = guestVsyncTick;
                 g_qpNav.holdMask = 0u;
@@ -4184,6 +4267,21 @@ namespace ps2_stubs
     {
         const char *value = std::getenv(name);
         return (value && value[0] != '\0') ? value : "unset";
+    }
+
+    // online-card-1: Quick Play walk overlay state (draw-only host
+    // overlay in ps2_runtime.cpp). True while the online-mode walk is
+    // driving (armed at Online entry, until filter/abort/cancel).
+    // Knob-off: always false (the navigator never arms).
+    bool qpNavOverlayShowing()
+    {
+        if (!g_qpNavArmed.load(std::memory_order_relaxed))
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_qpNav.mutex);
+        return g_qpNav.onlineMode && g_qpNav.armed && !g_qpNav.done && !g_qpNav.aborted &&
+               !g_qpNav.cancelled;
     }
 
     void padRecordSanitize(char *text)
