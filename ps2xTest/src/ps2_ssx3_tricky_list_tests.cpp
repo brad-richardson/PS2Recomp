@@ -922,6 +922,27 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done after leaving");
             t.IsFalse(n.handedOff, "back-out is not a handoff"); });
 
+        tc.Run("back-out completes by press count with the screens still live", [](TestCase &t)
+               {
+            NavState n;
+            navBackOut(n, 0);
+            auto ram = viewRam(2, 0, 0, 0, 0x600000, 0x601000, 0x602000);
+            FeView v = readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            uint64_t tick = 0;
+            int triangles = 0;
+            for (int i = 0; i < 60 && n.phase != NavPhase::Done; ++i)
+            {
+                NavOut o = navStep(n, v, tick, true, true);
+                if (o.mask == kPadTriangle)
+                    ++triangles;
+                const uint64_t next = std::max(n.releaseUntil, n.blindUntil);
+                tick = next > tick ? next : tick + 1;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done by press count");
+            t.Equals(triangles, kBackOutPresses, "bounded Triangles");
+            t.Equals(n.presses, kBackOutPresses, "press count binds");
+            t.IsFalse(n.handedOff, "counted back-out is not a handoff"); });
+
         tc.Run("driveOnRead arms, drives and reports Done through the shared struct", [](TestCase &t)
                {
             FakeGuest g;

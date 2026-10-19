@@ -234,6 +234,11 @@ inline constexpr uint64_t kSetupBlindTicks = 300u; // Setup->Peak journey per pr
                                                    // flips ~150 after the Continue accept, the screen follows)
 inline constexpr uint64_t kSetupSettleTicks = 150u; // the words lead the screen; settle past the flip
 inline constexpr int kPressBudget = 48;
+inline constexpr int kBackOutPresses = 8; // BackOut walks at most Select
+    // Character -> Select Event -> main menu. The Map-left done-slide cannot
+    // see that walk (the sub-state word reads live off-list), so cap the
+    // Triangles instead: completing closes the overlay and returns the pad
+    // rather than pressing into later menus forever.
 inline constexpr int kPeakTries = 16; // accept-only attempts (P3: 8 exhausted on walker-messed states;
                                       // Part 2: the same budget also covers transition-eaten accepts)
 inline constexpr int kModeTries = 14; // (P3: 6 exhausted the same way; Part 2: also covers eaten accepts)
@@ -877,7 +882,16 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         n.phase = NavPhase::ToEvent; // knocked elsewhere; re-drive
         return navStep(n, v, tick, peakLive, modeLive);
     case NavPhase::BackOut:
-        // One Triangle per evaluation until the Map screens are left.
+        // One Triangle per evaluation until the Map screens are left — or
+        // the press count is spent (the done-slide above never fires
+        // off-list, so finish the walk by count and let the overlay close).
+        if (n.presses >= kBackOutPresses)
+        {
+            n.handedOff = false;
+            n.phase = NavPhase::Done;
+            out.done = true;
+            return out;
+        }
         return press(kPadTriangle);
     default:
         return abort();
