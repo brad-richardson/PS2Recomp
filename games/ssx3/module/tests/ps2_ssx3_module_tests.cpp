@@ -9,6 +9,7 @@
 #include "ps2_fh1_full120.h"
 #include "ps2_fh1_fix.h"
 #include "Ssx3TrickyMenu.h"
+#include "Ssx3TrickyRecordsPatch.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
@@ -81,11 +82,13 @@ void register_ps2_ssx3_module_tests()
         tc.Run("override table: the moved families, in order, with their old match", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            // tricky-records-1 v3.2: test-only records probe reverted;
+            // only the product patch row (appended last) remains.
             const char *kExpected[] = {"ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload",
                                        "ssx3-sif-handshake", "ssx3-tricky-menu",
                                        "ssx3-tricky-stock-meter", "ssx3-lod-scale",
                                        "ssx3-input2", "ssx3-input-marker",
-                                       "ssx3-widescreen-default"};
+                                       "ssx3-widescreen-default", "ssx3-tricky-records-patch"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {
@@ -193,6 +196,8 @@ void register_ps2_ssx3_module_tests()
                      "anamorphic query");
             t.IsTrue(m.overrides[9].apply == &ps2_ssx3_widescreen::applySsx3Widescreen,
                      "widescreen row");
+            t.IsTrue(m.overrides[10].apply == &ps2_ssx3_tricky_records_patch::applyTrickyRecordsPatch,
+                     "records-patch apply");
         });
         tc.Run("the VU0 visibility tests point at the moved provider (ABI 10)", [](TestCase &t)
                {

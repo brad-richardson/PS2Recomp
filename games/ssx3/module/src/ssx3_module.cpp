@@ -12,6 +12,7 @@
 #include "Ssx3StockMeter.h"
 #include "Ssx3TrickyLayer.h"
 #include "Ssx3TrickyMenu.h"
+#include "Ssx3TrickyRecordsPatch.h"
 #include "Ssx3TrickySong.h"
 #include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
@@ -39,6 +40,8 @@ namespace
         {"ssx3-input-marker", "SLUS_207.72", kSsx3Entry, 0u, &ps2_stubs::lim1Apply},
         {"ssx3-widescreen-default", "SLUS_207.72", kSsx3Entry, 0u,
          &ps2_ssx3_widescreen::applySsx3Widescreen},
+        {"ssx3-tricky-records-patch", "SLUS_207.72", kSsx3Entry, 0u,
+         &ps2_ssx3_tricky_records_patch::applyTrickyRecordsPatch},
     };
 
     // K1: the copied GetEntryAddress/TLB payload (Ssx3CopiedPayload.h). Both

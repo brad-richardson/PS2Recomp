@@ -401,6 +401,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_SSX3_TRICKY_LOD_SCALE",
         "PS2X_SSX3_TRICKY_MC",
         "PS2X_SSX3_TRICKY_MENU",
+        "PS2X_SSX3_TRICKY_RECORDS",
         "PS2X_SSX3_TRICKY_RESETVOL",
         "PS2X_SSX3_TRICKY_RESETVOL_TABLE",
         "PS2X_SSX3_TRICKY_SONG",

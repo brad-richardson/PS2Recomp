@@ -18,6 +18,7 @@ void register_ps2_env_file_tests();
 void register_ps2_ssx3_course_manifest_tests();
 void register_ps2_ssx3_tricky_menu_tests();
 void register_ps2_ssx3_tricky_list_tests();
+void register_ps2_ssx3_tricky_records_tests();
 void register_ps2_ssx3_lod_tests();
 void register_ps2_native_world_tests();
 // module-seam-1: game-module tests, per binary (ps2xTest/CMakeLists.txt).
@@ -134,6 +135,7 @@ int main(int argc, char **argv)
     register_ps2_ssx3_course_manifest_tests();
     register_ps2_ssx3_tricky_menu_tests();
     register_ps2_ssx3_tricky_list_tests();
+    register_ps2_ssx3_tricky_records_tests();
     register_ps2_ssx3_lod_tests();
     register_ps2_native_world_tests();
 #if PS2X_TEST_GAME_MODULE_SSX3
