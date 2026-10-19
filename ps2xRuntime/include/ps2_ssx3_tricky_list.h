@@ -495,7 +495,16 @@ struct NavState
     NavPhase phase = NavPhase::Idle;
     CourseOption goal = {};
     int event = -1; // verified cursor event (donor for mapped goals)
-    MapSpec map;    // world mapping to apply at the Accept edge, or none
+    MapSpec map;    // world mapping for the goal, or none
+    // tk-card-1: the guest snapshots event data on its way to (or at) the
+    // Event screen, so a map applied at the Accept edge only reaches the
+    // UI (riders header) while the race loads the donor's stock world.
+    // Request the write on the first evaluation after arm instead — the
+    // guest is still in Setup/menus then, long before it walks to the
+    // Event screen — and keep the Accept-edge write as an idempotent
+    // backstop. Every exit path already restores (native Accept restores,
+    // menu build restores all), so an aborted early-apply leaks nothing.
+    bool mapArmed = false; // set by navStart for mapped goals; one-shot
     uint16_t hold = 0;       // mask held now
     uint64_t holdUntil = 0;  // guest tick (exclusive)
     uint64_t releaseUntil = 0;
@@ -533,7 +542,10 @@ struct NavOut
     uint16_t mask = 0;
     bool done = false;
     bool aborted = false;
-    bool mapApply = false;   // ToEvent->Accept with a mapped goal: the caller
+    bool mapApply = false; // ToEvent->Accept with a mapped goal: the caller
+    bool mapEarly = false; // tk-card-1: first evaluation after arm with a
+                           // mapped goal: apply now, ahead of the guest's
+                           // Event-screen snapshot (same write as mapApply)
     bool mapRestore = false; // writes (or restores) before publishing the mask
 };
 
@@ -584,6 +596,8 @@ inline void navStart(NavState &n, const CourseOption &goal, int event, uint64_t 
     n.goal = goal;
     n.map = goal.map;
     n.event = (goal.map.event >= 0) ? goal.map.event : event;
+    n.mapArmed = (goal.map.event >= 0); // tk-card-1: request the world-map
+                                       // write on the first evaluation
     n.releaseUntil = tick; // evaluate immediately
     n.lastTick = tick;
 }
@@ -649,6 +663,15 @@ inline bool stillRefused(NavState &n, const FeView &v)
     return false;
 }
 
+// Phase transitions recurse into navStep, which returns a fresh NavOut.
+// Carry a same-tick mapEarly request across the recursion (it fires once
+// per arm; later evaluations have nothing to carry).
+inline NavOut navMergeMapEarly(NavOut inner, bool mapEarly)
+{
+    inner.mapEarly = inner.mapEarly || mapEarly;
+    return inner;
+}
+
 inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive, bool modeLive)
 {
     NavOut out;
@@ -677,8 +700,21 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         n.tries = 0;
         n.sub = 0;
         n.anchor = 0;
+        // tk-card-1: the rewind may predate the early world-map write, so
+        // re-request it (idempotent) for mapped goals.
+        if (n.goal.map.event >= 0)
+            n.mapArmed = true;
     }
     n.lastTick = tick;
+    // tk-card-1: request the world-map write on the first evaluation, ahead
+    // of the guest's Event-screen snapshot. Fires once per arm (and again
+    // after a quick-load rewind, whose RAM may predate the write); the write
+    // itself is idempotent, and evaluation continues below in the same tick.
+    if (n.mapArmed)
+    {
+        n.mapArmed = false;
+        out.mapEarly = true;
+    }
     // A press in flight: keep holding it for the full hold window (the
     // guest must see the level across several of its own reads).
     if (n.hold && tick < n.holdUntil)
@@ -757,7 +793,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         {
             // Launched mid-flow (or a stray advance): Sync re-syncs.
             n.phase = NavPhase::Sync;
-            return navStep(n, v, tick, peakLive, modeLive);
+            return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
         }
         if (v.screen != 0)
             return abort();
@@ -768,7 +804,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             if (n.setupPeak != 0u)
             {
                 n.phase = NavPhase::Sync;
-                return navStep(n, v, tick, peakLive, modeLive);
+                return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
             }
         }
         if (v.peakOk && v.peak != n.setupPeak)
@@ -777,7 +813,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             // past the flip before trusting the cursor.
             n.phase = NavPhase::Sync;
             n.settleUntil = tick + kSetupSettleTicks;
-            return navStep(n, v, tick, peakLive, modeLive);
+            return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
         }
         if (n.tries >= kSetupTries)
             return abort();
@@ -799,7 +835,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.tries = 0;
             n.sub = 0;
             n.anchor = 0;
-            return navStep(n, v, tick, peakLive, modeLive);
+            return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
         }
         if (v.screen == 1 || v.screen == 2)
             return press(kPadTriangle);
@@ -999,7 +1035,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.tries = 0;
             n.sub = 3;
             n.anchor = 0;
-            return navStep(n, v, tick, peakLive, modeLive);
+            return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
         }
         if (v.screen != 1)
             return abort();
@@ -1078,7 +1114,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             // Kicked back (lock?): re-sync from the top.
             n.phase = NavPhase::Sync;
             n.dir = 0;
-            return navStep(n, v, tick, peakLive, modeLive);
+            return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
         }
         if (v.row < 0 || v.event < 0)
             return abort();
@@ -1088,7 +1124,9 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.goneSince = 0u;
             NavOut accept = pressAccept(kPadCross);
             // Map screens live, overlay open, nothing loading: the caller
-            // applies (or restores) the world mapping before the mask.
+            // applies (or restores) the world mapping before the mask
+            // (backstop: a mapped goal already applied on the first
+            // evaluation after arm; this is a no-op then).
             if (!accept.aborted)
             {
                 if (n.map.event >= 0)
@@ -1142,7 +1180,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             return pressAccept(kPadCross);
         }
         n.phase = NavPhase::ToEvent; // knocked elsewhere; re-drive
-        return navStep(n, v, tick, peakLive, modeLive);
+        return navMergeMapEarly(navStep(n, v, tick, peakLive, modeLive), out.mapEarly);
     case NavPhase::BackOut:
         // One Triangle per evaluation until the Map screens are left — or
         // the press count is spent (the done-slide above never fires
@@ -1653,14 +1691,18 @@ inline uint16_t driveOnRead(uint8_t *ram, uint32_t size, uint32_t controller, ui
     const NavOut o = navStep(d.nav, v, tick, peakLive, modeLive);
     // Part 3: world mapping at the Accept edge, before the mask publishes.
     // A refused write disarms (overlay stays open, user retries) instead of
-    // riding the wrong world.
-    if ((o.mapApply || o.mapRestore) && !o.done && !o.aborted)
+    // riding the wrong world. tk-card-1: mapEarly carries the same write on
+    // the first evaluation after arm, ahead of the guest's Event-screen
+    // snapshot (the Accept-edge write stays as an idempotent backstop).
+    if ((o.mapApply || o.mapEarly || o.mapRestore) && !o.done && !o.aborted)
     {
-        const bool ok = o.mapApply ? applyCourseMap(ram, size, d.nav.map) : restoreCourseMap(ram, size);
+        const bool apply = o.mapApply || o.mapEarly;
+        const bool ok = apply ? applyCourseMap(ram, size, d.nav.map) : restoreCourseMap(ram, size);
         if (!ok)
         {
             std::fprintf(stderr, "[tklist] tick=%llu map %s refused; drive disarmed\n",
-                         static_cast<unsigned long long>(tick), o.mapApply ? "apply" : "restore");
+                         static_cast<unsigned long long>(tick),
+                         o.mapEarly ? "apply-early" : (o.mapApply ? "apply" : "restore"));
             d.armed = false;
             navReset(d.nav);
             aborted = true;

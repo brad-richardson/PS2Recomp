@@ -541,6 +541,40 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(sawRestore, "native Accept flags restore");
             t.Equals(static_cast<int>(m.phase), static_cast<int>(NavPhase::Done), "native drive hands off"); });
 
+        tc.Run("mapped drive requests the world-map write on the first evaluation", [](TestCase &t)
+               {
+            // tk-card-1: the guest snapshots event data on its way to (or
+            // at) the Event screen, so the write must precede the walk, not
+            // ride the Accept edge. navStart arms it; the first navStep
+            // emits mapEarly exactly once (even across a phase-transition
+            // recursion); native goals never emit it.
+            NavState n;
+            navStart(n, kCourses[8].opts[0], 0, 0); // Megaplex Race, mapped ev0
+            t.IsTrue(n.mapArmed, "mapped goal arms the early write");
+            NavOut first = navStep(n, evView(0, 0, 0), 0, false, false);
+            t.IsTrue(first.mapEarly, "first evaluation requests the write");
+            t.IsFalse(first.mapApply, "not the Accept edge yet");
+            NavOut second = navStep(n, evView(0, 0, 0), 20, false, false);
+            t.IsFalse(second.mapEarly, "one-shot: no second request");
+            NavState m;
+            navStart(m, kCourses[0].opts[0], 0, 0); // Garibaldi Race, native
+            t.IsFalse(m.mapArmed, "native goal leaves the early write disarmed");
+            NavOut o = navStep(m, evView(0, 0, 0), 0, false, false);
+            t.IsFalse(o.mapEarly, "native drive never requests the write"); });
+
+        tc.Run("quick-load rewind re-requests the world-map write", [](TestCase &t)
+               {
+            // A savestate load rewinds guest RAM (possibly before the
+            // write), so the rewind re-arms the one-shot for mapped goals.
+            NavState n;
+            navStart(n, kCourses[8].opts[0], 0, 0);
+            FeView v = evView(0, 0, 0);
+            (void)navStep(n, v, 100, false, false); // consumes the one-shot
+            NavOut pre = navStep(n, v, 101, false, false);
+            t.IsFalse(pre.mapEarly, "consumed one-shot stays silent");
+            NavOut post = navStep(n, v, 50, false, false); // tick jumps back
+            t.IsTrue(post.mapEarly, "rewind re-requests the write"); });
+
         tc.Run("mapper snapshots, applies and restores on synthetic RAM", [](TestCase &t)
                {
             // Minimal event table: ev6 archive+name fields live.
