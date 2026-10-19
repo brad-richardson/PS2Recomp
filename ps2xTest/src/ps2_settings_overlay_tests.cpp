@@ -895,4 +895,74 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(std::string(ps2x::set2::touchToSetting(ps2x::set2::Touch::On)) == "1", "on -> 1");
             t.IsTrue(std::string(ps2x::set2::touchToSetting(ps2x::set2::Touch::Off)) == "0", "off -> 0");
             t.IsTrue(std::string(ps2x::set2::touchToSetting(ps2x::set2::Touch::Auto)).empty(), "auto clears"); }); });
+
+    // settings-ui-1 part 2 (SSX font): game-font byte substitution. The
+    // baked FEFONT lacks U+00D7 (C3 97) and U+00B7 (C2 B7); every other
+    // panel/resume byte is ASCII, so the mapped strings stay single-byte
+    // for the byte-wise layout (a future non-ASCII addition fails the
+    // all-ASCII test below and forces a map entry here).
+    MiniTest::Case("Set2GameFont", [](TestCase &tc)
+                   {
+        tc.Run("separator bytes map, ASCII passes through", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::set2::gameFontByte(0xC2) == 0, "C2 skipped");
+            t.IsTrue(ps2x::set2::gameFontByte(0xC3) == 0, "C3 skipped");
+            t.IsTrue(ps2x::set2::gameFontByte(0x97) == static_cast<unsigned char>('x'), "97 -> x");
+            t.IsTrue(ps2x::set2::gameFontByte(0xB7) == static_cast<unsigned char>('-'), "B7 -> -");
+            for (int c = 0x20; c < 0x7F; ++c)
+                t.IsTrue(ps2x::set2::gameFontByte(static_cast<unsigned char>(c)) ==
+                             static_cast<unsigned char>(c),
+                         "ASCII identity"); });
+
+        tc.Run("res labels map to single-byte strings", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::set2::gameFontMapped("2\xc3\x97 \xc2\xb7 896p") == "2x - 896p",
+                     "multiply + dot");
+            t.IsTrue(ps2x::set2::gameFontMapped("Screen \xc2\xb7 1080p") == "Screen - 1080p",
+                     "screen dot");
+            t.IsTrue(ps2x::set2::gameFontMapped("...") == "...", "dots kept");
+            t.IsTrue(ps2x::set2::gameFontMapped("") == "", "empty");
+            t.IsTrue(ps2x::set2::gameFontMapped(nullptr) == "", "null"); });
+
+        tc.Run("every drawn panel/resume string maps to ASCII", [](TestCase &t)
+               {
+            std::vector<std::string> corpus;
+            corpus.emplace_back("Settings");
+            corpus.emplace_back("...");
+            corpus.emplace_back("Resume where you left off?");
+            corpus.emplace_back("Resume");
+            corpus.emplace_back("Start fresh");
+            for (int i = 0; i < ps2x::set2::kRowCount; ++i)
+            {
+                const ps2x::set2::Row row = static_cast<ps2x::set2::Row>(i);
+                corpus.emplace_back(ps2x::set2::rowLabel(row));
+                corpus.emplace_back(ps2x::set2::rowBlurb(row));
+            }
+            const ps2x::set2::Res reses[] = {ps2x::set2::Res::R1x, ps2x::set2::Res::R2x,
+                                             ps2x::set2::Res::Screen, ps2x::set2::Res::R3x,
+                                             ps2x::set2::Res::R4x};
+            for (const ps2x::set2::Res r : reses)
+                for (const ps2x::set2::Res d :
+                     {ps2x::set2::Res::R1x, ps2x::set2::Res::Screen})
+                    corpus.push_back(ps2x::set2::resOptionLabel(r, 1080u, d));
+            for (const unsigned h : {0u, 448u, 896u, 1080u, 2160u})
+                corpus.push_back(ps2x::set2::resHeightLabel(h));
+            for (const ps2x::set2::Touch tc2 :
+                 {ps2x::set2::Touch::Auto, ps2x::set2::Touch::On, ps2x::set2::Touch::Off})
+                corpus.emplace_back(ps2x::set2::touchName(tc2));
+            for (const ps2x::set2::MenuBtn mb :
+                 {ps2x::set2::MenuBtn::Shown, ps2x::set2::MenuBtn::Hidden})
+                corpus.emplace_back(ps2x::set2::menuBtnName(mb));
+            corpus.emplace_back(ps2x::set2::holdStartName(false));
+            corpus.emplace_back(ps2x::set2::holdStartName(true));
+            for (const char *s : {"60", "120", "on", "off", "  (restart)", "< 120 >", "Apply & restart",
+                                  "Apply", "Cancel"})
+                corpus.emplace_back(s);
+            for (const std::string &s : corpus)
+            {
+                const std::string m = ps2x::set2::gameFontMapped(s);
+                bool ascii = true;
+                for (const unsigned char c : m) ascii = ascii && c < 0x80;
+                t.IsTrue(ascii, ("mapped ASCII: " + s).c_str());
+            } }); });
 }

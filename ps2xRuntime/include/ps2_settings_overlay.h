@@ -1120,6 +1120,44 @@ inline std::string resOptionLabel(Res r, unsigned nativeH, Res platformDefault)
     return s;
 }
 
+// settings-ui-1 part 2 (SSX font, Brad 10-19): the baked FEFONT covers
+// ASCII printable plus Latin-1/punctuation extras, but NOT U+00D7 (x,
+// bytes C3 97) or U+00B7 (middle dot, bytes C2 B7) used above, and
+// byte-wise layout can only address single bytes. Map one input byte to
+// the byte the game-font path lays out, or 0 to skip (the UTF-8 leads).
+// Anything else passes through; the draw path skips still-missing bytes
+// the way the picker does (never '?'). Fallback fonts draw the original
+// string: they cover U+00D7/U+00B7 natively.
+inline unsigned char gameFontByte(unsigned char c)
+{
+    if (c == 0xC2 || c == 0xC3)
+        return 0; // UTF-8 lead of a substituted separator
+    if (c == 0x97)
+        return static_cast<unsigned char>('x'); // U+00D7 multiply
+    if (c == 0xB7)
+        return static_cast<unsigned char>('-'); // U+00B7 middle dot
+    return c;
+}
+
+// Mapped copy of a panel/resume string for the game-font path.
+inline std::string gameFontMapped(const char *s)
+{
+    std::string out;
+    if (!s)
+        return out;
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(s); *p; ++p)
+    {
+        const unsigned char m = gameFontByte(*p);
+        if (m != 0)
+            out.push_back(static_cast<char>(m));
+    }
+    return out;
+}
+inline std::string gameFontMapped(const std::string &s)
+{
+    return gameFontMapped(s.c_str());
+}
+
 // Shared settings-style constants (settings-ui-1, Brad 10-19): the panel
 // and the resume prompt read the same palette, fonts and spacing here —
 // never copied literals at the draw sites. Raylib-agnostic RGBA so this

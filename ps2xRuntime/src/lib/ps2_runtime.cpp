@@ -2747,6 +2747,258 @@ void ds1FireQuickLoad()
 // of the namespace below in the B0 scaffold; strictness + generation added by
 // the fix). Kept here as a comment so the move is reviewable as behavior-neutral.
 
+// settings-ui-1 part 2 (SSX font, Brad 10-19): one shared text-draw helper
+// for the settings panel + the resume prompt, reusing the picker's game-font
+// path (FEFONT.SFN metrics + GS-upload atlas baked offline to tkfont.bin by
+// tools/ssx3/build_tk_font.py; parse + layout from ps2_tk_font.h, quad draw
+// like the picker's tkUpDraw but flat, matching the Part 1 look).
+// Load-once from dirname(PS2X_SSX3_TRICKY_LIST_ART)/tkfont.bin (the same file
+// the picker reads; a font-only dir works: only the dirname is used).
+// Neuropol fallback, raylib default last resort (= today's draw). yTop is
+// the top of the ink band on the baked path, the top of the em box on the
+// fallback paths (same anchor DrawText uses today). Mapped bytes still
+// missing from the bake are skipped (never '?'); unmapped non-ASCII input
+// bytes are logged once. Render-thread only, like the picker block.
+namespace set2font
+{
+namespace tkf = ps2_tk_font;
+
+struct State
+{
+    bool tried = false;
+    tkf::Baked baked;
+    Texture2D tex1 = {0};
+    Texture2D tex4 = {0};
+    std::string px1, px4; // pixel store backing the textures above
+    Font neuro = {0};
+    bool neuroTried = false, neuroOk = false;
+    bool diagLogged = false;
+    bool missLogged[256] = {false};
+};
+
+inline State &state()
+{
+    static State s;
+    return s;
+}
+
+inline void ensure()
+{
+    State &st = state();
+    if (!st.tried)
+    {
+        st.tried = true;
+        std::string fd;
+        if (const char *art = std::getenv("PS2X_SSX3_TRICKY_LIST_ART"))
+        {
+            std::string a(art);
+            const size_t sl = a.find_last_of('/');
+            fd = (sl == std::string::npos ? std::string("tkfont.bin")
+                                           : a.substr(0, sl) + "/tkfont.bin");
+        }
+        if (!fd.empty())
+        {
+            std::ifstream f(fd, std::ios::binary);
+            const std::string blob((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+            tkf::Baked b;
+            if (tkf::parseTkFont(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), b))
+            {
+                st.baked = b;
+                st.px1 = b.px1;
+                st.px4 = b.px4;
+                Image i1{};
+                i1.data = st.px1.data();
+                i1.width = static_cast<int>(b.w1);
+                i1.height = static_cast<int>(b.h1);
+                i1.mipmaps = 1;
+                i1.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                st.tex1 = LoadTextureFromImage(i1);
+                Image i4{};
+                i4.data = st.px4.data();
+                i4.width = static_cast<int>(b.w4);
+                i4.height = static_cast<int>(b.h4);
+                i4.mipmaps = 1;
+                i4.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                st.tex4 = LoadTextureFromImage(i4);
+            }
+            else
+                std::fprintf(stderr, "[set2font] font data unparseable, fallback\n");
+        }
+    }
+    if (!st.neuroTried)
+    {
+        st.neuroTried = true;
+        std::string found;
+        std::vector<std::string> dirs;
+#if defined(__APPLE__)
+        {
+            char buf[4096];
+            uint32_t s = sizeof(buf);
+            if (_NSGetExecutablePath(buf, &s) == 0)
+            {
+                std::string p(buf);
+                const size_t sl = p.find_last_of('/');
+                dirs.push_back(sl == std::string::npos ? "." : p.substr(0, sl));
+            }
+        }
+#elif defined(__linux__) && !defined(__ANDROID__)
+        {
+            std::error_code ec;
+            auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+            if (!ec)
+                dirs.push_back(p.parent_path().string());
+        }
+#endif
+        dirs.push_back(".");
+        const char *cands[] = {"fonts/Neuropol-CC0.otf", "Neuropol-CC0.otf",
+                               "ps2xRuntime/resources/fonts/Neuropol-CC0.otf",
+                               "../ps2xRuntime/resources/fonts/Neuropol-CC0.otf"};
+        for (const std::string &d : dirs)
+            for (const char *c : cands)
+            {
+                const std::string p = d + "/" + c;
+                std::ifstream f(p, std::ios::binary);
+                if (f.good())
+                {
+                    found = p;
+                    break;
+                }
+            }
+        if (!found.empty())
+        {
+            st.neuro = LoadFontEx(found.c_str(), 128, nullptr, 0);
+            st.neuroOk = (st.neuro.glyphCount > 0 && st.neuro.texture.id != 0u);
+        }
+    }
+    if (!st.diagLogged)
+    {
+        st.diagLogged = true;
+        const bool hasBaked = st.baked.ok && (st.tex1.id != 0u || st.tex4.id != 0u);
+        std::fprintf(stderr, "[set2font] baked=%d neuro=%d\n", hasBaked ? 1 : 0,
+                     st.neuroOk ? 1 : 0);
+    }
+}
+
+inline bool haveBaked()
+{
+    const State &st = state();
+    return st.baked.ok && (st.tex1.id != 0u || st.tex4.id != 0u);
+}
+
+// Width of s at hPx through the active path (mapped bytes on the baked
+// path, original string on the fallback paths).
+inline float widthImpl(const char *s, float hPx, bool uniform)
+{
+    if (!s || !*s || hPx <= 0.0f)
+        return 0.0f;
+    ensure();
+    State &st = state();
+    if (haveBaked())
+    {
+        const std::string m = ps2x::set2::gameFontMapped(s);
+        const tkf::Metrics met = tkf::measure(st.baked, m.c_str());
+        const float k = uniform ? tkf::scaleUniform(st.baked, hPx) : tkf::scaleFor(met, hPx);
+        return met.width * k;
+    }
+    if (st.neuroOk)
+    {
+        const float sp = hPx * 0.06f;
+        return MeasureTextEx(st.neuro, s, hPx, sp).x;
+    }
+    const int px = static_cast<int>(hPx + 0.5f);
+    return static_cast<float>(MeasureText(s, px));
+}
+
+// Draw s with its top at yTop (ink-band top on the baked path, em-box top
+// on fallback). Returns the drawn width. right anchors the end at x.
+inline float drawImpl(const char *s, float x, float yTop, float hPx, Color tint, bool right,
+                      bool uniform)
+{
+    if (!s || !*s || hPx <= 0.0f)
+        return 0.0f;
+    ensure();
+    State &st = state();
+    if (haveBaked())
+    {
+        const char *odu = std::getenv("GE1_ONDEVICE_UPSCALE");
+        const bool up = ps2x::set2::ondeviceUpscaleOn(odu);
+        Texture2D &tex = (up && st.tex4.id != 0u) ? st.tex4 : st.tex1;
+        const float mult = (&tex == &st.tex4) ? 4.0f : 1.0f;
+        float topRef = 0.0f;
+        {
+            float rt = 0.0f, rb = 10.0f;
+            tkf::refBand(st.baked, rt, rb);
+            topRef = uniform ? rt : 0.0f;
+        }
+        const std::string m = ps2x::set2::gameFontMapped(s);
+        const tkf::Metrics met = tkf::measure(st.baked, m.c_str());
+        const float k =
+            uniform ? tkf::scaleUniform(st.baked, hPx) : tkf::scaleFor(met, hPx);
+        if (k <= 0.0f)
+            return 0.0f;
+        if (!uniform)
+            topRef = met.top;
+        float pen = right ? x - met.width * k : x;
+        const float x0 = pen;
+        for (const unsigned char *p = reinterpret_cast<const unsigned char *>(m.c_str()); *p; ++p)
+        {
+            const tkf::Glyph *g = tkf::findGlyph(st.baked, *p);
+            if (!g)
+            {
+                if (!st.missLogged[*p])
+                {
+                    st.missLogged[*p] = true;
+                    std::fprintf(stderr, "[set2font] byte 0x%02X not in bake, skipped\n", *p);
+                }
+                continue;
+            }
+            if (g->w > 0 && g->h > 0)
+            {
+                const Rectangle src{static_cast<float>(g->x) * mult, static_cast<float>(g->y) * mult,
+                                    static_cast<float>(g->w) * mult, static_cast<float>(g->h) * mult};
+                const Rectangle dst{pen + static_cast<float>(g->xoff) * k,
+                                    yTop + (static_cast<float>(g->yoff) - topRef) * k,
+                                    static_cast<float>(g->w) * k, static_cast<float>(g->h) * k};
+                DrawTexturePro(tex, src, dst, Vector2{0, 0}, 0.0f, tint);
+            }
+            pen += static_cast<float>(g->adv) * k;
+        }
+        return pen - x0;
+    }
+    if (st.neuroOk)
+    {
+        const float sp = hPx * 0.06f;
+        const Vector2 sz = MeasureTextEx(st.neuro, s, hPx, sp);
+        DrawTextEx(st.neuro, s, Vector2{right ? x - sz.x : x, yTop}, hPx, sp, tint);
+        return sz.x;
+    }
+    const int px = static_cast<int>(hPx + 0.5f);
+    const int w = MeasureText(s, px);
+    DrawText(s, static_cast<int>(right ? x - static_cast<float>(w) : x),
+             static_cast<int>(yTop + 0.5f), px, tint);
+    return static_cast<float>(w);
+}
+
+inline float draw(const char *s, float x, float yTop, float hPx, Color tint, bool right)
+{
+    return drawImpl(s, x, yTop, hPx, tint, right, false);
+}
+inline float drawUniform(const char *s, float x, float yTop, float hPx, Color tint, bool right)
+{
+    return drawImpl(s, x, yTop, hPx, tint, right, true);
+}
+inline float width(const char *s, float hPx)
+{
+    return widthImpl(s, hPx, false);
+}
+inline float widthUniform(const char *s, float hPx)
+{
+    return widthImpl(s, hPx, true);
+}
+
+} // namespace set2font
+
 #if defined(__ANDROID__) || defined(PS2X_IOS)
 // ASV1: the choice is made before the game thread starts, so a rejected or
 // "Start fresh" slot cannot advance the guest even one tick. Touch and pad
@@ -2804,20 +3056,33 @@ bool asv1AskToResume(bool &closed)
         ClearBackground(set2C(ps2x::set2::kSet2Bg));
         const char *title = "Resume where you left off?";
         const int titleSize = ps2x::set2::set2TitleFont(static_cast<float>(h));
-        DrawText(title, (w - MeasureText(title, titleSize)) / 2, h / 3, titleSize,
-                 set2C(ps2x::set2::kSet2Title));
+        // settings-ui-1 part 2 (SSX font): title through the shared
+        // game-font helper (baked FEFONT, Neuropol, default fallback).
+        const float titleW = set2font::width(title, static_cast<float>(titleSize));
+        set2font::draw(title, (static_cast<float>(w) - titleW) * 0.5f,
+                       static_cast<float>(h) / 3.0f, static_cast<float>(titleSize),
+                       set2C(ps2x::set2::kSet2Title), false);
         DrawRectangleRec(resumeBox, set2C(resumeSelected ? ps2x::set2::kSet2BtnSel : ps2x::set2::kSet2Btn));
         DrawRectangleRec(freshBox, set2C(resumeSelected ? ps2x::set2::kSet2Btn : ps2x::set2::kSet2BtnSel));
         DrawRectangleLinesEx(resumeSelected ? resumeBox : freshBox, 3.0f,
                              set2C(ps2x::set2::kSet2Border));
         const int labelSize = ps2x::set2::set2RowFont(static_cast<float>(h));
         const char *resume = "Resume", *fresh = "Start fresh";
-        DrawText(resume, x + (buttonW - MeasureText(resume, labelSize)) / 2,
-                 y + (buttonH - labelSize) / 2, labelSize,
-                 set2C(resumeSelected ? ps2x::set2::kSet2TextSel : ps2x::set2::kSet2Text));
-        DrawText(fresh, x + buttonW + gap + (buttonW - MeasureText(fresh, labelSize)) / 2,
-                 y + (buttonH - labelSize) / 2, labelSize,
-                 set2C(resumeSelected ? ps2x::set2::kSet2Text : ps2x::set2::kSet2TextSel));
+        // settings-ui-1 part 2 (SSX font): button labels share one size,
+        // so the uniform game-font scale keeps both buttons aligned.
+        const float resumeW = set2font::widthUniform(resume, static_cast<float>(labelSize));
+        const float freshW = set2font::widthUniform(fresh, static_cast<float>(labelSize));
+        set2font::drawUniform(resume,
+                              static_cast<float>(x) + (static_cast<float>(buttonW) - resumeW) * 0.5f,
+                              static_cast<float>(y + (buttonH - labelSize) / 2),
+                              static_cast<float>(labelSize),
+                              set2C(resumeSelected ? ps2x::set2::kSet2TextSel : ps2x::set2::kSet2Text),
+                              false);
+        set2font::drawUniform(
+            fresh,
+            static_cast<float>(x + buttonW + gap) + (static_cast<float>(buttonW) - freshW) * 0.5f,
+            static_cast<float>(y + (buttonH - labelSize) / 2), static_cast<float>(labelSize),
+            set2C(resumeSelected ? ps2x::set2::kSet2Text : ps2x::set2::kSet2TextSel), false);
         EndDrawing();
     }
     closed = true;
@@ -10025,8 +10290,12 @@ void PS2Runtime::run()
                 const int rowFont = ps2x::set2::set2RowFont(screenHeight);
                 // panel-polish-1 (Brad 10-15): plain title; the game still
                 // pauses while the panel is open.
-                DrawText("Settings", static_cast<int>(set2dg.px) + 14,
-                         static_cast<int>(set2dg.py) + 10, titleFont, set2C(ps2x::set2::kSet2Title));
+                // settings-ui-1 part 2 (SSX font): panel title through the
+                // shared game-font helper (baked FEFONT, Neuropol, default).
+                set2font::draw("Settings", static_cast<float>(set2dg.px) + 14.0f,
+                               static_cast<float>(set2dg.py) + 10.0f,
+                               static_cast<float>(titleFont), set2C(ps2x::set2::kSet2Title),
+                               false);
                 // settings-ui-1 (Brad 10-19): rows only STAGE. A staged
                 // restart-needing row shows "(restart)"; the bottom Apply
                 // row confirms everything, Cancel discards it.
@@ -10085,18 +10354,24 @@ void PS2Runtime::run()
                         value = &applyVal;
                     else if (row == ps2x::set2::Row::Cancel)
                         value = &cancelVal;
-                    DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
-                    const int valW = MeasureText(value->c_str(), rowFont);
-                    DrawText(value->c_str(),
-                             static_cast<int>(set2dg.rowX + set2dg.rowW) - valW, rowY, rowFont,
-                             rowCol);
+                    // settings-ui-1 part 2 (SSX font): rows share one size,
+                    // so the uniform game-font scale keeps every row
+                    // aligned (label left, value right).
+                    set2font::drawUniform(label, set2dg.rowX, static_cast<float>(rowY),
+                                          static_cast<float>(rowFont), rowCol, false);
+                    const float valW = set2font::widthUniform(value->c_str(),
+                                                              static_cast<float>(rowFont));
+                    set2font::drawUniform(value->c_str(), set2dg.rowX + set2dg.rowW - valW,
+                                          static_cast<float>(rowY), static_cast<float>(rowFont),
+                                          rowCol, false);
                 }
                 // settings-ui-1 (Brad 10-19): every row carries its own
                 // one-line blurb (rowBlurb); the Apply blurb says closing
                 // discards staged changes.
-                DrawText(ps2x::set2::rowBlurb(set2Nav.sel), static_cast<int>(set2dg.px) + 14,
-                         static_cast<int>(set2dg.py + set2dg.ph) - rowFont - 8, rowFont,
-                         set2C(ps2x::set2::kSet2Hint));
+                set2font::draw(ps2x::set2::rowBlurb(set2Nav.sel),
+                               static_cast<float>(set2dg.px) + 14.0f,
+                               set2dg.py + set2dg.ph - static_cast<float>(rowFont) - 8.0f,
+                               static_cast<float>(rowFont), set2C(ps2x::set2::kSet2Hint), false);
             }
             if (!set2Open && ps2x::set2::menuButtonShown(set2MenuLive))
             {
@@ -10110,17 +10385,20 @@ void PS2Runtime::run()
                 set2SafePad(set2mbSafeL, set2mbSafeT);
                 const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight, set2mbSafeT);
                 const int mbFont = std::max(12, static_cast<int>(screenHeight / 40.0f));
-                const int mbTw = MeasureText("...", mbFont);
-                const int mbTx =
-                    static_cast<int>(set2mb.x + (set2mb.w - static_cast<float>(mbTw)) * 0.5f);
+                // settings-ui-1 part 2 (SSX font): the "..." dots exist in
+                // the bake, so the pill reads in the game font too.
+                const float mbTw = set2font::width("...", static_cast<float>(mbFont));
+                const float mbTx = set2mb.x + (set2mb.w - mbTw) * 0.5f;
                 const int mbTy =
                     static_cast<int>(set2mb.y + (set2mb.h - static_cast<float>(mbFont)) * 0.5f);
-                DrawRectangle(mbTx - 10, mbTy - 6, mbTw + 20, mbFont + 12,
+                DrawRectangle(static_cast<int>(mbTx) - 10, mbTy - 6,
+                              static_cast<int>(mbTw) + 20, mbFont + 12,
                               Color{ps2x::set2::kSet2Pill.r, ps2x::set2::kSet2Pill.g,
                                      ps2x::set2::kSet2Pill.b, ps2x::set2::kSet2Pill.a});
-                DrawText("...", mbTx, mbTy, mbFont,
-                         Color{ps2x::set2::kSet2TextSel.r, ps2x::set2::kSet2TextSel.g,
-                                ps2x::set2::kSet2TextSel.b, ps2x::set2::kSet2TextSel.a});
+                set2font::draw("...", mbTx, static_cast<float>(mbTy), static_cast<float>(mbFont),
+                               Color{ps2x::set2::kSet2TextSel.r, ps2x::set2::kSet2TextSel.g,
+                                      ps2x::set2::kSet2TextSel.b, ps2x::set2::kSet2TextSel.a},
+                               false);
             }
             if (set2Perf)
             {
