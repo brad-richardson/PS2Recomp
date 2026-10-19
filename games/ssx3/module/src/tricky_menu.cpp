@@ -53,6 +53,108 @@ namespace
         ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value)));
     }
 
+    // tricky-direct-1 Part A probe: the stock Select Event configuration
+    // followed by the shared offline/online loading-app transition. Each
+    // continuation lives on the guest stack, like the preview continuation.
+    constexpr uint32_t kDirectMagic = 0x544b4431u;
+    constexpr uint32_t kDirectFrame = 0x240u;
+
+    bool tkDirectContinue(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        const uint32_t f = getRegU32(ctx, 29);
+        if (f > PS2_RAM_SIZE - kDirectFrame || rd32(ram, f) != kDirectMagic)
+            return false;
+        const uint32_t phase = rd32(ram, f + 4);
+        const uint32_t config = rd32(ram, f + 12);
+        const auto call = [&](uint32_t target, uint32_t next, uint32_t a0, uint32_t a1) {
+            wr32(ram, f + 4, next);
+            tkSetGpr(ctx, 4, a0);
+            tkSetGpr(ctx, 5, a1);
+            tkSetGpr(ctx, 31, kTrampoline);
+            ctx->pc = target;
+        };
+        tkLog(runtime, "direct probe phase=" + std::to_string(phase) +
+              " result=" + std::to_string(getRegU32(ctx, 2)));
+        switch (phase)
+        {
+        case 0:
+            call(0x14dd58u, 1, 0, 0); // current profile configuration
+            break;
+        case 1:
+            wr32(ram, f + 12, getRegU32(ctx, 2));
+            call(0x145108u, 2, getRegU32(ctx, 2), 1); // Single Event
+            break;
+        case 2:
+            wr32(ram, 0x535c08u, 0); // Garibaldi's event-0 donor
+            wr32(ram, getRegU32(ctx, 28) - 0x1f38u, 1);
+            call(0x144df0u, 3, config, 0); // nav node +4: race
+            break;
+        case 3:
+            call(0x1451e8u, 4, config, 0); // nav node +8: race rules
+            break;
+        case 4:
+        {
+            const uint32_t vtable = rd32(ram, config + 12);
+            int16_t adjust = 0;
+            std::memcpy(&adjust, ram + vtable + 8, sizeof(adjust));
+            call(rd32(ram, vtable + 12), 5, config + adjust, 0);
+            break;
+        }
+        case 5:
+            tkSetGpr(ctx, 6, 0x100);
+            tkSetGpr(ctx, 7, 0);
+            call(0x317d70u, 6, 8, 0x45ce60u); // stock loading-state allocation
+            break;
+        case 6:
+            call(0x232720u, 7, getRegU32(ctx, 2), 0); // loading-state constructor
+            break;
+        case 7:
+            call(0x316ef8u, 8, rd32(ram, 0x4a28a8u), getRegU32(ctx, 2));
+            break;
+        default:
+        {
+            char stateLine[256];
+            const uint32_t app = rd32(ram, 0x4a28a8u);
+            std::snprintf(stateLine, sizeof(stateLine),
+                          "direct state event=%u type=%u context=%u rules=%u config=0x%x app=0x%x "
+                          "queued=0x%x mapEntries=%llu",
+                          rd32(ram, 0x535c08u), ram[0x535c10u], ram[0x535c11u], ram[0x535c12u],
+                          config, app, rd32(ram, app + 4),
+                          static_cast<unsigned long long>(state().mapEntries));
+            tkLog(runtime, stateLine);
+            const uint32_t ret = rd32(ram, f + 8);
+            std::memcpy(ctx->r, ram + f + 0x40, sizeof(ctx->r));
+            wr32(ram, f, 0);
+            tkSetGpr(ctx, 29, f + kDirectFrame);
+            tkSetGpr(ctx, 2, 1);
+            ctx->pc = ret;
+            tkLog(runtime, "direct probe loading queued; no stock menu navigation");
+            break;
+        }
+        }
+        return true;
+    }
+
+    bool tkDirectProbe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
+        if (!probe || std::strcmp(probe, "1") != 0) return false;
+        const uint32_t sp = getRegU32(ctx, 29);
+        if (sp < kDirectFrame || sp > PS2_RAM_SIZE) return false;
+        // Mark even a native donor as a mapped launch so train-62's
+        // SET0001 records guard owns this ride.
+        if (!ps2_ssx3_tricky_list::applyCourseMap(ram, PS2_RAM_SIZE, {0, "GARI", "Garibaldi"}))
+            return false;
+        const uint32_t f = sp - kDirectFrame;
+        std::memset(ram + f, 0, kDirectFrame);
+        ps2_ssx3_tricky::wr32(ram, f, kDirectMagic);
+        ps2_ssx3_tricky::wr32(ram, f + 8, getRegU32(ctx, 31));
+        std::memcpy(ram + f + 0x40, ctx->r, sizeof(ctx->r));
+        tkSetGpr(ctx, 29, f);
+        return tkDirectContinue(ram, ctx, runtime);
+    }
+
     // preserve-fix-1: stock handles/count remain untouched. Only exact
     // overlay names get IDs in appended slots while mode owns the table.
     void tkFileLookupWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
@@ -145,6 +247,10 @@ namespace
                 modeSet(rdram, true, msg);
                 // toast-audit-1: no mode toast (the Tricky list overlay itself
                 // confirms the mode; tkLog below keeps the record).
+                // tricky-direct: probe the direct load; stop here if the
+                // briefing is reached (no hidden stock-menu walk).
+                if (tkDirectProbe(rdram, ctx, runtime))
+                    return;
             }
             else if (s.tricky)
             {
@@ -383,6 +489,7 @@ namespace
 
     void tkTrampolineWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (tkDirectContinue(rdram, ctx, runtime)) return;
         if (tkPreviewContinue(rdram, ctx, runtime)) return;
         using namespace ps2_ssx3_tricky;
         State &s = state();
