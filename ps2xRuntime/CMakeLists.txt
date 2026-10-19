@@ -27,6 +27,7 @@ option(PS2X_GAME_IPO "BF2: ThinLTO IPO on ps2_game_objects in Release (Android +
 option(PS2X_GAME_PCH "Precompile the generated-code prelude for ps2_game_objects (off: ccache cannot cache PCH users)" OFF)
 set(PS2X_ANDROID_MARCH "" CACHE STRING "BF2: Android-only -march value for the first-party runtime targets (empty = toolchain default)")
 set(PS2X_THINLTO_CACHE_DIR "" CACHE PATH "Persistent Android lld ThinLTO cache (empty = off)")
+set(PS2X_THINLTO_JOBS "" CACHE STRING "Cap ThinLTO backend threads on the ps2EntryRunner link, e.g. for low-RAM builders (empty = toolchain default; unset = byte-identical flags)")
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
@@ -838,6 +839,27 @@ if(PS2X_THINLTO_CACHE_DIR)
         "-Wl,--thinlto-cache-dir=${PS2X_THINLTO_CACHE_DIR}"
         "-Wl,--thinlto-cache-policy=cache_size_bytes=8589934592:prune_interval=1h")
     message(STATUS "PS2X: Android ThinLTO cache: ${PS2X_THINLTO_CACHE_DIR} (8 GiB, prune hourly)")
+endif()
+
+# link-mem-1: cap ThinLTO backend parallelism on the runner link so the build
+# completes on low-RAM hosts (peak scales ~0.25 GiB/backend on the SSX 3 game
+# link: 8.39 GiB at 18 jobs -> 4.13 GiB at 1 job, byte-identical outputs).
+# Empty (default) adds no flag. lld takes --thinlto-jobs; Apple ld takes
+# -mllvm,-threads (both verified: NDK lld + Apple ld-27037.1).
+# NOTE: plain if(VAR) treats "0" as false, so test emptiness explicitly and
+# fail loud on non-integers ("0" included).
+if(DEFINED PS2X_THINLTO_JOBS AND NOT PS2X_THINLTO_JOBS STREQUAL "")
+    if(NOT PS2X_THINLTO_JOBS MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "PS2X_THINLTO_JOBS must be a positive integer (got '${PS2X_THINLTO_JOBS}')")
+    endif()
+    if(PS2X_IS_ANDROID)
+        target_link_options(ps2EntryRunner PRIVATE "-Wl,--thinlto-jobs=${PS2X_THINLTO_JOBS}")
+    elseif(APPLE)
+        target_link_options(ps2EntryRunner PRIVATE "-Wl,-mllvm,-threads=${PS2X_THINLTO_JOBS}")
+    else()
+        message(WARNING "PS2X_THINLTO_JOBS is only wired for Android (lld) and Apple (ld); ignoring on this platform")
+    endif()
+    message(STATUS "PS2X: ThinLTO backend jobs capped at ${PS2X_THINLTO_JOBS}")
 endif()
 
 if(PS2X_GAME_CODEGEN_DIR)
