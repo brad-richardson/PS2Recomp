@@ -9115,13 +9115,14 @@ void PS2Runtime::run()
                         // launch for the game thread. The pad returns to the
                         // guest immediately.
                         tkl::driveDisarm();
-                        tkl::directArm(tkList);
+                        tkl::directArm(tkList, true);
+                        tkl::driveArmBackOut(tkTick);
                         tkOpen = false;
                         tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
                         ps2_ssx3_tricky::state().directActive = true;
-                        std::fprintf(stderr, "[tklist] tick=%llu direct %s [%s] (peak %u type %u row %u ev %d)\n",
+                        std::fprintf(stderr, "[tklist] tick=%llu direct %s [%s] (peak %u type %u row %u ev %d) via backout\n",
                                      static_cast<unsigned long long>(tkTick), c.name,
                                      c.modeName[tkList.step == 1 ? tkList.mode : 0], tkGoal.peak,
                                      tkGoal.type, tkGoal.row, tkDg.event);
