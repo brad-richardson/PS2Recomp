@@ -1166,6 +1166,29 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(listHit(g, g.backX + 2, g.backY + 2), 12, "back legend");
             t.Equals(listHit(g, g.toggleX + 2, g.toggleY + 2), 10, "toggle"); });
 
+        tc.Run("help-bar buttons label the 11/12 zones per step", [](TestCase &t)
+               {
+            t.IsTrue(std::strcmp(listButtonLabel(0, 11), "Select") == 0, "step0 ride");
+            t.IsTrue(std::strcmp(listButtonLabel(0, 12), "Previous") == 0, "step0 back");
+            t.IsTrue(std::strcmp(listButtonLabel(1, 11), "Ride") == 0, "step1 ride");
+            t.IsTrue(std::strcmp(listButtonLabel(1, 12), "Courses") == 0, "step1 back");
+            t.IsNull(listButtonLabel(0, 10), "toggle has no button");
+            t.IsNull(listButtonLabel(0, 3), "row has no button");
+            t.IsNull(listButtonLabel(0, -1), "miss has no button");
+            // The drawn buttons sit on the help bar: below the last course
+            // row, inside the screen, select left of back, no row overlap.
+            for (float h : {480.0f, 820.0f})
+            {
+                const float w = h * 4.0f / 3.0f;
+                ListGeom g = listLayout(w, h);
+                const float rowsEnd = g.rowY[9] + g.rowH;
+                t.IsTrue(g.selectY >= rowsEnd, "select below rows");
+                t.IsTrue(g.backY >= rowsEnd, "back below rows");
+                t.IsTrue(g.selectX + g.selectW <= g.backX, "select left of back");
+                t.IsTrue(g.backX + g.backW <= w, "back inside screen");
+                t.IsTrue(g.selectY + g.selectH <= h, "bar inside screen");
+            } });
+
         // tk-menu-2 shared font module: synthetic TKFONT1 (no game bytes).
         auto tkfontBlob = [](uint32_t w1, uint32_t h1, uint32_t w4, uint32_t h4,
                              const std::vector<ps2_tk_font::Glyph> &gs) {

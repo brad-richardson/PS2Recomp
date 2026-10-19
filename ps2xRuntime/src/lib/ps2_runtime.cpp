@@ -9471,6 +9471,30 @@ void PS2Runtime::run()
                 tkDraw(tkList.step == 1 ? "X Ride   Triangle Courses   Up/Down pick mode"
                                         : "X Select   Triangle Previous   Up/Down pick course",
                        tkg.titleX, screenHeight * 0.905f, static_cast<float>(tkSmall), RAYWHITE, false);
+                // Help-bar buttons (tricky-back-1): hits 11/12 are real,
+                // visible buttons over the select/back rects — not just the
+                // legend text at the left, which taps miss. The touch
+                // overlay is hidden while the list owns the pad, so a
+                // touch-only player needs a tappable way out; labels come
+                // from the header per step, geometry is the hit rects.
+                for (int tkHit = 11; tkHit <= 12; ++tkHit)
+                {
+                    const char *tkLabel = tkl::listButtonLabel(tkList.step, tkHit);
+                    if (!tkLabel)
+                        continue;
+                    const float tkBx = (tkHit == 11) ? tkg.selectX : tkg.backX;
+                    const float tkBy = (tkHit == 11) ? tkg.selectY : tkg.backY;
+                    const float tkBw = (tkHit == 11) ? tkg.selectW : tkg.backW;
+                    const float tkBh = (tkHit == 11) ? tkg.selectH : tkg.backH;
+                    DrawRectangle(static_cast<int>(tkBx), static_cast<int>(tkBy), static_cast<int>(tkBw),
+                                  static_cast<int>(tkBh), Color{24, 36, 62, 255});
+                    DrawRectangleLines(static_cast<int>(tkBx), static_cast<int>(tkBy), static_cast<int>(tkBw),
+                                       static_cast<int>(tkBh), Color{154, 62, 2, 255});
+                    const float tkLh = static_cast<float>(tkSmall) * 1.1f;
+                    const float tkLw = tkW(tkLabel, tkLh);
+                    tkDraw(tkLabel, tkBx + (tkBw - tkLw) * 0.5f, tkBy + (tkBh - tkLh) * 0.5f, tkLh,
+                           Color{250, 248, 244, 255}, false);
+                }
                 if (!tkDirect)
                 {
                     EndTextureMode();

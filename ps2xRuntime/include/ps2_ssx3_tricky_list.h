@@ -888,10 +888,11 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
 //
 // Full-screen list: title bar, 10 course rows (Tricky order) on the left,
 // the preview/event pane on the right, the help bar with X/Select and
-// Triangle/Previous legends at the foot. Hit values: 0..9 = row tap (same
-// as navigating there; a tap on the highlighted row rides), 10 = the
-// event-type toggle (dual courses), 11 = the Select legend (ride), 12 = the
-// Previous legend (back), -1 = miss.
+// Triangle/Previous legends at the foot, drawn as real buttons over hits
+// 11/12 (tricky-back-1). Hit values: 0..9 = row tap (same as navigating
+// there; a tap on the highlighted row rides), 10 = the event-type toggle
+// (dual courses), 11 = the Select button (ride), 12 = the Previous button
+// (back), -1 = miss.
 struct ListGeom
 {
     float titleX = 0, titleY = 0, titleW = 0, titleH = 0;
@@ -954,6 +955,22 @@ inline int listHit(const ListGeom &g, float x, float y)
             return i;
     }
     return -1;
+}
+
+// ---- Help-bar buttons (tricky-back-1) --------------------------------------
+//
+// Hits 11/12 are drawn as real buttons over the select/back rects, with the
+// step's own action words (the controller hint line keeps the longer help).
+// The touch overlay is hidden while the list owns the pad, so a touch-only
+// player needs a visible, tappable way out; tapping the drawn legend text
+// (left side) is a miss. Pure data for the render loop; unit-tested below.
+inline const char *listButtonLabel(uint8_t step, int hit)
+{
+    if (hit == 11)
+        return step == 1 ? "Ride" : "Select";
+    if (hit == 12)
+        return step == 1 ? "Courses" : "Previous";
+    return nullptr;
 }
 
 // ---- Launch-time world mapping (Part 3) -----------------------------------
