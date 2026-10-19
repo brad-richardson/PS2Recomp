@@ -343,6 +343,53 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsFalse(overlayTarget(true, 2, -1, false, 0, 0, false), "dead Event widget stays shut");
             t.IsFalse(overlayTarget(false, 0, -1, false, 0, 0, false), "non-Map words stay shut"); });
 
+        tc.Run("direct goals resolve Race cells, defer freestyle to the navigator", [](TestCase &t)
+               {
+            for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
+            {
+                const Course &c = kCourses[i];
+                const DirectGoal race = directGoalFor(c, c.opts[0]);
+                const int donor = (c.opts[0].map.event >= 0) ? c.opts[0].map.event : c.event;
+                const bool proven = c.opts[0].type == 0 && (donor == 0 || donor == 1);
+                if (proven)
+                {
+                    t.IsTrue(race.ok, std::string("Race directable: ") + c.name);
+                    t.Equals(race.event, donor, "donor event");
+                    t.IsTrue(race.mapped, "world pinned for the records guard");
+                }
+                else
+                    t.IsFalse(race.ok, std::string("unproven cell defers: ") + c.name);
+            }
+            const Course &gari = kCourses[0];
+            const DirectGoal g = directGoalFor(gari, gari.opts[0]);
+            t.IsTrue(g.ok && g.event == 0, "Garibaldi donor ev0 (probe shape)");
+            t.Equals(std::string(g.map.archive), std::string("GARI"), "Garibaldi archive");
+            const Course &mesa = kCourses[3];
+            const DirectGoal m = directGoalFor(mesa, mesa.opts[0]);
+            t.IsTrue(m.ok && m.event == 0, "Mesablanca donor ev0");
+            t.Equals(std::string(m.map.archive), std::string("MESA"), "Mesablanca archive");
+            const Course &snow = kCourses[1];
+            const DirectGoal s = directGoalFor(snow, snow.opts[0]);
+            t.IsTrue(s.ok && s.event == 1, "Snowdream native donor ev1");
+            const Course &pipe = kCourses[6];
+            t.IsFalse(directGoalFor(pipe, pipe.opts[0]).ok, "Pipedream Super Pipe defers");
+            const Course &aloha = kCourses[5];
+            t.IsFalse(directGoalFor(aloha, aloha.opts[0]).ok, "Aloha Jam donor defers (ev14 dies loading)");
+            const Course &mega = kCourses[8];
+            t.IsTrue(directGoalFor(mega, mega.opts[0]).ok, "Megaplex Race directable (donor ev0)");
+            t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
+            t.Equals(directCourseByCode("Garibaldi"), 0, "name lookup");
+            t.Equals(directCourseByCode("NOPE"), 0, "unknown falls back to Garibaldi");
+            t.Equals(directCourseByCode(nullptr), 0, "null falls back to Garibaldi");
+            ListState l;
+            l.sel = 3;
+            directArm(l);
+            ListState got;
+            t.IsTrue(directTake(got), "take consumes the ask");
+            t.Equals(got.sel, static_cast<uint8_t>(3), "list position survives");
+            t.IsFalse(directTake(got), "second take finds nothing");
+            directDisarm(); });
+
         tc.Run("navigator rides Mesablanca from the Event screen", [](TestCase &t)
                {
             // Part 4 goal: P1 Race row 0, mapped ev0. The overlay opened

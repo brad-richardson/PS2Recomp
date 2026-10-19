@@ -40,6 +40,19 @@ inline bool knob()
     return on;
 }
 
+// The DIRECT knob (default off until polished; the navigator stays the
+// fallback): overlay taps ride straight into the donor event instead of
+// driving the stock screens. Requires Tricky mode, like the overlay itself.
+// Cached: knobs never change mid-run.
+inline bool directKnob()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_SSX3_TRICKY_DIRECT");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
 // ---- Course table (Tricky order; Part 1 §1 + receipts/ssx3-events-nav.txt)
 //
 // Each course names its SSX 3 event id and, per event-type option, the
@@ -110,6 +123,68 @@ inline constexpr Course kCourses[10] = {
 };
 
 inline constexpr uint32_t kCourseCount = 10u;
+
+// ---- Direct-launch goal ---------------------------------------------------
+// The guest chain (config + shared loader, no menu walk) is proven for the
+// race-discipline donor cells ev0/ev1 only: the config calls take null nav
+// nodes, which the guest resolves as race type/rules. Jam donors (ev14: the
+// Aloha run dies in loading on a missing-target jump) and freestyle cells
+// (type 1) keep the navigator until their accept args are measured, so taps
+// on those fall back instead of riding the wrong event or crashing the load.
+// Donor bound for direct goals. Mirrors kMapDonorMax (map section below;
+// a static_assert there keeps the two in sync).
+inline constexpr int kDirectDonorMax = 22;
+
+struct DirectGoal
+{
+    bool ok = false;   // directable now (Race cell)
+    int event = -1;    // donor event to write + queue
+    MapSpec map = {};  // world mapping (event < 0 = native row, restore)
+    bool mapped = false;
+};
+
+inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
+{
+    DirectGoal d;
+    if (goal.type != 0)
+        return d;
+    const int donor = (goal.map.event >= 0) ? goal.map.event : c.event;
+    if (donor != 0 && donor != 1)
+        return d; // Jam cells need measured accept args (Aloha ev14 dies loading)
+    // Donor cell: the table's explicit map, else the course's own event.
+    d.event = (goal.map.event >= 0) ? goal.map.event : c.event;
+    // Launch-time world pin: the explicit map, else the course's own
+    // archive+name on its donor (the proven Garibaldi shape). This also
+    // marks the ride for the records guard, like the navigator's edge.
+    const char *archive = (goal.map.event >= 0) ? goal.map.archive : c.tp;
+    const char *name = (goal.map.event >= 0) ? goal.map.name : c.name;
+    if (d.event < 0 || d.event > kDirectDonorMax || !archive || !name)
+        return DirectGoal{};
+    d.map.event = static_cast<int8_t>(d.event);
+    d.map.archive = archive;
+    d.map.name = name;
+    d.mapped = true;
+    d.ok = true;
+    return d;
+}
+
+// Lookup by world archive code (or course name) for the diagnostic course
+// selector. Returns the course index, or 0 (Garibaldi, the proven default).
+inline int directCourseByCode(const char *code)
+{
+    if (!code || !*code)
+        return 0;
+    for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
+    {
+        const Course &c = kCourses[i];
+        if ((c.tp && std::strcmp(code, c.tp) == 0) || std::strcmp(code, c.name) == 0)
+            return i;
+        for (uint8_t m = 0; m < c.nOpts; ++m)
+            if (c.opts[m].map.archive && std::strcmp(code, c.opts[m].map.archive) == 0)
+                return i;
+    }
+    return 0;
+}
 
 // ---- List navigation (pad edges and touch taps map to the same steps) ----
 // Two steps (Part 2 amendment): step 0 picks the course (10 names, Tricky
@@ -185,6 +260,54 @@ inline uint8_t listCycleMode(ListState &s)
     const uint8_t idx = static_cast<uint8_t>(s.sel < kCourseCount ? s.sel : 0);
     s.modeDef[idx] = static_cast<uint8_t>((listDefMode(s) + 1u) % c.nOpts);
     return s.modeDef[idx];
+}
+
+// Render thread: park a tap-to-ride request for the game thread. The overlay
+// closes at the tap (host owns it); the game thread queues loading from pad
+// glue and keeps directActive set so the overlay cannot reopen mid-flight.
+// The stored list position re-derives course + goal on take, so there is a
+// single resolution path for taps and the diagnostic course selector.
+struct DirectAsk
+{
+    bool pending = false;
+    ListState list = {};
+};
+
+inline DirectAsk &directAsk()
+{
+    static DirectAsk a;
+    return a;
+}
+
+inline std::mutex &directAskMu()
+{
+    static std::mutex m;
+    return m;
+}
+
+inline void directArm(const ListState &list)
+{
+    std::lock_guard<std::mutex> lock(directAskMu());
+    DirectAsk &a = directAsk();
+    a.pending = true;
+    a.list = list;
+}
+
+inline bool directTake(ListState &list)
+{
+    std::lock_guard<std::mutex> lock(directAskMu());
+    DirectAsk &a = directAsk();
+    if (!a.pending)
+        return false;
+    list = a.list;
+    a.pending = false;
+    return true;
+}
+
+inline void directDisarm()
+{
+    std::lock_guard<std::mutex> lock(directAskMu());
+    directAsk().pending = false;
 }
 
 // ---- Guest FE view (read each tick; the navigator derives from this) ----
@@ -1069,6 +1192,7 @@ inline constexpr uint32_t kMapArchiveLen = 16u;
 inline constexpr uint32_t kMapNameOff = 4u;
 inline constexpr uint32_t kMapNameLen = 32u;
 inline constexpr int kMapDonorMax = 22;
+static_assert(kDirectDonorMax == kMapDonorMax, "direct donor bound follows the map table");
 
 struct MapState
 {

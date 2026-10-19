@@ -9107,6 +9107,30 @@ void PS2Runtime::run()
                 const auto tkArmRide = [&] {
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
                     const tkl::CourseOption &tkGoal = tkl::listGoal(tkList);
+                    const tkl::DirectGoal tkDg = tkl::directGoalFor(c, tkGoal);
+                    if (tkl::directKnob() && tkDg.ok)
+                    {
+                        // tricky-direct: close the overlay here (the host owns
+                        // it), latch reopen on a new Map entry, and park the
+                        // launch for the game thread. The pad returns to the
+                        // guest immediately.
+                        tkl::driveDisarm();
+                        tkl::directArm(tkList);
+                        tkOpen = false;
+                        tkDown.clear();
+                        tkLatchedOn = true;
+                        tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
+                        ps2_ssx3_tricky::state().directActive = true;
+                        std::fprintf(stderr, "[tklist] tick=%llu direct %s [%s] (peak %u type %u row %u ev %d)\n",
+                                     static_cast<unsigned long long>(tkTick), c.name,
+                                     c.modeName[tkList.step == 1 ? tkList.mode : 0], tkGoal.peak,
+                                     tkGoal.type, tkGoal.row, tkDg.event);
+                        return;
+                    }
+                    if (tkl::directKnob())
+                        std::fprintf(stderr, "[tklist] tick=%llu direct defers %s [%s] to the navigator\n",
+                                     static_cast<unsigned long long>(tkTick), c.name,
+                                     c.modeName[tkList.step == 1 ? tkList.mode : 0]);
                     tkl::driveArm(tkGoal, c.event, tkTick);
                     tkNoteRide(c, c.modeName[tkList.step == 1 ? tkList.mode : 0]);
                     // Part 3: a mapped mode rides the donor event.
@@ -9303,6 +9327,8 @@ void PS2Runtime::run()
                     // back (out of the overlay on step 0). Left/Right do
                     // nothing. Touch taps use tkBrowseTap (one-tap default
                     // ride + toggle); ride actions are defined above.
+                    // tricky-direct: tkArmRide itself takes the direct path
+                    // when PS2X_SSX3_TRICKY_DIRECT covers this cell.
                     const uint16_t tkEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
                     if (tkEdge & ps2x::vpad::kUp)
                         tkl::listMove(tkList, true);

@@ -56,8 +56,21 @@ namespace
     // tricky-direct-1 Part A probe: the stock Select Event configuration
     // followed by the shared offline/online loading-app transition. Each
     // continuation lives on the guest stack, like the preview continuation.
+    // Part B generalizes the donor event per course (Race cells); freestyle
+    // cells keep the navigator until their accept args are measured.
     constexpr uint32_t kDirectMagic = 0x544b4431u;
     constexpr uint32_t kDirectFrame = 0x240u;
+
+    struct DirectJob
+    {
+        int event = 0;
+    };
+
+    DirectJob &tkDirectJob()
+    {
+        static DirectJob j;
+        return j;
+    }
 
     bool tkDirectContinue(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -86,7 +99,7 @@ namespace
             call(0x145108u, 2, getRegU32(ctx, 2), 1); // Single Event
             break;
         case 2:
-            wr32(ram, 0x535c08u, 0); // Garibaldi's event-0 donor
+            wr32(ram, 0x535c08u, static_cast<uint32_t>(tkDirectJob().event)); // donor event
             wr32(ram, getRegU32(ctx, 28) - 0x1f38u, 1);
             call(0x144df0u, 3, config, 0); // nav node +4: race
             break;
@@ -136,16 +149,30 @@ namespace
         return true;
     }
 
-    bool tkDirectProbe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    // Single entry for menu-hook probes and overlay-tap asks: resolve the
+    // course, pin its world, and hijack this guest call into the loading
+    // chain. False = not started (the caller runs the stock handler).
+    bool tkDirectStart(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime, int sel, int opt)
     {
-        const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
-        if (!probe || std::strcmp(probe, "1") != 0) return false;
+        namespace tkl = ps2_ssx3_tricky_list;
+        if (sel < 0 || sel >= static_cast<int>(tkl::kCourseCount))
+            return false;
+        const tkl::Course &c = tkl::kCourses[sel];
+        if (opt < 0 || opt >= c.nOpts)
+            return false;
+        const tkl::CourseOption &goal = c.opts[opt];
+        const tkl::DirectGoal dg = tkl::directGoalFor(c, goal);
+        if (!dg.ok)
+        {
+            tkLog(runtime, std::string("direct defers ") + c.name + " to the navigator (no Race cell yet)");
+            return false;
+        }
         const uint32_t sp = getRegU32(ctx, 29);
         if (sp < kDirectFrame || sp > PS2_RAM_SIZE) return false;
-        // Mark even a native donor as a mapped launch so train-62's
-        // SET0001 records guard owns this ride.
-        if (!ps2_ssx3_tricky_list::applyCourseMap(ram, PS2_RAM_SIZE, {0, "GARI", "Garibaldi"}))
+        // Pin the donor world (also marks the ride for the records guard).
+        if (!tkl::applyCourseMap(ram, PS2_RAM_SIZE, dg.map))
             return false;
+        tkDirectJob().event = dg.event;
         ps2_ssx3_tricky::state().directActive = true; // bypasses Map: keep the overlay shut so the pad reaches the briefing
         const uint32_t f = sp - kDirectFrame;
         std::memset(ram + f, 0, kDirectFrame);
@@ -153,7 +180,43 @@ namespace
         ps2_ssx3_tricky::wr32(ram, f + 8, getRegU32(ctx, 31));
         std::memcpy(ram + f + 0x40, ctx->r, sizeof(ctx->r));
         tkSetGpr(ctx, 29, f);
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "direct start %s (donor ev %d)", c.name, dg.event);
+            tkLog(runtime, buf);
+        }
         return tkDirectContinue(ram, ctx, runtime);
+    }
+
+    bool tkDirectProbe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
+        if (!probe || std::strcmp(probe, "1") != 0) return false;
+        const char *course = std::getenv("PS2X_SSX3_TRICKY_DIRECT_COURSE");
+        return tkDirectStart(ram, ctx, runtime,
+                             ps2_ssx3_tricky_list::directCourseByCode(course ? course : "GARI"),
+                             0); // diagnostic entry rides the Race option
+    }
+
+    // Pad-glue service for overlay taps: a parked ask becomes a launch.
+    // Game thread only; never fires mid-race (the app switch owns the pad
+    // there) and never while a continuation frame is already active.
+    bool tkDirectServe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        namespace tkl = ps2_ssx3_tricky_list;
+        if (!tkl::directKnob() || !ps2_ssx3_tricky::state().tricky)
+            return false;
+        tkl::ListState list;
+        if (!tkl::directTake(list))
+            return false;
+        if (ps2_ssx3_course::appUpdateFn(ram) == ps2_ssx3_course::kGameUpdate)
+        {
+            tkLog(runtime, "direct ask dropped: a race is live");
+            return false;
+        }
+        if (list.sel >= tkl::kCourseCount)
+            return false;
+        return tkDirectStart(ram, ctx, runtime, list.sel, list.step == 1 ? list.mode : 0);
     }
 
     // preserve-fix-1: stock handles/count remain untouched. Only exact
@@ -278,6 +341,10 @@ namespace
     void tkPadGlueWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         using namespace ps2_ssx3_tricky;
+        // Overlay tap asks park on the host; the game thread launches here.
+        // A started launch hijacks this pad read (like the menu probe).
+        if (tkDirectServe(rdram, ctx, runtime))
+            return;
         static uint8_t rows[kRowsBytes + kTopoBytes];
         const bool armed = rowsArmed();
         if (armed)
