@@ -210,3 +210,4 @@ PS2X_NETSYNC_RELAY	guest-affecting-when-on	online-v0-1
 PS2X_NETSYNC_EVERY	guest-affecting-when-on	online-v0-1
 PS2X_NETSYNC_IDELAY	guest-affecting-when-on	online-v0-1
 PS2X_NETSYNC_TIMEOUT_MS	guest-affecting-when-on	online-v0-1
+PS2X_DEV_TOASTS	diag	toast-audit-1
