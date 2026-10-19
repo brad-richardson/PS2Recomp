@@ -9,6 +9,7 @@
 // loop in ps2_runtime.cpp owns pause/draw/restart, and the platform shells
 // own the settings file layer + relaunch.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -142,15 +143,13 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf, Upscale, Touch, Menu button, Input
-// marker, Hold Start. X changes the pending value (Mode/Resolution/Input
-// marker apply on restart; Perf, Upscale, Touch, Menu button and Hold
-// Start are live).
-// There is no Restart row: X on a clean Mode/Resolution/Input-marker row
-// applies the change and arms the restart; a second X on that row while
-// it still differs from the running value restarts (ArmRestart/DoRestart,
-// reusing the old one-line confirm). X anywhere else, or moving off the
-// row, disarms. Triangle or the chord closes.
+// Rows: Mode, Resolution, Perf, Upscale, On-screen controls, Menu button,
+// Hold Start, Apply, Cancel. Nothing applies on the row: Left/Right and X
+// only STAGE into NavState (settings-ui-1, Brad 10-19). The bottom Apply
+// row confirms everything at once like the in-game SSX 3 settings: live
+// rows apply without a restart, Mode/Resolution restart (label switches
+// to "Apply & restart"). Cancel, Triangle, the chord, or a tap outside
+// closes and discards staged changes.
 // Row::Count drives the geometry, hit test and draw loops, so appending
 // a row needs no layout change.
 enum class Row : uint8_t
@@ -161,14 +160,16 @@ enum class Row : uint8_t
     Upscale = 3,
     Touch = 4,
     MenuBtn = 5,
-    Marker = 6,
-    HoldStart = 7,
-    Count = 8
+    HoldStart = 6,
+    Apply = 7,
+    Cancel = 8,
+    Count = 9
 };
 static constexpr int kRowCount = static_cast<int>(Row::Count);
 
 // Short row labels (panel-polish-1, Brad 10-15: every label shows in full;
 // the draw code sets label left, value right, so no dot leaders truncate).
+// "On-screen controls" (settings-ui-1, Brad 10-19) is the longest at 18.
 inline const char *rowLabel(Row r)
 {
     switch (r)
@@ -182,13 +183,45 @@ inline const char *rowLabel(Row r)
     case Row::Upscale:
         return "Upscale";
     case Row::Touch:
-        return "Touch";
+        return "On-screen controls";
     case Row::MenuBtn:
         return "Menu button";
-    case Row::Marker:
-        return "Input marker";
     case Row::HoldStart:
         return "Hold Start";
+    case Row::Apply:
+        return "Apply";
+    case Row::Cancel:
+        return "Cancel";
+    default:
+        return "";
+    }
+}
+
+// One-line help per row, shown at the bottom while the row is selected
+// (settings-ui-1, Brad 10-19: every row gets one). All ASCII so no font
+// substitution can turn a blurb into '?'.
+inline const char *rowBlurb(Row r)
+{
+    switch (r)
+    {
+    case Row::Mode:
+        return "Guest update rate (needs restart)";
+    case Row::Res:
+        return "Render height (needs restart)";
+    case Row::Perf:
+        return "FPS + frame-time overlay";
+    case Row::Upscale:
+        return "Device upscaler on/off";
+    case Row::Touch:
+        return "Auto hides them when a controller is connected";
+    case Row::MenuBtn:
+        return "Select + Start opens settings";
+    case Row::HoldStart:
+        return "Hold START 0.6s opens settings";
+    case Row::Apply:
+        return "Apply staged changes; closing discards them.";
+    case Row::Cancel:
+        return "Discard staged changes and close.";
     default:
         return "";
     }
@@ -311,7 +344,8 @@ inline std::array<Res, 5> resOrder(unsigned nativeH)
     return out;
 }
 
-// Next choice in height order (wraps). X on the Resolution row steps this.
+// Next choice in height order (wraps). Right/X on the Resolution row
+// steps this; Left steps resPrev (settings-ui-1, Brad 10-19).
 inline Res resNext(Res cur, unsigned nativeH)
 {
     const auto order = resOrder(nativeH);
@@ -319,6 +353,19 @@ inline Res resNext(Res cur, unsigned nativeH)
     {
         if (order[i] == cur)
             return order[(i + 1) % order.size()];
+    }
+    return cur;
+}
+
+// Previous choice in height order (wraps). Left on the Resolution row
+// (pad Left, left half of the row on touch) steps this.
+inline Res resPrev(Res cur, unsigned nativeH)
+{
+    const auto order = resOrder(nativeH);
+    for (size_t i = 0; i < order.size(); ++i)
+    {
+        if (order[i] == cur)
+            return order[(i + order.size() - 1) % order.size()];
     }
     return cur;
 }
@@ -335,6 +382,72 @@ enum class Touch : uint8_t
     On = 1,
     Off = 2
 };
+
+// android-touch-1: Touch row <-> PS2X_VIRTUAL_PAD. On="1", Off="0",
+// Auto=absent (upsert drops empty). Unset or anything but "0"/"1" reads
+// as Auto, so a hand-edited file can't brick the overlay.
+inline Touch touchFromSetting(const std::string &val)
+{
+    if (val == "1")
+        return Touch::On;
+    if (val == "0")
+        return Touch::Off;
+    return Touch::Auto;
+}
+
+inline const char *touchToSetting(Touch t)
+{
+    switch (t)
+    {
+    case Touch::On:
+        return "1";
+    case Touch::Off:
+        return "0";
+    default:
+        return ""; // Auto: no override line
+    }
+}
+
+inline const char *touchName(Touch t)
+{
+    switch (t)
+    {
+    case Touch::On:
+        return "on";
+    case Touch::Off:
+        return "off";
+    default:
+        return "auto";
+    }
+}
+
+// On-screen-controls cycle, both directions with wrap (settings-ui-1,
+// Brad 10-19): Right/X steps touchNext, Left steps touchPrev.
+inline Touch touchNext(Touch t)
+{
+    switch (t)
+    {
+    case Touch::Auto:
+        return Touch::On;
+    case Touch::On:
+        return Touch::Off;
+    default:
+        return Touch::Auto;
+    }
+}
+
+inline Touch touchPrev(Touch t)
+{
+    switch (t)
+    {
+    case Touch::Auto:
+        return Touch::Off;
+    case Touch::Off:
+        return Touch::On;
+    default:
+        return Touch::Auto;
+    }
+}
 
 // Menu "..." button (settings-res-1 addendum, Brad 10-17): a small dim
 // button at the top middle of the screen; tapping it opens the panel. Shown
@@ -544,28 +657,39 @@ inline HoldStartOut holdStartStep(HoldStartState &st, bool selectDown, bool star
 enum class Action : uint8_t
 {
     None = 0,
-    Changed = 1,  // a pending value changed (redraw)
-    ArmRestart = 2,
-    DoRestart = 3,
-    Close = 4
+    Changed = 1, // a value was staged (redraw; nothing applied yet)
+    DoRestart = 2, // Apply with a restart-needing change staged
+    Apply = 3, // Apply with live-only changes staged (no restart)
+    Close = 4 // close (discards staged changes by construction)
 };
 
 struct NavState
 {
     Row sel = Row::Mode;
-    Mode mode = Mode::M120;   // pending (applied on restart)
-    Res res = Res::Screen;    // pending (applied on restart)
-    bool perf = false;        // live
-    bool upscale = false;     // live (REM3 P11 Phase 2)
-    Touch touch = Touch::Auto; // live (android-touch-1)
-    MenuBtn menubtn = MenuBtn::Shown; // live (settings-res-1)
-    bool marker = false; // pending (applied on restart; shortcuts-1: dev option, default off)
-    bool holdStart = true; // live (hold-start-1: default on)
-    Mode runMode = Mode::M120; // running values, sampled at open (dirty detect)
+    // Staged values (settings-ui-1, Brad 10-19): Left/Right and X only
+    // write these. Nothing applies until the Apply row confirms; closing
+    // (Cancel, Triangle, chord, tap outside) drops NavState, so staged
+    // changes are discarded without a write.
+    Mode mode = Mode::M120;
+    Res res = Res::Screen;
+    bool perf = false;
+    bool upscale = false; // REM3 P11 Phase 2 on-device upscale
+    Touch touch = Touch::Auto; // android-touch-1
+    MenuBtn menubtn = MenuBtn::Shown; // settings-res-1
+    bool holdStart = true; // hold-start-1: default on
+    // Not staged (no row since settings-ui-1 dropped it): round-trips the
+    // settings file so the PS2X_INPUT_MARKER env knob keeps working.
+    bool marker = false; // shortcuts-1: dev option, default off
+    // Running values, sampled at open (dirty detect + close discards).
+    Mode runMode = Mode::M120;
     Res runRes = Res::Screen;
+    bool runPerf = false;
+    bool runUpscale = false;
+    Touch runTouch = Touch::Auto;
+    MenuBtn runMenubtn = MenuBtn::Shown;
+    bool runHoldStart = true;
     bool runMarker = false;
     unsigned nativeH = 0; // measured device height px, sampled at open (order + Screen label)
-    bool restartArmed = false;
 };
 
 inline bool modeDirty(const NavState &st)
@@ -578,9 +702,71 @@ inline bool resDirty(const NavState &st)
     return st.res != st.runRes;
 }
 
-inline bool markerDirty(const NavState &st)
+inline bool perfDirty(const NavState &st)
 {
-    return st.marker != st.runMarker;
+    return st.perf != st.runPerf;
+}
+
+inline bool upscaleDirty(const NavState &st)
+{
+    return st.upscale != st.runUpscale;
+}
+
+inline bool touchDirty(const NavState &st)
+{
+    return st.touch != st.runTouch;
+}
+
+inline bool menubtnDirty(const NavState &st)
+{
+    return st.menubtn != st.runMenubtn;
+}
+
+inline bool holdStartDirty(const NavState &st)
+{
+    return st.holdStart != st.runHoldStart;
+}
+
+// Staged changes needing a restart (Mode/Resolution). LIVE-RES SLOT: when
+// Resolution applies live, drop resDirty() here and push the staged value
+// through m_gs.SetUpscale at apply time; the Apply label, dirty tagging
+// and persistence below follow automatically.
+inline bool restartDirty(const NavState &st)
+{
+    return modeDirty(st) || resDirty(st);
+}
+
+inline bool anyStaged(const NavState &st)
+{
+    return modeDirty(st) || resDirty(st) || perfDirty(st) || upscaleDirty(st) ||
+           touchDirty(st) || menubtnDirty(st) || holdStartDirty(st);
+}
+
+inline int stagedCount(const NavState &st)
+{
+    return (modeDirty(st) ? 1 : 0) + (resDirty(st) ? 1 : 0) + (perfDirty(st) ? 1 : 0) +
+           (upscaleDirty(st) ? 1 : 0) + (touchDirty(st) ? 1 : 0) + (menubtnDirty(st) ? 1 : 0) +
+           (holdStartDirty(st) ? 1 : 0);
+}
+
+// Apply row label switches when a restart-needing change is staged
+// (settings-ui-1, Brad 10-19: reads "Apply & restart" when needed).
+inline const char *applyLabel(const NavState &st)
+{
+    return restartDirty(st) ? "Apply & restart" : "Apply";
+}
+
+inline std::string applyValue(const NavState &st)
+{
+    const int n = stagedCount(st);
+    if (n == 0)
+        return "no changes";
+    return std::to_string(n) + (n == 1 ? " change" : " changes");
+}
+
+inline const char *cancelValue(const NavState &st)
+{
+    return anyStaged(st) ? "discard changes" : "close";
 }
 
 struct NavOut
@@ -602,92 +788,78 @@ inline uint16_t swallowStep(SwallowState &st, uint16_t unionMask)
     return st.mask;
 }
 
+// One step of panel input. Up/Down move (wrapping over all rows);
+// Left/Right and Cross only STAGE a value (settings-ui-1, Brad 10-19:
+// never apply or restart on a row). Left steps back, Right/Cross steps
+// forward (binary rows toggle either way). Apply confirms: DoRestart when
+// a restart-needing change is staged, Apply for live-only stages, None
+// when clean. Cancel/Cancel-tap, Triangle and the chord Close (the caller
+// drops NavState, so staged changes are discarded without a write).
 inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, bool triangleEdge,
-                      bool chordEdge)
+                      bool chordEdge, bool leftEdge = false, bool rightEdge = false)
 {
     NavOut out;
     if (chordEdge || triangleEdge)
     {
         out.action = Action::Close;
-        st.restartArmed = false;
         return out;
     }
     if (upEdge || downEdge)
     {
         const int n = static_cast<int>(Row::Count);
         int sel = static_cast<int>(st.sel);
+        if (sel < 0 || sel >= n)
+            sel = 0;
         sel = upEdge ? (sel - 1 + n) % n : (sel + 1) % n;
         st.sel = static_cast<Row>(sel);
-        st.restartArmed = false; // navigating away disarms the confirm
         return out;
     }
-    if (!crossEdge)
+    if (st.sel == Row::Apply)
+    {
+        // Left/Right on Apply do nothing; only the confirm applies.
+        if (!crossEdge || !anyStaged(st))
+            return out;
+        out.action = restartDirty(st) ? Action::DoRestart : Action::Apply;
+        return out;
+    }
+    if (st.sel == Row::Cancel)
+    {
+        // Left/Right on Cancel do nothing; the confirm discards + closes.
+        if (crossEdge)
+            out.action = Action::Close;
+        return out;
+    }
+    if (!crossEdge && !leftEdge && !rightEdge)
         return out;
     switch (st.sel)
     {
     case Row::Mode:
-        // A second X while still dirty restarts; otherwise toggle (toggling
-        // back to the running value disarms when nothing else is dirty).
-        if (st.restartArmed && modeDirty(st))
-        {
-            out.action = Action::DoRestart;
-            break;
-        }
         st.mode = (st.mode == Mode::M120) ? Mode::M60 : Mode::M120;
         out.action = Action::Changed;
-        st.restartArmed = modeDirty(st) || resDirty(st) || markerDirty(st);
         break;
     case Row::Res:
-        if (st.restartArmed && resDirty(st))
-        {
-            out.action = Action::DoRestart;
-            break;
-        }
-        st.res = resNext(st.res, st.nativeH);
+        st.res = leftEdge ? resPrev(st.res, st.nativeH) : resNext(st.res, st.nativeH);
         out.action = Action::Changed;
-        st.restartArmed = modeDirty(st) || resDirty(st) || markerDirty(st);
-        break;
-    case Row::Marker:
-        // shortcuts-1 (Brad 10-18): the input marker is a developer
-        // option, default off. No live arm exists (wrapping is a boot
-        // table apply with no disarm path), so it restarts like
-        // Mode/Resolution; the reboot arms the exact PS2X_INPUT_MARKER=1
-        // path. A second X while still dirty restarts; otherwise toggle
-        // (toggling back to the running value disarms when nothing else
-        // is dirty).
-        if (st.restartArmed && markerDirty(st))
-        {
-            out.action = Action::DoRestart;
-            break;
-        }
-        st.marker = !st.marker;
-        out.action = Action::Changed;
-        st.restartArmed = modeDirty(st) || resDirty(st) || markerDirty(st);
         break;
     case Row::Perf:
         st.perf = !st.perf;
         out.action = Action::Changed;
-        st.restartArmed = false;
         break;
     case Row::Upscale:
         st.upscale = !st.upscale;
         out.action = Action::Changed;
-        st.restartArmed = false;
         break;
     case Row::Touch:
-        st.touch = (st.touch == Touch::Auto) ? Touch::On : (st.touch == Touch::On ? Touch::Off : Touch::Auto);
+        st.touch = leftEdge ? touchPrev(st.touch) : touchNext(st.touch);
         out.action = Action::Changed;
-        st.restartArmed = false;
         break;
     case Row::MenuBtn:
         st.menubtn = (st.menubtn == MenuBtn::Shown) ? MenuBtn::Hidden : MenuBtn::Shown;
         out.action = Action::Changed;
-        st.restartArmed = false;
         break;
     case Row::HoldStart:
         st.holdStart = !st.holdStart;
         out.action = Action::Changed;
-        st.restartArmed = false;
         break;
     default:
         break;
@@ -804,19 +976,19 @@ inline SettingsPairs parseSettingsEnv(const std::string &content)
 
 inline std::string formatSettingsEnv(const SettingsPairs &pairs)
 {
-    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Menu button/Input marker/Hold Start).\n"
+    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/On-screen controls/Menu button/Hold Start).\n"
                     "# Delete lines (or this file) to return to the platform defaults.\n";
     for (const auto &kv : pairs)
         s += kv.first + "=" + kv.second + "\n";
     return s;
 }
 
-// What the restart persists: the PENDING Resolution choice (never the
-// effective env) plus the live Perf flag plus the PENDING Input-marker
-// choice. Pure so the write path is unit-tested (Brad 10-17 iPhone bug:
-// a stale choice must not survive the restart — the file must carry
-// exactly what the rows show).
-inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf, bool marker);
+// What Apply persists: every STAGED row (settings-ui-1, Brad 10-19). The
+// single persistence point for both the live apply and the restart apply
+// (the restart path writes this file, then relaunches). Pure so the write
+// path is unit-tested (Brad 10-17 iPhone bug: a stale choice must not
+// survive the restart — the file must carry exactly what the rows show).
+inline SettingsPairs settingsForApply(const SettingsPairs &pairs, const NavState &st);
 
 // Upsert one key (empty val removes it). Keeps file order, appends new keys.
 inline SettingsPairs upsertSettings(SettingsPairs cur, const std::string &key, const std::string &val)
@@ -864,11 +1036,15 @@ inline const char *resToUpscale(Res r)
     }
 }
 
-inline SettingsPairs settingsForRestart(const SettingsPairs &pairs, Res res, bool perf, bool marker)
+inline SettingsPairs settingsForApply(const SettingsPairs &pairs, const NavState &st)
 {
-    SettingsPairs out = upsertSettings(pairs, "GE1_UPSCALE", resToUpscale(res));
-    out = upsertSettings(out, "PS2X_SETTINGS_PERF", perf ? "1" : "0");
-    out = upsertSettings(out, "PS2X_INPUT_MARKER", markerToSetting(marker));
+    SettingsPairs out = upsertSettings(pairs, "GE1_UPSCALE", resToUpscale(st.res));
+    out = upsertSettings(out, "PS2X_SETTINGS_PERF", st.perf ? "1" : "0");
+    out = upsertSettings(out, "PS2X_INPUT_MARKER", markerToSetting(st.marker));
+    out = upsertSettings(out, "PS2X_VIRTUAL_PAD", touchToSetting(st.touch));
+    out = upsertSettings(out, "GE1_ONDEVICE_UPSCALE", st.upscale ? "1" : "0");
+    out = upsertSettings(out, "PS2X_MENU_BUTTON", menuBtnToSetting(st.menubtn));
+    out = upsertSettings(out, "PS2X_HOLD_START", holdStartToSetting(st.holdStart));
     return out;
 }
 
@@ -919,21 +1095,24 @@ inline Res resDefaultRow(bool publicApp, bool isiOS, std::uint64_t ramBytes, int
 // (PS2 base 448 lines x scale); Screen shows the measured device height
 // rounded the same way resHeightLabel rounds. The platform default option
 // is marked. The panel font is raylib's default (U+0000..U+00FF), so the
-// multiply sign (xD7) and middle dot (xB7) render; "..." and the em dash do
-// not (the menu button and restart hint use ASCII).
+// multiply sign (U+00D7, UTF-8 C3 97) and middle dot (U+00B7, UTF-8 C2 B7)
+// render; "..." and the em dash do not (the menu button and hints use
+// ASCII). settings-ui-1 (Brad 10-19 "?"): the dot was a lone 0xB7 byte,
+// which is NOT valid UTF-8, so raylib decoded it as '?'. Both separators
+// below are proper two-byte UTF-8 now.
 inline std::string resOptionLabel(Res r, unsigned nativeH, Res platformDefault)
 {
     std::string s;
     if (r == Res::Screen)
     {
         const std::string h = resHeightLabel(nativeH);
-        s = h.empty() ? "Screen" : "Screen \xb7 " + h;
+        s = h.empty() ? "Screen" : "Screen \xc2\xb7 " + h;
     }
     else
     {
         const unsigned mult = resScale(r);
         char buf[32];
-        std::snprintf(buf, sizeof(buf), "%u\xc3\x97 \xb7 %up", mult, kResBaseH * mult);
+        std::snprintf(buf, sizeof(buf), "%u\xc3\x97 \xc2\xb7 %up", mult, kResBaseH * mult);
         s = buf;
     }
     if (r == platformDefault)
@@ -941,42 +1120,34 @@ inline std::string resOptionLabel(Res r, unsigned nativeH, Res platformDefault)
     return s;
 }
 
-// android-touch-1: Touch row <-> PS2X_VIRTUAL_PAD. On="1", Off="0",
-// Auto=absent (upsert drops empty). Unset or anything but "0"/"1" reads
-// as Auto, so a hand-edited file can't brick the overlay.
-inline Touch touchFromSetting(const std::string &val)
+// Shared settings-style constants (settings-ui-1, Brad 10-19): the panel
+// and the resume prompt read the same palette, fonts and spacing here —
+// never copied literals at the draw sites. Raylib-agnostic RGBA so this
+// header stays dependency-free for the host suite; the render loop
+// converts to raylib Color at the draw site.
+struct Rgba
 {
-    if (val == "1")
-        return Touch::On;
-    if (val == "0")
-        return Touch::Off;
-    return Touch::Auto;
+    uint8_t r = 0, g = 0, b = 0, a = 255;
+};
+constexpr Rgba kSet2Bg{8, 12, 20, 232};
+constexpr Rgba kSet2Border{255, 140, 40, 255};
+constexpr Rgba kSet2Title{255, 170, 80, 255};
+constexpr Rgba kSet2Text{230, 235, 245, 255};
+constexpr Rgba kSet2TextSel{255, 200, 130, 255};
+constexpr Rgba kSet2SelBg{255, 140, 40, 48};
+constexpr Rgba kSet2Hint{150, 160, 175, 255};
+constexpr Rgba kSet2Btn{38, 48, 62, 255};
+constexpr Rgba kSet2BtnSel{153, 84, 24, 255};
+constexpr Rgba kSet2Pill{0, 0, 0, 120};
+
+inline int set2TitleFont(float h)
+{
+    return std::max(16, static_cast<int>(h / 26.0f));
 }
 
-inline const char *touchToSetting(Touch t)
+inline int set2RowFont(float h)
 {
-    switch (t)
-    {
-    case Touch::On:
-        return "1";
-    case Touch::Off:
-        return "0";
-    default:
-        return ""; // Auto: no override line
-    }
-}
-
-inline const char *touchName(Touch t)
-{
-    switch (t)
-    {
-    case Touch::On:
-        return "on";
-    case Touch::Off:
-        return "off";
-    default:
-        return "auto";
-    }
+    return std::max(12, static_cast<int>(h / 34.0f));
 }
 
 struct MenuButtonGeom
@@ -984,22 +1155,33 @@ struct MenuButtonGeom
     float x = 0, y = 0, w = 0, h = 0; // hit rect, window points
 };
 
-// Small dim "..." at the top middle. The hit rect is thumb-sized; the
+// Small "..." at the top middle. The hit rect is thumb-sized; the
 // drawn glyph is smaller and centred (the render loop draws the text).
-inline MenuButtonGeom menuButtonLayout(float sw, float sh)
+// safeTop clears the display cutout (settings-ui-1, Brad 10-19: on an
+// iPhone the button sat at 2% under the Dynamic Island/safe area); the
+// perf overlay already offsets the same way via set2SafePad.
+inline MenuButtonGeom menuButtonLayout(float sw, float sh, float safeTop = 0.0f)
 {
     MenuButtonGeom g;
     const float hit = sh * 0.075f; // ~81 px on a 1080p panel
     g.w = hit * 1.6f;
     g.h = hit;
     g.x = (sw - g.w) * 0.5f;
-    g.y = sh * 0.02f;
+    g.y = safeTop + sh * 0.02f;
     return g;
 }
 
 inline bool menuButtonHit(const MenuButtonGeom &g, float x, float y)
 {
     return x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h;
+}
+
+// Touch halves (settings-ui-1, Brad 10-19): a tap left of the row middle
+// steps back, right of it steps forward. The draw wraps multi-value rows
+// in "< >" arrows as the affordance; the halves are the tap zones.
+inline bool rowTapBack(const PanelGeom &g, float x)
+{
+    return x < g.rowX + g.rowW * 0.5f;
 }
 
 #if defined(__APPLE__) && !defined(PS2X_IOS)

@@ -2794,19 +2794,30 @@ bool asv1AskToResume(bool &closed)
         }
         else
             lastTouchId = -1;
+        // settings-ui-1 (Brad 10-19): the resume prompt wears the settings
+        // panel style — same shared constants (palette, fonts), same flat
+        // buttons with the panel-orange selected outline.
+        const auto set2C = [](ps2x::set2::Rgba c) {
+            return Color{c.r, c.g, c.b, c.a};
+        };
         BeginDrawing();
-        ClearBackground(Color{19, 25, 36, 255});
+        ClearBackground(set2C(ps2x::set2::kSet2Bg));
         const char *title = "Resume where you left off?";
-        const int titleSize = std::max(28, h / 18);
-        DrawText(title, (w - MeasureText(title, titleSize)) / 2, h / 3, titleSize, RAYWHITE);
-        DrawRectangleRec(resumeBox, resumeSelected ? Color{62, 132, 91, 255} : Color{48, 61, 74, 255});
-        DrawRectangleRec(freshBox, resumeSelected ? Color{48, 61, 74, 255} : Color{62, 132, 91, 255});
-        const int labelSize = std::max(20, h / 28);
+        const int titleSize = ps2x::set2::set2TitleFont(static_cast<float>(h));
+        DrawText(title, (w - MeasureText(title, titleSize)) / 2, h / 3, titleSize,
+                 set2C(ps2x::set2::kSet2Title));
+        DrawRectangleRec(resumeBox, set2C(resumeSelected ? ps2x::set2::kSet2BtnSel : ps2x::set2::kSet2Btn));
+        DrawRectangleRec(freshBox, set2C(resumeSelected ? ps2x::set2::kSet2Btn : ps2x::set2::kSet2BtnSel));
+        DrawRectangleLinesEx(resumeSelected ? resumeBox : freshBox, 3.0f,
+                             set2C(ps2x::set2::kSet2Border));
+        const int labelSize = ps2x::set2::set2RowFont(static_cast<float>(h));
         const char *resume = "Resume", *fresh = "Start fresh";
         DrawText(resume, x + (buttonW - MeasureText(resume, labelSize)) / 2,
-                 y + (buttonH - labelSize) / 2, labelSize, RAYWHITE);
+                 y + (buttonH - labelSize) / 2, labelSize,
+                 set2C(resumeSelected ? ps2x::set2::kSet2TextSel : ps2x::set2::kSet2Text));
         DrawText(fresh, x + buttonW + gap + (buttonW - MeasureText(fresh, labelSize)) / 2,
-                 y + (buttonH - labelSize) / 2, labelSize, RAYWHITE);
+                 y + (buttonH - labelSize) / 2, labelSize,
+                 set2C(resumeSelected ? ps2x::set2::kSet2Text : ps2x::set2::kSet2TextSel));
         EndDrawing();
     }
     closed = true;
@@ -7906,29 +7917,32 @@ void PS2Runtime::run()
     std::vector<int64_t> set2HeldTouches; // touches still down at close, masked until release
     std::vector<int64_t> set2MenuIds; // touch ids seen while closed (a held finger never re-opens)
     int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
-    bool set2Perf = false;         // live perf-overlay flag (env default at boot)
-    bool set2Upscale = false;      // live on-device-upscale flag (env default at boot)
+    bool set2Perf = false;         // running perf-overlay flag (env default at boot)
+    bool set2Upscale = false;      // running on-device-upscale flag (env default at boot)
+    // settings-ui-1 (Brad 10-19): the panel only STAGES into set2Nav; these
+    // are the running stores Apply copies to. set2DoOpen reseeds staged +
+    // run* from them at every open, so closing discards staged changes.
+    ps2x::set2::MenuBtn set2MenuLive = ps2x::set2::MenuBtn::Shown;
+    bool set2HoldLive = true;
     if (set2On)
     {
         const char *perf = std::getenv("PS2X_SETTINGS_PERF");
         set2Perf = perf && std::string(perf) == "1";
-        set2Nav.perf = set2Perf;
         const char *upscale = std::getenv("GE1_ONDEVICE_UPSCALE");
         set2Upscale = ps2x::set2::ondeviceUpscaleOn(upscale);
-        set2Nav.upscale = set2Upscale;
-        set2Nav.touch = vpadTouchMode;
         const char *menubtn = std::getenv("PS2X_MENU_BUTTON");
-        set2Nav.menubtn = ps2x::set2::menuBtnFromSetting(menubtn ? menubtn : "");
-        // shortcuts-1: Input marker row seeds from the effective env (the
-        // Android/iOS settings layers already merged settings.env, explicit
-        // env winning; the Mac has no settings file). Code default off.
+        set2MenuLive = ps2x::set2::menuBtnFromSetting(menubtn ? menubtn : "");
+        // shortcuts-1: the marker round-trips the settings file (no row
+        // since settings-ui-1) so the env knob keeps working; seeds from
+        // the effective env (settings layers already merged, explicit env
+        // winning; the Mac has no settings file). Code default off.
         const char *marker = std::getenv("PS2X_INPUT_MARKER");
         set2Nav.marker = ps2x::set2::markerFromSetting(marker ? marker : "");
         set2Nav.runMarker = set2Nav.marker;
-        // hold-start-1: Hold Start row seeds from the effective env (same
-        // layering as the other live rows). Code default on.
+        // hold-start-1: Hold Start seeds from the effective env (same
+        // layering as the other rows). Code default on.
         const char *holdStart = std::getenv("PS2X_HOLD_START");
-        set2Nav.holdStart = ps2x::set2::holdStartFromSetting(holdStart ? holdStart : "");
+        set2HoldLive = ps2x::set2::holdStartFromSetting(holdStart ? holdStart : "");
     }
     // tk-menu-1 Part 2: the Tricky course list. Knob off: one cached-bool
     // check per host frame in the block below; the guest is untouched.
@@ -8348,7 +8362,7 @@ void PS2Runtime::run()
         // path (host-side only; det-identical). Hiding the button via the
         // Menu button row restores the fast path.
         ps2x_present_vk::setUnderlay(set2Open || (set2On && set2Perf) ||
-                                     (set2On && ps2x::set2::menuButtonShown(set2Nav.menubtn)) ||
+                                     (set2On && ps2x::set2::menuButtonShown(set2MenuLive)) ||
                                      (vpadWanted ? !vpadPadConnected : set2On));
 #endif
         // First frame always evaluates (Odin starts hidden on the fast
@@ -8462,18 +8476,21 @@ void PS2Runtime::run()
                 if (kv.first == "GE1_UPSCALE")
                     set2Nav.res = ps2x::set2::resFromSetting(kv.second, set2DefRes);
                 else if (kv.first == "PS2X_MENU_BUTTON")
-                    set2Nav.menubtn = ps2x::set2::menuBtnFromSetting(kv.second);
+                    set2MenuLive = ps2x::set2::menuBtnFromSetting(kv.second);
             }
             set2Nav.runRes = set2Nav.res;
-            // shortcuts-1: the marker row re-seeds clean at every open
-            // (pending never survives a close without a restart, like
-            // Mode/Resolution); the env cannot change mid-session.
+            // settings-ui-1: the marker has no row; the file value carries
+            // across (the env cannot change mid-session).
             set2Nav.marker = set2Nav.runMarker;
             set2Nav.nativeH = set2MeasuredH;
-            set2Nav.perf = set2Perf;
-            set2Nav.upscale = set2Upscale;
-            set2Nav.touch = vpadTouchMode;
-            set2Nav.restartArmed = false;
+            // Reseed staged + running from the live stores: closing drops
+            // NavState, so the next open starts clean (Brad 10-19: closing
+            // discards staged changes).
+            set2Nav.perf = set2Nav.runPerf = set2Perf;
+            set2Nav.upscale = set2Nav.runUpscale = set2Upscale;
+            set2Nav.touch = set2Nav.runTouch = vpadTouchMode;
+            set2Nav.menubtn = set2Nav.runMenubtn = set2MenuLive;
+            set2Nav.holdStart = set2Nav.runHoldStart = set2HoldLive;
 #if defined(__ANDROID__)
             // The panel needs the GL overlay visible over the VK layer. The Z
             // applies in queue(), so wait for one geometry apply while the
@@ -8510,6 +8527,11 @@ void PS2Runtime::run()
                          set2Eff120 ? "120" : "60", set2EffUpscale.c_str());
         };
         auto set2DoClose = [&] {
+            // settings-ui-1 (Brad 10-19): closing discards staged changes
+            // (NavState is reseeded at the next open; nothing was written).
+            if (ps2x::set2::anyStaged(set2Nav))
+                std::fprintf(stderr, "[set2] close with %d staged change(s) discarded\n",
+                             ps2x::set2::stagedCount(set2Nav));
             set2Open = false;
             // Swallow the close-press overhang: buttons down at close (the
             // closing Triangle/chord, a held nav X) stay stripped until
@@ -8548,10 +8570,9 @@ void PS2Runtime::run()
             std::fprintf(stderr, "[set2] restart want120=%d upscale=%s marker=%d\n", want120 ? 1 : 0,
                          upscale[0] ? upscale : "(default)", set2Nav.marker ? 1 : 0);
 #if defined(PS2X_IOS)
-            // settings-res-1: the persisted file carries the pending rows
-            // (settingsForRestart, unit-tested) — never the effective env.
-            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf,
-                                                        set2Nav.marker);
+            // settings-ui-1: the persisted file carries every staged row
+            // (settingsForApply, unit-tested) — never the effective env.
+            auto pairs = ps2x::set2::settingsForApply(set2ReadSettings(), set2Nav);
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8566,8 +8587,7 @@ void PS2Runtime::run()
             std::fflush(nullptr);
             std::_Exit(0);
 #elif defined(__ANDROID__)
-            auto pairs = ps2x::set2::settingsForRestart(set2ReadSettings(), set2Nav.res, set2Perf,
-                                                        set2Nav.marker);
+            auto pairs = ps2x::set2::settingsForApply(set2ReadSettings(), set2Nav);
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8595,6 +8615,33 @@ void PS2Runtime::run()
             ps2x::ui::toast("Restart failed", 3.0f);
 #endif
 #endif
+        };
+        auto set2ApplyStaged = [&] {
+            // settings-ui-1 (Brad 10-19): Apply with live-only stages. One
+            // shared path for pad X and touch tap: persist the whole staged
+            // file (settingsForApply, the same content the restart path
+            // writes), copy staged to the running stores, push the live
+            // setters. No restart. The write is best-effort like the old
+            // live rows (false on the Mac, live-only there); the running
+            // stores update regardless. LIVE-RES SLOT: a live Resolution
+            // applies here via m_gs.SetUpscale when capable.
+            auto pairs = ps2x::set2::settingsForApply(set2ReadSettings(), set2Nav);
+            set2WriteSettings(pairs);
+            set2Perf = set2Nav.perf;
+            set2Nav.runPerf = set2Perf;
+            set2Upscale = set2Nav.upscale;
+            set2Nav.runUpscale = set2Upscale;
+            m_gs.setOndeviceUpscale(set2Upscale);
+            vpadTouchMode = set2Nav.touch;
+            set2Nav.runTouch = vpadTouchMode;
+            vpadWanted = (vpadTouchMode != ps2x::set2::Touch::Off);
+            set2MenuLive = set2Nav.menubtn;
+            set2Nav.runMenubtn = set2MenuLive;
+            set2HoldLive = set2Nav.holdStart;
+            set2Nav.runHoldStart = set2HoldLive;
+            std::fprintf(stderr, "[set2] apply live perf=%d upscale=%d touch=%d menubtn=%d holdStart=%d\n",
+                         set2Perf ? 1 : 0, set2Upscale ? 1 : 0, static_cast<int>(vpadTouchMode),
+                         static_cast<int>(set2MenuLive), set2HoldLive ? 1 : 0);
         };
         if (set2On)
         {
@@ -8624,7 +8671,7 @@ void PS2Runtime::run()
             // The guest sees Start only on release, so pause opens about one
             // tap length later. Det stays IDENTICAL: padscripts drive the
             // guest pad directly, never this host union.
-            const bool set2HoldOn = set2Nav.holdStart;
+            const bool set2HoldOn = set2HoldLive;
             const ps2x::set2::HoldStartOut set2HoldOut = ps2x::set2::holdStartStep(
                 set2Hold, (set2Union & ps2x::vpad::kSelect) != 0u,
                 (set2Union & ps2x::vpad::kStart) != 0u, set2NowMs, set2HoldOn && !set2Open);
@@ -8683,65 +8730,17 @@ void PS2Runtime::run()
             else
             {
                 const uint16_t set2Edge = static_cast<uint16_t>(set2Union & ~set2PrevUnion);
+                // settings-ui-1 (Brad 10-19): d-pad Left/Right stage a step
+                // back/forward; X stages forward. Nothing applies on a row.
                 const ps2x::set2::NavOut navOut = ps2x::set2::navStep(
                     set2Nav, (set2Edge & ps2x::vpad::kUp) != 0u,
                     (set2Edge & ps2x::vpad::kDown) != 0u,
                     (set2Edge & ps2x::vpad::kCross) != 0u,
-                    (set2Edge & ps2x::vpad::kTriangle) != 0u, set2ChordOut.openEdge);
-                if (navOut.action == ps2x::set2::Action::Changed &&
-                    set2Nav.sel == ps2x::set2::Row::Perf)
-                {
-                    // Perf is live: apply + persist immediately.
-                    set2Perf = set2Nav.perf;
-                    auto pairs = set2ReadSettings();
-                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF",
-                                                       set2Perf ? "1" : "0");
-                    set2WriteSettings(pairs); // false on the Mac (live-only there)
-                }
-                if (navOut.action == ps2x::set2::Action::Changed &&
-                    set2Nav.sel == ps2x::set2::Row::Upscale)
-                {
-                    // REM3 P11 Phase 2: Upscale is live like Perf. The ordered
-                    // host-GS-worker command carries it (FIFO after prior
-                    // packets); the vendor applies + purges, no reboot.
-                    set2Upscale = set2Nav.upscale;
-                    m_gs.setOndeviceUpscale(set2Upscale);
-                    auto pairs = set2ReadSettings();
-                    pairs = ps2x::set2::upsertSettings(pairs, "GE1_ONDEVICE_UPSCALE",
-                                                       set2Upscale ? "1" : "0");
-                    set2WriteSettings(pairs); // false on the Mac (live-only there)
-                }
-                if (navOut.action == ps2x::set2::Action::Changed &&
-                    set2Nav.sel == ps2x::set2::Row::Touch)
-                {
-                    // android-touch-1: Touch is live like Perf. Auto shows
-                    // the overlay only with no gamepad; On/Off force it.
-                    vpadTouchMode = set2Nav.touch;
-                    vpadWanted = (vpadTouchMode != ps2x::set2::Touch::Off);
-                    auto pairs = set2ReadSettings();
-                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_VIRTUAL_PAD",
-                                                       ps2x::set2::touchToSetting(vpadTouchMode));
-                    set2WriteSettings(pairs); // false on the Mac (live-only there)
-                }
-                if (navOut.action == ps2x::set2::Action::Changed &&
-                    set2Nav.sel == ps2x::set2::Row::MenuBtn)
-                {
-                    // settings-res-1: the "..." button is live like Perf
-                    // (no restart; the next frame's draw + underlay read it).
-                    auto pairs = set2ReadSettings();
-                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_MENU_BUTTON",
-                                                       ps2x::set2::menuBtnToSetting(set2Nav.menubtn));
-                    set2WriteSettings(pairs); // false on the Mac (live-only there)
-                }
-                if (navOut.action == ps2x::set2::Action::Changed &&
-                    set2Nav.sel == ps2x::set2::Row::HoldStart)
-                {
-                    // hold-start-1: live like Touch/Menu button (no restart).
-                    auto pairs = set2ReadSettings();
-                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_HOLD_START",
-                                                       ps2x::set2::holdStartToSetting(set2Nav.holdStart));
-                    set2WriteSettings(pairs); // false on the Mac (live-only there)
-                }
+                    (set2Edge & ps2x::vpad::kTriangle) != 0u, set2ChordOut.openEdge,
+                    (set2Edge & ps2x::vpad::kLeft) != 0u,
+                    (set2Edge & ps2x::vpad::kRight) != 0u);
+                if (navOut.action == ps2x::set2::Action::Apply)
+                    set2ApplyStaged();
                 if (navOut.action != ps2x::set2::Action::None)
                     std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d menubtn=%d marker=%d holdStart=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
@@ -9098,13 +9097,15 @@ void PS2Runtime::run()
             const int set2n = set2SampleTouches(set2ts);
             if (set2n >= 2)
                 set2DoOpen();
-            else if (ps2x::set2::menuButtonShown(set2Nav.menubtn))
+            else if (ps2x::set2::menuButtonShown(set2MenuLive))
             {
                 // settings-res-1: a fresh tap on the "..." button (top
                 // middle) opens the panel. Touches here never reach the
                 // guest; held ids are tracked below so a finger down
                 // across close never re-opens.
-                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight);
+                float set2mbSafeL = 0.0f, set2mbSafeT = 0.0f;
+                set2SafePad(set2mbSafeL, set2mbSafeT);
+                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight, set2mbSafeT);
                 for (int i = 0; i < set2n && !set2Open; ++i)
                 {
                     if (ps2x::set2::menuButtonHit(set2mb, set2ts[i].x, set2ts[i].y) &&
@@ -9689,65 +9690,24 @@ void PS2Runtime::run()
                 const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
                 if (hit >= 0 && hit < ps2x::set2::kRowCount)
                 {
-                    // settings-res-1: tapping a different row selects it and
-                    // disarms (like pad Up/Down); tapping the armed dirty row
-                    // again is the restart confirm (navStep decides).
+                    // settings-ui-1 (Brad 10-19): tapping a different row
+                    // selects it, then the tap stages (never applies): the
+                    // left/right halves of a value row step back/forward,
+                    // Apply/Cancel confirm either way.
                     if (hit != static_cast<int>(set2Nav.sel))
-                    {
                         set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
-                        set2Nav.restartArmed = false;
-                    }
-                    const ps2x::set2::NavOut tapOut =
-                        ps2x::set2::navStep(set2Nav, false, false, true, false, false);
-                    if (tapOut.action == ps2x::set2::Action::Changed &&
-                        set2Nav.sel == ps2x::set2::Row::Perf)
+                    ps2x::set2::NavOut tapOut;
+                    if (hit == static_cast<int>(ps2x::set2::Row::Apply) ||
+                        hit == static_cast<int>(ps2x::set2::Row::Cancel))
+                        tapOut = ps2x::set2::navStep(set2Nav, false, false, true, false, false);
+                    else
                     {
-                        set2Perf = set2Nav.perf;
-                        auto pairs = set2ReadSettings();
-                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF",
-                                                           set2Perf ? "1" : "0");
-                        set2WriteSettings(pairs);
+                        const bool back = ps2x::set2::rowTapBack(set2g, set2ts[i].x);
+                        tapOut = ps2x::set2::navStep(set2Nav, false, false, false, false, false,
+                                                     back, !back);
                     }
-                    if (tapOut.action == ps2x::set2::Action::Changed &&
-                        set2Nav.sel == ps2x::set2::Row::Upscale)
-                    {
-                        // REM3 P11 Phase 2: touch tap, same live command as the pad path.
-                        set2Upscale = set2Nav.upscale;
-                        m_gs.setOndeviceUpscale(set2Upscale);
-                        auto pairs = set2ReadSettings();
-                        pairs = ps2x::set2::upsertSettings(pairs, "GE1_ONDEVICE_UPSCALE",
-                                                           set2Upscale ? "1" : "0");
-                        set2WriteSettings(pairs);
-                    }
-                    if (tapOut.action == ps2x::set2::Action::Changed &&
-                        set2Nav.sel == ps2x::set2::Row::Touch)
-                    {
-                        // android-touch-1: touch tap, same live apply as the pad path.
-                        vpadTouchMode = set2Nav.touch;
-                        vpadWanted = (vpadTouchMode != ps2x::set2::Touch::Off);
-                        auto pairs = set2ReadSettings();
-                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_VIRTUAL_PAD",
-                                                           ps2x::set2::touchToSetting(vpadTouchMode));
-                        set2WriteSettings(pairs);
-                    }
-                    if (tapOut.action == ps2x::set2::Action::Changed &&
-                        set2Nav.sel == ps2x::set2::Row::MenuBtn)
-                    {
-                        // settings-res-1: touch tap, same live persist as the pad path.
-                        auto pairs = set2ReadSettings();
-                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_MENU_BUTTON",
-                                                           ps2x::set2::menuBtnToSetting(set2Nav.menubtn));
-                        set2WriteSettings(pairs);
-                    }
-                    if (tapOut.action == ps2x::set2::Action::Changed &&
-                        set2Nav.sel == ps2x::set2::Row::HoldStart)
-                    {
-                        // hold-start-1: touch tap, same live persist as the pad path.
-                        auto pairs = set2ReadSettings();
-                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_HOLD_START",
-                                                           ps2x::set2::holdStartToSetting(set2Nav.holdStart));
-                        set2WriteSettings(pairs);
-                    }
+                    if (tapOut.action == ps2x::set2::Action::Apply)
+                        set2ApplyStaged();
                     std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
                                  static_cast<int>(tapOut.action));
                     if (tapOut.action == ps2x::set2::Action::Close)
@@ -9756,7 +9716,7 @@ void PS2Runtime::run()
                         set2DoRestart();
                 }
                 else
-                    set2DoClose(); // taps outside the rows close
+                    set2DoClose(); // taps outside the rows close (discards staged)
             }
             if (set2Open)
             {
@@ -9801,8 +9761,10 @@ void PS2Runtime::run()
             // never re-opens.
             if (set2On && !set2Open)
             {
-                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight);
-                const bool menuShown = ps2x::set2::menuButtonShown(set2Nav.menubtn);
+                float set2mbSafeL = 0.0f, set2mbSafeT = 0.0f;
+                set2SafePad(set2mbSafeL, set2mbSafeT);
+                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight, set2mbSafeT);
+                const bool menuShown = ps2x::set2::menuButtonShown(set2MenuLive);
                 std::vector<int64_t> menuIds;
                 int kept = 0;
                 for (int i = 0; i < touches; ++i)
@@ -9997,10 +9959,10 @@ void PS2Runtime::run()
 #endif
             }
         }
-        // SET2: settings panel (open) / perf line, drawn by the host over
-        // the presented frame (never into the guest frame). set2-polish-1
-        // (Brad 10-16): no gear dot — a closed panel draws nothing here
-        // except the perf line, and the chord is the only opener.
+        // SET2: settings panel (open) / "..." button + perf line (closed),
+        // drawn by the host over the presented frame (never into the guest
+        // frame). set2-polish-1 (Brad 10-16): no gear dot; the chord,
+        // the "..." button and the no-overlay two-finger tap open it.
         if (set2On && !skipGl)
         {
 #if defined(__ANDROID__)
@@ -10047,64 +10009,65 @@ void PS2Runtime::run()
 #endif
                     DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
                                   Color{0, 0, 0, 120});
+                // settings-ui-1: palette, fonts and spacing come from the
+                // shared style constants (ps2_settings_overlay.h), never
+                // copied literals.
+                const auto set2C = [](ps2x::set2::Rgba c) {
+                    return Color{c.r, c.g, c.b, c.a};
+                };
                 DrawRectangle(static_cast<int>(set2dg.px), static_cast<int>(set2dg.py),
                               static_cast<int>(set2dg.pw), static_cast<int>(set2dg.ph),
-                              Color{8, 12, 20, 232});
+                              set2C(ps2x::set2::kSet2Bg));
                 DrawRectangleLines(static_cast<int>(set2dg.px), static_cast<int>(set2dg.py),
                                    static_cast<int>(set2dg.pw), static_cast<int>(set2dg.ph),
-                                   Color{255, 140, 40, 255});
-                const int titleFont = std::max(16, static_cast<int>(screenHeight / 26.0f));
-                const int rowFont = std::max(12, static_cast<int>(screenHeight / 34.0f));
+                                   set2C(ps2x::set2::kSet2Border));
+                const int titleFont = ps2x::set2::set2TitleFont(screenHeight);
+                const int rowFont = ps2x::set2::set2RowFont(screenHeight);
                 // panel-polish-1 (Brad 10-15): plain title; the game still
                 // pauses while the panel is open.
                 DrawText("Settings", static_cast<int>(set2dg.px) + 14,
-                         static_cast<int>(set2dg.py) + 10, titleFont, Color{255, 170, 80, 255});
-                // settings-res-1: Mode/Resolution stay pending-until-restart
-                // with no Restart row. A dirty row shows "(restart)"; while
-                // armed it shows the confirm hint instead (a second X on
-                // that row restarts). ASCII "-" (the em dash is not in the
-                // panel font).
-                const bool isModeDirty = ps2x::set2::modeDirty(set2Nav);
-                const bool isResDirty = ps2x::set2::resDirty(set2Nav);
-                const char *restartHint = "Restart to apply - press X again";
+                         static_cast<int>(set2dg.py) + 10, titleFont, set2C(ps2x::set2::kSet2Title));
+                // settings-ui-1 (Brad 10-19): rows only STAGE. A staged
+                // restart-needing row shows "(restart)"; the bottom Apply
+                // row confirms everything, Cancel discards it.
                 std::string resVal =
                     ps2x::set2::resOptionLabel(set2Nav.res, set2Nav.nativeH, set2DefRes);
-                if (set2Nav.restartArmed && isResDirty)
-                    resVal = restartHint;
-                else if (isResDirty)
+                if (ps2x::set2::resDirty(set2Nav))
                     resVal += "  (restart)";
                 std::string modeVal(set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60");
-                if (set2Nav.restartArmed && isModeDirty)
-                    modeVal = restartHint;
-                else if (isModeDirty)
+                if (ps2x::set2::modeDirty(set2Nav))
                     modeVal += "  (restart)";
+                // "< >" arrows (Brad 10-19): the affordance for Left/Right
+                // stepping (pad d-pad, left/right halves of the row).
+                modeVal = "< " + modeVal + " >";
+                resVal = "< " + resVal + " >";
                 const std::string perfVal(set2Nav.perf ? "on" : "off");
                 const std::string upscaleVal(set2Nav.upscale ? "on" : "off");
-                const std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
+                std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
+                touchVal = "< " + touchVal + " >";
                 const std::string menubtnVal(ps2x::set2::menuBtnName(set2Nav.menubtn));
                 const std::string holdStartVal(ps2x::set2::holdStartName(set2Nav.holdStart));
-                // shortcuts-1: restart-marked like Mode/Resolution.
-                const bool isMarkerDirty = ps2x::set2::markerDirty(set2Nav);
-                std::string markerVal(ps2x::set2::markerName(set2Nav.marker));
-                if (set2Nav.restartArmed && isMarkerDirty)
-                    markerVal = restartHint;
-                else if (isMarkerDirty)
-                    markerVal += "  (restart)";
+                const std::string applyVal(ps2x::set2::applyValue(set2Nav));
+                const std::string cancelVal(ps2x::set2::cancelValue(set2Nav));
                 for (int i = 0; i < ps2x::set2::kRowCount; ++i)
                 {
                     if (static_cast<int>(set2Nav.sel) == i)
                         DrawRectangle(static_cast<int>(set2dg.rowX) - 6, static_cast<int>(set2dg.rowY[i]),
                                       static_cast<int>(set2dg.rowW) + 12, static_cast<int>(set2dg.rowH),
-                                      Color{255, 140, 40, 48});
+                                      set2C(ps2x::set2::kSet2SelBg));
                     const Color rowCol = static_cast<int>(set2Nav.sel) == i
-                                             ? Color{255, 200, 130, 255}
-                                             : Color{230, 235, 245, 255};
+                                             ? set2C(ps2x::set2::kSet2TextSel)
+                                             : set2C(ps2x::set2::kSet2Text);
                     const int rowY = static_cast<int>(set2dg.rowY[i]) +
                                      (static_cast<int>(set2dg.rowH) - rowFont) / 2;
                     const ps2x::set2::Row row = static_cast<ps2x::set2::Row>(i);
                     // Two columns: short label left, value right-aligned, so
                     // every label shows in full on Odin, iPad and iPhone.
-                    const char *label = ps2x::set2::rowLabel(row);
+                    // The Apply label switches to "Apply & restart" when a
+                    // restart-needing change is staged (Brad 10-19).
+                    const char *label = (row == ps2x::set2::Row::Apply)
+                                            ? ps2x::set2::applyLabel(set2Nav)
+                                            : ps2x::set2::rowLabel(row);
                     const std::string *value = &modeVal;
                     if (row == ps2x::set2::Row::Res)
                         value = &resVal;
@@ -10116,39 +10079,48 @@ void PS2Runtime::run()
                         value = &touchVal;
                     else if (row == ps2x::set2::Row::MenuBtn)
                         value = &menubtnVal;
-                    else if (row == ps2x::set2::Row::Marker)
-                        value = &markerVal;
                     else if (row == ps2x::set2::Row::HoldStart)
                         value = &holdStartVal;
+                    else if (row == ps2x::set2::Row::Apply)
+                        value = &applyVal;
+                    else if (row == ps2x::set2::Row::Cancel)
+                        value = &cancelVal;
                     DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
                     const int valW = MeasureText(value->c_str(), rowFont);
                     DrawText(value->c_str(),
                              static_cast<int>(set2dg.rowX + set2dg.rowW) - valW, rowY, rowFont,
                              rowCol);
                 }
-                // settings-res-1: the Menu button row explains the chord, so
-                // hiding the button never strands the user. hold-start-1:
-                // the Hold Start row names its own threshold.
-                const char *hint = (set2Nav.sel == ps2x::set2::Row::MenuBtn)
-                                       ? "Select + Start opens settings"
-                                       : (set2Nav.sel == ps2x::set2::Row::HoldStart)
-                                             ? "Hold START 0.6s opens settings"
-                                             : "Up/Down move - X change - Triangle/chord close";
-                DrawText(hint, static_cast<int>(set2dg.px) + 14,
+                // settings-ui-1 (Brad 10-19): every row carries its own
+                // one-line blurb (rowBlurb); the Apply blurb says closing
+                // discards staged changes.
+                DrawText(ps2x::set2::rowBlurb(set2Nav.sel), static_cast<int>(set2dg.px) + 14,
                          static_cast<int>(set2dg.py + set2dg.ph) - rowFont - 8, rowFont,
-                         Color{150, 160, 175, 255});
+                         set2C(ps2x::set2::kSet2Hint));
             }
-            if (!set2Open && ps2x::set2::menuButtonShown(set2Nav.menubtn))
+            if (!set2Open && ps2x::set2::menuButtonShown(set2MenuLive))
             {
-                // settings-res-1: the "..." menu button, top middle, drawn
-                // dim like the pad. ASCII dots: the ellipsis glyph (U+2026)
-                // is not in raylib's default font (U+0000..U+00FF only).
-                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight);
+                // settings-ui-1 (Brad 10-19): the "..." menu button, top
+                // middle, clears the cutout via the safe-area inset (it sat
+                // under the Dynamic Island at a flat 2%) and draws over a
+                // dark pill so it reads on bright snow. ASCII dots: the
+                // ellipsis glyph (U+2026) is not in raylib's default font
+                // (U+0000..U+00FF only).
+                float set2mbSafeL = 0.0f, set2mbSafeT = 0.0f;
+                set2SafePad(set2mbSafeL, set2mbSafeT);
+                const auto set2mb = ps2x::set2::menuButtonLayout(screenWidth, screenHeight, set2mbSafeT);
                 const int mbFont = std::max(12, static_cast<int>(screenHeight / 40.0f));
                 const int mbTw = MeasureText("...", mbFont);
-                DrawText("...", static_cast<int>(set2mb.x + (set2mb.w - static_cast<float>(mbTw)) * 0.5f),
-                         static_cast<int>(set2mb.y + (set2mb.h - static_cast<float>(mbFont)) * 0.5f),
-                         mbFont, Color{255, 255, 255, 70});
+                const int mbTx =
+                    static_cast<int>(set2mb.x + (set2mb.w - static_cast<float>(mbTw)) * 0.5f);
+                const int mbTy =
+                    static_cast<int>(set2mb.y + (set2mb.h - static_cast<float>(mbFont)) * 0.5f);
+                DrawRectangle(mbTx - 10, mbTy - 6, mbTw + 20, mbFont + 12,
+                              Color{ps2x::set2::kSet2Pill.r, ps2x::set2::kSet2Pill.g,
+                                     ps2x::set2::kSet2Pill.b, ps2x::set2::kSet2Pill.a});
+                DrawText("...", mbTx, mbTy, mbFont,
+                         Color{ps2x::set2::kSet2TextSel.r, ps2x::set2::kSet2TextSel.g,
+                                ps2x::set2::kSet2TextSel.b, ps2x::set2::kSet2TextSel.a});
             }
             if (set2Perf)
             {

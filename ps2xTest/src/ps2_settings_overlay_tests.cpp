@@ -274,29 +274,36 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(std::string(ps2x::set2::holdStartName(true)) == "on", "on label");
             t.IsTrue(std::string(ps2x::set2::holdStartName(false)) == "off", "off label"); });
 
-        tc.Run("nav X toggles Hold Start live and disarms", [](TestCase &t)
+        tc.Run("nav X stages Hold Start on/off", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             st.sel = ps2x::set2::Row::HoldStart;
-            st.restartArmed = true;
             auto o1 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(o1.action == ps2x::set2::Action::Changed && !st.holdStart, "on -> off");
-            t.IsTrue(!st.restartArmed, "live row disarms");
+            t.IsTrue(ps2x::set2::holdStartDirty(st) && st.runHoldStart, "staged, running untouched");
             auto o2 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(o2.action == ps2x::set2::Action::Changed && st.holdStart, "off -> on"); }); });
 
     MiniTest::Case("Set2Nav", [](TestCase &tc)
                    {
-        tc.Run("Up/Down wrap across the eight rows", [](TestCase &t)
+        tc.Run("Up/Down wrap across the nine rows (Apply/Cancel at the bottom)", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             auto up = ps2x::set2::navStep(st, true, false, false, false, false);
-            t.IsTrue(up.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::HoldStart, "wrap to Hold Start");
+            t.IsTrue(up.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Cancel, "wrap to Cancel");
             auto down = ps2x::set2::navStep(st, false, true, false, false, false);
-            t.IsTrue(down.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Mode, "wrap to Mode"); });
+            t.IsTrue(down.action == ps2x::set2::Action::None && st.sel == ps2x::set2::Row::Mode, "wrap to Mode");
+            // Down from HoldStart reaches Apply, then Cancel.
+            st.sel = ps2x::set2::Row::HoldStart;
+            (void)ps2x::set2::navStep(st, false, true, false, false, false);
+            t.IsTrue(st.sel == ps2x::set2::Row::Apply, "HoldStart -> Apply");
+            (void)ps2x::set2::navStep(st, false, true, false, false, false);
+            t.IsTrue(st.sel == ps2x::set2::Row::Cancel, "Apply -> Cancel"); });
 
-        tc.Run("X toggles Mode and steps Res in height order, arming the restart", [](TestCase &t)
+        tc.Run("X only stages (never restarts): Mode toggles, Res steps in height order", [](TestCase &t)
                {
+            // settings-ui-1 (Brad 10-19): rows never apply or restart.
+            // Repeated X keeps staging; only the Apply row confirms.
             ps2x::set2::NavState st;
             st.runMode = ps2x::set2::Mode::M120;
             st.mode = ps2x::set2::Mode::M120;
@@ -305,31 +312,110 @@ void register_ps2_settings_overlay_tests()
             st.nativeH = 1080; // Odin: 1x, 2x, Screen, 3x, 4x
             auto m = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(m.action == ps2x::set2::Action::Changed && st.mode == ps2x::set2::Mode::M60, "120 -> 60");
-            t.IsTrue(st.restartArmed, "dirty Mode arms");
+            t.IsTrue(ps2x::set2::modeDirty(st), "dirty Mode staged");
+            auto m2 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(m2.action == ps2x::set2::Action::Changed && st.mode == ps2x::set2::Mode::M120,
+                     "second X stages back, never restarts");
+            t.IsTrue(!ps2x::set2::anyStaged(st), "clean again");
             st.sel = ps2x::set2::Row::Res;
             auto r1 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(r1.action == ps2x::set2::Action::Changed && st.res == ps2x::set2::Res::R3x, "Screen -> 3x");
-            // A second X on the dirty row would restart, so browsing steps
-            // nav away and back (disarms) between presses.
-            (void)ps2x::set2::navStep(st, false, true, false, false, false);
-            (void)ps2x::set2::navStep(st, true, false, false, false, false);
             auto r2 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(r2.action == ps2x::set2::Action::Changed && st.res == ps2x::set2::Res::R4x, "3x -> 4x");
-            (void)ps2x::set2::navStep(st, false, true, false, false, false);
-            (void)ps2x::set2::navStep(st, true, false, false, false, false);
             auto r3 = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(st.res == ps2x::set2::Res::R1x, "4x wraps to 1x");
+            t.IsTrue(r3.action == ps2x::set2::Action::Changed && st.res == ps2x::set2::Res::R1x, "4x wraps to 1x");
             st.sel = ps2x::set2::Row::Perf;
             auto p = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(p.action == ps2x::set2::Action::Changed && st.perf, "perf on");
-            t.IsTrue(!st.restartArmed, "live row disarms");
+            t.IsTrue(p.action == ps2x::set2::Action::Changed && st.perf, "perf stages on");
+            t.IsTrue(!st.runPerf, "running perf untouched until Apply");
             st.sel = ps2x::set2::Row::Upscale;
             auto u = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(u.action == ps2x::set2::Action::Changed && st.upscale, "upscale on");
+            t.IsTrue(u.action == ps2x::set2::Action::Changed && st.upscale, "upscale stages on");
             auto u2 = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(u2.action == ps2x::set2::Action::Changed && !st.upscale, "upscale off"); });
+            t.IsTrue(u2.action == ps2x::set2::Action::Changed && !st.upscale, "upscale stages off"); });
 
-        tc.Run("X cycles Touch auto -> on -> off -> auto", [](TestCase &t)
+        tc.Run("Left steps back with wrap; Right steps forward (d-pad + touch halves)", [](TestCase &t)
+               {
+            using ps2x::set2::Res;
+            ps2x::set2::NavState st;
+            st.nativeH = 1080; // Odin: 1x, 2x, Screen, 3x, 4x
+            st.sel = ps2x::set2::Row::Res;
+            st.res = Res::Screen;
+            auto back = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(back.action == ps2x::set2::Action::Changed && st.res == Res::R2x, "Screen steps back to 2x");
+            auto back2 = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(back2.action == ps2x::set2::Action::Changed && st.res == Res::R1x, "2x steps back to 1x");
+            auto wrapBack = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(wrapBack.action == ps2x::set2::Action::Changed && st.res == Res::R4x, "1x wraps back to 4x");
+            auto fwd = ps2x::set2::navStep(st, false, false, false, false, false, false, true);
+            t.IsTrue(fwd.action == ps2x::set2::Action::Changed && st.res == Res::R1x, "Right wraps forward to 1x");
+            t.IsTrue(ps2x::set2::resPrev(Res::R1x, 1080) == Res::R4x, "resPrev wraps");
+            t.IsTrue(ps2x::set2::resPrev(Res::Screen, 1080) == Res::R2x, "resPrev mirrors resNext");
+            // Touch cycles both ways too.
+            st.sel = ps2x::set2::Row::Touch;
+            st.touch = ps2x::set2::Touch::Auto;
+            auto tback = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(tback.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Off,
+                     "Auto steps back to Off");
+            auto tback2 = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(tback2.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::On,
+                     "Off steps back to On");
+            auto tfwd = ps2x::set2::navStep(st, false, false, false, false, false, false, true);
+            t.IsTrue(tfwd.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Off,
+                     "Right steps forward to Off");
+            // Left on a binary row toggles, same as Right/X.
+            st.sel = ps2x::set2::Row::Mode;
+            st.mode = ps2x::set2::Mode::M120;
+            auto mleft = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(mleft.action == ps2x::set2::Action::Changed && st.mode == ps2x::set2::Mode::M60,
+                     "Left toggles Mode");
+            // Left/Right on Apply and Cancel do nothing.
+            st.sel = ps2x::set2::Row::Apply;
+            auto aleft = ps2x::set2::navStep(st, false, false, false, false, false, true, false);
+            t.IsTrue(aleft.action == ps2x::set2::Action::None, "Left on Apply is inert");
+            st.sel = ps2x::set2::Row::Cancel;
+            auto cright = ps2x::set2::navStep(st, false, false, false, false, false, false, true);
+            t.IsTrue(cright.action == ps2x::set2::Action::None, "Right on Cancel is inert"); });
+
+        tc.Run("Apply confirms staged changes; Cancel closes (discards by reseed)", [](TestCase &t)
+               {
+            ps2x::set2::NavState st;
+            st.runMode = ps2x::set2::Mode::M120;
+            st.mode = ps2x::set2::Mode::M120;
+            st.sel = ps2x::set2::Row::Apply;
+            auto clean = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(clean.action == ps2x::set2::Action::None, "Apply with nothing staged does nothing");
+            t.IsTrue(std::string(ps2x::set2::applyLabel(st)) == "Apply", "clean label is Apply");
+            t.IsTrue(ps2x::set2::applyValue(st) == "no changes", "clean value");
+            // Live-only stage: Apply (no restart).
+            st.sel = ps2x::set2::Row::Touch;
+            (void)ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(ps2x::set2::stagedCount(st) == 1, "one staged change");
+            t.IsTrue(std::string(ps2x::set2::applyLabel(st)) == "Apply", "live-only label stays Apply");
+            t.IsTrue(ps2x::set2::applyValue(st) == "1 change", "one change");
+            st.sel = ps2x::set2::Row::Apply;
+            auto go = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(go.action == ps2x::set2::Action::Apply, "Apply returns Apply for live-only stages");
+            // Restart-needing stage: Apply & restart.
+            st.sel = ps2x::set2::Row::Mode;
+            (void)ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(ps2x::set2::stagedCount(st) == 2, "two staged changes");
+            t.IsTrue(std::string(ps2x::set2::applyLabel(st)) == "Apply & restart", "label switches");
+            t.IsTrue(ps2x::set2::applyValue(st) == "2 changes", "two changes");
+            st.sel = ps2x::set2::Row::Apply;
+            auto go2 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(go2.action == ps2x::set2::Action::DoRestart, "Apply returns DoRestart when restart staged");
+            t.IsTrue(st.mode == ps2x::set2::Mode::M60, "pending kept for the restart");
+            // Cancel closes whether or not anything is staged.
+            st.sel = ps2x::set2::Row::Cancel;
+            auto cancel = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(cancel.action == ps2x::set2::Action::Close, "Cancel closes with stages");
+            t.IsTrue(std::string(ps2x::set2::cancelValue(st)) == "discard changes", "cancel value when staged");
+            ps2x::set2::NavState clean2;
+            clean2.sel = ps2x::set2::Row::Cancel;
+            t.IsTrue(std::string(ps2x::set2::cancelValue(clean2)) == "close", "cancel value when clean"); });
+
+        tc.Run("X stages Touch auto -> on -> off -> auto (touchNext cycle)", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             st.sel = ps2x::set2::Row::Touch;
@@ -338,93 +424,32 @@ void register_ps2_settings_overlay_tests()
             auto o2 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(o2.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Off, "on -> off");
             auto o3 = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(o3.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Auto, "off -> auto"); });
+            t.IsTrue(o3.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Auto, "off -> auto");
+            t.IsTrue(ps2x::set2::touchNext(ps2x::set2::Touch::Auto) == ps2x::set2::Touch::On, "next helper");
+            t.IsTrue(ps2x::set2::touchPrev(ps2x::set2::Touch::Auto) == ps2x::set2::Touch::Off, "prev helper"); });
 
-        tc.Run("X toggles Menu button shown/hidden and disarms", [](TestCase &t)
+        tc.Run("X stages Menu button shown/hidden", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             st.sel = ps2x::set2::Row::MenuBtn;
-            st.restartArmed = true;
             auto o1 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(o1.action == ps2x::set2::Action::Changed && st.menubtn == ps2x::set2::MenuBtn::Hidden,
                      "shown -> hidden");
-            t.IsTrue(!st.restartArmed, "live row disarms");
+            t.IsTrue(ps2x::set2::menubtnDirty(st), "staged, running untouched");
             auto o2 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(o2.action == ps2x::set2::Action::Changed && st.menubtn == ps2x::set2::MenuBtn::Shown,
                      "hidden -> shown"); });
 
-        tc.Run("dirty Input-marker row arms; a second X restarts; toggle back disarms", [](TestCase &t)
+        tc.Run("Triangle, the chord and Cancel close with stages up (caller discards)", [](TestCase &t)
                {
-            // shortcuts-1: restart-marked like Mode/Resolution (no live
-            // arm exists), default off.
+            // settings-ui-1: closing discards staged changes — the runtime
+            // drops NavState and reseeds at the next open, so Close carries
+            // no disarm bookkeeping.
             ps2x::set2::NavState st;
-            st.runMarker = false;
-            st.marker = false;
-            st.sel = ps2x::set2::Row::Marker;
-            auto arm = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(arm.action == ps2x::set2::Action::Changed && st.marker, "first X turns on");
-            t.IsTrue(st.restartArmed, "dirty marker arms");
-            auto go = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(go.action == ps2x::set2::Action::DoRestart, "second X restarts (no third toggle)");
-            t.IsTrue(st.marker, "pending kept for the restart");
-            (void)ps2x::set2::navStep(st, false, true, false, false, false);
-            t.IsTrue(!st.restartArmed, "Down disarms");
-            // Toggling back to the running value disarms when nothing else is dirty.
-            st.sel = ps2x::set2::Row::Marker;
-            auto back = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(back.action == ps2x::set2::Action::Changed && !st.marker,
-                     "toggle back off");
-            t.IsTrue(!st.restartArmed, "clean again disarms");
-            // A dirty marker keeps the arm when a Mode toggle returns clean.
-            st.marker = true; // still dirty (runMarker false)
-            st.sel = ps2x::set2::Row::Mode;
-            st.runMode = ps2x::set2::Mode::M120;
-            st.mode = ps2x::set2::Mode::M120;
-            (void)ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(st.mode == ps2x::set2::Mode::M60 && st.restartArmed, "Mode dirty + armed");
-            (void)ps2x::set2::navStep(st, false, true, false, false, false);
-            (void)ps2x::set2::navStep(st, true, false, false, false, false);
-            st.sel = ps2x::set2::Row::Mode;
-            auto mback = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(mback.action == ps2x::set2::Action::Changed &&
-                         st.mode == ps2x::set2::Mode::M120,
-                     "Mode back to running");
-            t.IsTrue(st.restartArmed, "dirty marker keeps the arm"); });
-
-        tc.Run("dirty Mode/Res rows arm; a second X restarts; nav away disarms", [](TestCase &t)
-               {
-            ps2x::set2::NavState st;
-            st.runMode = ps2x::set2::Mode::M120;
-            st.mode = ps2x::set2::Mode::M120;
-            st.runRes = ps2x::set2::Res::Screen;
-            st.res = ps2x::set2::Res::Screen;
-            st.nativeH = 1080;
-            auto arm = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(arm.action == ps2x::set2::Action::Changed && st.restartArmed, "first X toggles + arms");
-            auto go = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(go.action == ps2x::set2::Action::DoRestart, "second X restarts (no third toggle)");
-            t.IsTrue(st.mode == ps2x::set2::Mode::M60, "pending kept for the restart");
-            (void)ps2x::set2::navStep(st, false, true, false, false, false);
-            t.IsTrue(!st.restartArmed, "Down disarms");
-            // Toggling back to the running value disarms when nothing else is dirty.
-            st.sel = ps2x::set2::Row::Mode;
-            auto back = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(back.action == ps2x::set2::Action::Changed && st.mode == ps2x::set2::Mode::M120,
-                     "toggle back");
-            t.IsTrue(!st.restartArmed, "clean again disarms");
-            // Res row: same arm-then-restart shape.
-            st.sel = ps2x::set2::Row::Res;
-            (void)ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(st.restartArmed && st.res == ps2x::set2::Res::R3x, "Res dirty + armed");
-            auto goRes = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(goRes.action == ps2x::set2::Action::DoRestart, "second X on Res restarts"); });
-
-        tc.Run("Triangle or the chord closes", [](TestCase &t)
-               {
-            ps2x::set2::NavState st;
-            st.restartArmed = true;
+            st.mode = ps2x::set2::Mode::M60; // staged (runMode M120)
             auto tri = ps2x::set2::navStep(st, false, false, false, true, false);
-            t.IsTrue(tri.action == ps2x::set2::Action::Close && !st.restartArmed, "triangle closes + disarms");
+            t.IsTrue(tri.action == ps2x::set2::Action::Close, "triangle closes with stages");
+            t.IsTrue(ps2x::set2::anyStaged(st), "stages stay in NavState for the caller to drop");
             auto chord = ps2x::set2::navStep(st, false, false, false, false, true);
             t.IsTrue(chord.action == ps2x::set2::Action::Close, "chord closes"); });
 
@@ -461,23 +486,55 @@ void register_ps2_settings_overlay_tests()
         tc.Run("row labels are short and complete (panel-polish-1, no truncation)", [](TestCase &t)
                {
             using ps2x::set2::Row;
-            t.Equals(ps2x::set2::kRowCount, 8, "eight rows");
+            t.Equals(ps2x::set2::kRowCount, 9, "nine rows");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Mode)) == "Mode", "mode");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Res)) == "Resolution", "resolution");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Perf)) == "Perf", "perf");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Upscale)) == "Upscale", "upscale");
-            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Touch)) == "Touch", "touch");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Touch)) == "On-screen controls", "touch renamed");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::MenuBtn)) == "Menu button", "menu button");
-            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Marker)) == "Input marker", "input marker");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::HoldStart)) == "Hold Start", "hold start");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Apply)) == "Apply", "apply");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Cancel)) == "Cancel", "cancel");
             for (int i = 0; i < ps2x::set2::kRowCount; ++i)
             {
                 const std::string label(
                     ps2x::set2::rowLabel(static_cast<Row>(i)));
                 // Labels draw left-aligned with the value right-aligned, so
-                // nothing truncates; 12 covers "Input marker" (12).
-                t.IsTrue(!label.empty() && label.size() <= 12, "short non-empty label");
+                // nothing truncates; 18 covers "On-screen controls" (Brad
+                // 10-19 rename; the old 12-cap covered "Input marker").
+                t.IsTrue(!label.empty() && label.size() <= 18, "short non-empty label");
             } });
+
+        tc.Run("every row has a one-line ASCII blurb (settings-ui-1)", [](TestCase &t)
+               {
+            using ps2x::set2::Row;
+            for (int i = 0; i < ps2x::set2::kRowCount; ++i)
+            {
+                const std::string blurb(
+                    ps2x::set2::rowBlurb(static_cast<Row>(i)));
+                t.IsTrue(!blurb.empty(), "non-empty blurb");
+                bool ascii = true;
+                for (unsigned char c : blurb)
+                    ascii = ascii && c < 0x80;
+                t.IsTrue(ascii, "blurb is ASCII (no font substitution)");
+            }
+            t.IsTrue(std::string(ps2x::set2::rowBlurb(Row::Touch)).find("controller") != std::string::npos,
+                     "controls blurb names the controller rule");
+            t.IsTrue(std::string(ps2x::set2::rowBlurb(Row::Apply)).find("discard") != std::string::npos,
+                     "apply blurb says closing discards"); });
+
+        tc.Run("touch halves split the row middle; menu button clears the cutout", [](TestCase &t)
+               {
+            const auto g = ps2x::set2::panelLayout(1280.0f, 720.0f);
+            t.IsTrue(ps2x::set2::rowTapBack(g, g.rowX), "far left steps back");
+            t.IsTrue(ps2x::set2::rowTapBack(g, g.rowX + g.rowW * 0.5f - 1.0f), "just left of middle steps back");
+            t.IsTrue(!ps2x::set2::rowTapBack(g, g.rowX + g.rowW * 0.5f), "middle steps forward");
+            t.IsTrue(!ps2x::set2::rowTapBack(g, g.rowX + g.rowW), "far right steps forward");
+            const auto plain = ps2x::set2::menuButtonLayout(1920.0f, 1080.0f);
+            const auto inset = ps2x::set2::menuButtonLayout(1920.0f, 1080.0f, 59.0f);
+            t.IsTrue(inset.y == plain.y + 59.0f, "safeTop shifts the button below the cutout");
+            t.IsTrue(inset.x == plain.x && inset.w == plain.w, "horizontal geometry unchanged"); });
 
         tc.Run("render heights round to the nearest common label", [](TestCase &t)
                {
@@ -530,19 +587,116 @@ void register_ps2_settings_overlay_tests()
                {
             using ps2x::set2::Res;
             using ps2x::set2::resOptionLabel;
-            // \xc3\x97 is x, \xb7 is the middle dot (both in the panel font).
-            t.IsTrue(resOptionLabel(Res::R1x, 1080, Res::Screen) == "1\xc3\x97 \xb7 448p", "1x");
-            t.IsTrue(resOptionLabel(Res::R2x, 1080, Res::Screen) == "2\xc3\x97 \xb7 896p", "2x");
-            t.IsTrue(resOptionLabel(Res::R3x, 1080, Res::Screen) == "3\xc3\x97 \xb7 1344p", "3x");
-            t.IsTrue(resOptionLabel(Res::R4x, 1080, Res::Screen) == "4\xc3\x97 \xb7 1792p", "4x");
-            t.IsTrue(resOptionLabel(Res::Screen, 1080, Res::Screen) == "Screen \xb7 1080p (default)",
+            // \xc3\x97 is x (U+00D7), \xc2\xb7 is the middle dot (U+00B7):
+            // proper two-byte UTF-8, both in the panel font. settings-ui-1
+            // (Brad 10-19 "?"): the dot was a lone \xb7 byte, which raylib
+            // decoded as '?'.
+            t.IsTrue(resOptionLabel(Res::R1x, 1080, Res::Screen) == "1\xc3\x97 \xc2\xb7 448p", "1x");
+            t.IsTrue(resOptionLabel(Res::R2x, 1080, Res::Screen) == "2\xc3\x97 \xc2\xb7 896p", "2x");
+            t.IsTrue(resOptionLabel(Res::R3x, 1080, Res::Screen) == "3\xc3\x97 \xc2\xb7 1344p", "3x");
+            t.IsTrue(resOptionLabel(Res::R4x, 1080, Res::Screen) == "4\xc3\x97 \xc2\xb7 1792p", "4x");
+            t.IsTrue(resOptionLabel(Res::Screen, 1080, Res::Screen) == "Screen \xc2\xb7 1080p (default)",
                      "Odin Screen default");
-            t.IsTrue(resOptionLabel(Res::R2x, 1080, Res::R2x) == "2\xc3\x97 \xb7 896p (default)",
+            t.IsTrue(resOptionLabel(Res::R2x, 1080, Res::R2x) == "2\xc3\x97 \xc2\xb7 896p (default)",
                      "iOS 2x default");
-            t.IsTrue(resOptionLabel(Res::Screen, 1328, Res::R2x) == "Screen \xb7 1440p",
+            t.IsTrue(resOptionLabel(Res::Screen, 1328, Res::R2x) == "Screen \xc2\xb7 1440p",
                      "iPad Screen rounds like resHeightLabel");
             t.IsTrue(resOptionLabel(Res::Screen, 0, Res::Screen) == "Screen (default)",
                      "no frame yet falls back to plain Screen"); });
+
+        tc.Run("every drawn label is valid UTF-8 inside the panel font (settings-ui-1 ?)", [](TestCase &t)
+               {
+            // The panel font is raylib's default (U+0000..U+00FF). Any byte
+            // sequence that is not valid UTF-8, or decodes above U+00FF,
+            // draws as '?'. Audit every string the panel and resume prompt
+            // can draw: row labels, blurbs, resolution options, value names,
+            // hints, Apply/Cancel values, "..." and the resume strings.
+            using ps2x::set2::Res;
+            using ps2x::set2::Row;
+            std::vector<std::string> drawn;
+            for (int i = 0; i < ps2x::set2::kRowCount; ++i)
+            {
+                drawn.emplace_back(ps2x::set2::rowLabel(static_cast<Row>(i)));
+                drawn.emplace_back(ps2x::set2::rowBlurb(static_cast<Row>(i)));
+            }
+            const Res allRes[] = {Res::R1x, Res::R2x, Res::Screen, Res::R3x, Res::R4x};
+            for (Res r : allRes)
+                for (unsigned h : {0u, 1080u, 1290u})
+                    for (Res d : {Res::Screen, Res::R2x})
+                        drawn.push_back(ps2x::set2::resOptionLabel(r, h, d));
+            for (auto touch : {ps2x::set2::Touch::Auto, ps2x::set2::Touch::On, ps2x::set2::Touch::Off})
+                drawn.emplace_back(ps2x::set2::touchName(touch));
+            for (auto mb : {ps2x::set2::MenuBtn::Shown, ps2x::set2::MenuBtn::Hidden})
+                drawn.emplace_back(ps2x::set2::menuBtnName(mb));
+            for (bool b : {false, true})
+            {
+                drawn.emplace_back(ps2x::set2::holdStartName(b));
+                drawn.emplace_back(ps2x::set2::markerName(b));
+            }
+            drawn.emplace_back("Settings");
+            drawn.emplace_back("...");
+            drawn.emplace_back("120");
+            drawn.emplace_back("60");
+            drawn.emplace_back("on");
+            drawn.emplace_back("off");
+            drawn.emplace_back("auto");
+            drawn.emplace_back("no changes");
+            drawn.emplace_back("Apply & restart");
+            drawn.emplace_back("Resume where you left off?");
+            drawn.emplace_back("Resume");
+            drawn.emplace_back("Start fresh");
+            for (const std::string &s : drawn)
+            {
+                bool ok = true;
+                for (size_t i = 0; i < s.size() && ok;)
+                {
+                    const unsigned char c = static_cast<unsigned char>(s[i]);
+                    uint32_t cp = 0;
+                    size_t len = 0;
+                    if (c < 0x80)
+                    {
+                        cp = c;
+                        len = 1;
+                    }
+                    else if ((c & 0xE0) == 0xC0)
+                    {
+                        cp = c & 0x1F;
+                        len = 2;
+                    }
+                    else if ((c & 0xF0) == 0xE0)
+                    {
+                        cp = c & 0x0F;
+                        len = 3;
+                    }
+                    else if ((c & 0xF8) == 0xF0)
+                    {
+                        cp = c & 0x07;
+                        len = 4;
+                    }
+                    else
+                        ok = false;
+                    for (size_t k = 1; k < len && ok; ++k)
+                    {
+                        if (i + k >= s.size())
+                            ok = false;
+                        else
+                        {
+                            const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+                            if ((cc & 0xC0) != 0x80)
+                                ok = false;
+                            else
+                                cp = (cp << 6) | (cc & 0x3F);
+                        }
+                    }
+                    // Overlongs and out-of-font-range sort as failures: the
+                    // panel font only carries U+0000..U+00FF.
+                    if (ok && ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) ||
+                               (len == 4 && cp < 0x10000) || cp > 0xFF))
+                        ok = false;
+                    i += (len > 0) ? len : 1;
+                }
+                t.IsTrue(ok, ("draw-safe: " + s).c_str());
+            } });
 
         tc.Run("menu button geometry: top middle, thumb-sized hit area", [](TestCase &t)
                {
@@ -635,48 +789,64 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(resDefaultRow(true, false, 8 * kGiB, 2400, 1081) == Res::R2x,
                      "1081p is not a 1080p panel"); });
 
-        tc.Run("restart persists the pending rows, never the effective env", [](TestCase &t)
+        tc.Run("Apply persists every staged row, never the effective env", [](TestCase &t)
                {
+            using ps2x::set2::NavState;
             using ps2x::set2::Res;
             using ps2x::set2::SettingsPairs;
-            // Brad 10-17 iPhone bug: stale file {native} + pending 3x must
-            // write 3, keeping the other rows and their order.
-            const SettingsPairs stale{{"GE1_UPSCALE", "native"},
-                                      {"PS2X_SETTINGS_PERF", "0"},
-                                      {"PS2X_VIRTUAL_PAD", "1"}};
-            const auto w1 = ps2x::set2::settingsForRestart(stale, Res::R3x, true, true);
-            t.Equals(w1.size(), static_cast<size_t>(4), "row count kept + marker on");
-            t.IsTrue(w1[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("3")),
-                     "pending 3x wins over stale native");
-            t.IsTrue(w1[1] == std::make_pair(std::string("PS2X_SETTINGS_PERF"), std::string("1")),
-                     "live perf flag");
-            t.IsTrue(w1[2] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("1")),
-                     "untouched row kept");
-            t.IsTrue(w1[3] == std::make_pair(std::string("PS2X_INPUT_MARKER"), std::string("1")),
-                     "pending marker on persists");
-            // Screen writes native explicitly (no default-clearing choice);
-            // marker off writes an explicit 0 (config-fix-1 item 10: a
-            // base-layer 1 must not reappear through a removed line).
-            const auto w2 = ps2x::set2::settingsForRestart({}, Res::Screen, false, false);
-            t.IsTrue(w2.size() == 3 && w2[0].second == "native" && w2[1].second == "0" &&
-                         w2[2].second == "0",
-                     "empty file gains all three lines");
-            // 1x writes 1 (it is never a default, but it is writable).
-            const auto w3 = ps2x::set2::settingsForRestart({}, Res::R1x, false, false);
-            t.IsTrue(w3[0].second == "1", "1x persists");
-            // A stale marker 1 becomes an explicit pending-off 0 (upsert
-            // keeps file order, so look up by key).
-            const SettingsPairs staleOn{{"PS2X_INPUT_MARKER", "1"}};
-            const auto w4 = ps2x::set2::settingsForRestart(staleOn, Res::Screen, false, false);
-            const auto w4get = [&](const char *key) {
-                for (const auto &kv : w4)
+            const auto get = [](const SettingsPairs &pairs, const char *key) {
+                for (const auto &kv : pairs)
                     if (kv.first == key)
                         return kv.second;
                 return std::string();
             };
-            t.IsTrue(w4.size() == 3 && w4get("GE1_UPSCALE") == "native" &&
-                         w4get("PS2X_SETTINGS_PERF") == "0" && w4get("PS2X_INPUT_MARKER") == "0",
-                     "stale marker 1 overwritten by explicit pending off"); });
+            // Brad 10-17 iPhone bug: stale file {native} + staged 3x must
+            // write 3, keeping the other rows and their order.
+            NavState st;
+            st.res = Res::R3x;
+            st.perf = true;
+            st.marker = true; // no row, still round-trips the file
+            const SettingsPairs stale{{"GE1_UPSCALE", "native"},
+                                      {"PS2X_SETTINGS_PERF", "0"},
+                                      {"PS2X_VIRTUAL_PAD", "1"}};
+            const auto w1 = ps2x::set2::settingsForApply(stale, st);
+            t.IsTrue(get(w1, "GE1_UPSCALE") == "3", "staged 3x wins over stale native");
+            t.IsTrue(get(w1, "PS2X_SETTINGS_PERF") == "1", "staged perf");
+            t.IsTrue(get(w1, "PS2X_INPUT_MARKER") == "1", "marker round-trips on");
+            t.IsTrue(get(w1, "PS2X_VIRTUAL_PAD").empty(), "staged Auto clears the touch line");
+            t.IsTrue(get(w1, "GE1_ONDEVICE_UPSCALE") == "0", "staged upscale off persists explicit");
+            t.IsTrue(get(w1, "PS2X_MENU_BUTTON") == "1", "staged Shown persists explicit");
+            t.IsTrue(get(w1, "PS2X_HOLD_START").empty(), "staged Hold on clears the line");
+            t.IsTrue(w1[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("3")),
+                     "file order kept for overwritten keys");
+            // Screen writes native explicitly (no default-clearing choice);
+            // marker off writes an explicit 0 (config-fix-1 item 10: a
+            // base-layer 1 must not reappear through a removed line).
+            NavState clean;
+            clean.res = Res::Screen;
+            const auto w2 = ps2x::set2::settingsForApply({}, clean);
+            t.IsTrue(w2.size() == 5 && get(w2, "GE1_UPSCALE") == "native" &&
+                         get(w2, "PS2X_SETTINGS_PERF") == "0" && get(w2, "PS2X_INPUT_MARKER") == "0" &&
+                         get(w2, "GE1_ONDEVICE_UPSCALE") == "0" && get(w2, "PS2X_MENU_BUTTON") == "1",
+                     "empty file gains the explicit staged lines");
+            // 1x writes 1 (it is never a default, but it is writable).
+            NavState one;
+            one.res = Res::R1x;
+            t.IsTrue(get(ps2x::set2::settingsForApply({}, one), "GE1_UPSCALE") == "1", "1x persists");
+            // A staged touch On keeps its line; staged Hold off writes 0.
+            NavState live;
+            live.touch = ps2x::set2::Touch::On;
+            live.holdStart = false;
+            const auto w3 = ps2x::set2::settingsForApply({}, live);
+            t.IsTrue(get(w3, "PS2X_VIRTUAL_PAD") == "1", "staged touch On persists");
+            t.IsTrue(get(w3, "PS2X_HOLD_START") == "0", "staged Hold off persists explicit");
+            // A stale marker 1 becomes an explicit staged-off 0.
+            const SettingsPairs staleOn{{"PS2X_INPUT_MARKER", "1"}};
+            NavState off;
+            off.res = Res::Screen;
+            const auto w4 = ps2x::set2::settingsForApply(staleOn, off);
+            t.IsTrue(get(w4, "PS2X_INPUT_MARKER") == "0",
+                     "stale marker 1 overwritten by explicit staged off"); });
 
         tc.Run("menu button maps to its line (both persist explicit)", [](TestCase &t)
                {
