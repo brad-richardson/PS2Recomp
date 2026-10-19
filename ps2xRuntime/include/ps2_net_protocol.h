@@ -49,19 +49,6 @@ namespace ps2_net_protocol
         return static_cast<uint16_t>(pressed & static_cast<uint16_t>(~ignore)) != 0u;
     }
 
-    // online-card-1: login typing skip. The HLE prefill + submit-fill
-    // carry the stored login regardless of typed content (ONL9), so the
-    // ~100-step blind typing dance is pure cost: when the typing screen
-    // is up (menu 3/0x16, D1-calibrated), credentials are loaded and no
-    // early auth has fired (the card-path shortcut owns that case), the
-    // navigator jumps straight to the submit steps. Any other screen,
-    // unloaded credentials, or an already-authed card: never skip.
-    inline bool qpNavShouldSkipTyping(uint32_t menuMain, uint32_t menuSub,
-                                      bool loginReady, uint64_t gameAuthTick)
-    {
-        return menuMain == 3u && menuSub == 0x16u && loginReady && gameAuthTick == 0u;
-    }
-
     // online-card-1: title detector for the dance title-recovery (menu
     // 1/7, the title-start phase pair). A blind back-out that overshoots
     // the main menu lands here; the dance presses Start to re-enter

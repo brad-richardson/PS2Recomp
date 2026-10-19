@@ -1230,10 +1230,6 @@ namespace ps2_stubs
             // ONL11 addendum: card-path shortcut indices.
             size_t submitOkIdx = 0u;
             size_t personaPickIdx = 0u;
-            // online-card-1: typing-skip target (first submit-navigation
-            // step; the HLE prefill carries the submit, so the blind
-            // typing dance is skipped when the typing screen is up).
-            size_t submitDown1Idx = 0u;
             // online-card-1: outrun catch-up target (guest reached the
             // filter on its own; completes through the done path).
             size_t filterStopIdx = 0u;
@@ -1355,14 +1351,12 @@ namespace ps2_stubs
             // submit) jumps to persona-pick, skipping typing + save.
             g_qpNav.submitOkIdx = qpNavFindStep("submit-ok");
             g_qpNav.personaPickIdx = qpNavFindStep("persona-pick");
-            // online-card-1: typing-skip target (see above).
-            g_qpNav.submitDown1Idx = qpNavFindStep("submit-down-1");
             // online-card-1: outrun catch-up target (see above).
             g_qpNav.filterStopIdx = qpNavFindStep("filter-stop");
             if (g_qpNav.danceFrom >= g_qpNav.danceTo || g_qpNav.danceTo >= kQpNavSteps ||
                 g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.loginDown1Idx >= kQpNavSteps ||
                 g_qpNav.submitOkIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps ||
-                g_qpNav.submitDown1Idx >= kQpNavSteps || g_qpNav.filterStopIdx >= kQpNavSteps)
+                g_qpNav.filterStopIdx >= kQpNavSteps)
             {
                 std::fprintf(stderr, "[qpnav] dance/jump targets unresolved: disarmed\n");
                 g_qpNav.armed = false;
@@ -1694,25 +1688,6 @@ namespace ps2_stubs
                 std::fprintf(stderr, "[qpnav] jump %s -> persona-pick (early auth @%llu)\n",
                              s.name, static_cast<unsigned long long>(m.gameAuth));
                 g_qpNav.idx = g_qpNav.personaPickIdx;
-                g_qpNav.stepStart = guestVsyncTick;
-                g_qpNav.lastFire = guestVsyncTick;
-                g_qpNav.holdMask = 0u;
-                return;
-            }
-            // online-card-1: typing skip (see qpNavShouldSkipTyping).
-            // The HLE prefill + submit-fill carry the stored login, so
-            // when the typing screen is up with credentials loaded, jump
-            // to the submit navigation instead of the ~100 blind typing
-            // steps. The submit steps still move focus and press OK, so
-            // auth proceeds identically; any other screen keeps the
-            // dance. Range excludes submit-down-1 itself (no self-loop).
-            if (g_qpNav.idx >= g_qpNav.loginDown1Idx && g_qpNav.idx < g_qpNav.submitDown1Idx &&
-                ps2_net_protocol::qpNavShouldSkipTyping(menuMain, menuSub, ps2_net::qpLoginReady(),
-                                                        m.gameAuth))
-            {
-                std::fprintf(stderr, "[qpnav] jump %s -> submit-down-1 (typing skip @%llu)\n",
-                             s.name, static_cast<unsigned long long>(guestVsyncTick));
-                g_qpNav.idx = g_qpNav.submitDown1Idx;
                 g_qpNav.stepStart = guestVsyncTick;
                 g_qpNav.lastFire = guestVsyncTick;
                 g_qpNav.holdMask = 0u;

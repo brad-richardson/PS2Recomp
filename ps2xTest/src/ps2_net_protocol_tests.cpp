@@ -91,18 +91,6 @@ namespace
             t.IsFalse(ps2_net_protocol::shouldArmOnline(1, false, 2, seen), "launch mode has no rearm");
         });
 
-        tc.Run("online-card-1: typing skip fires only on the typing screen with loaded credentials", [](TestCase &t)
-        {
-            using ps2_net_protocol::qpNavShouldSkipTyping;
-            t.IsTrue(qpNavShouldSkipTyping(3u, 0x16u, true, 0u), "typing screen + login ready: skip");
-            t.IsFalse(qpNavShouldSkipTyping(3u, 0x04u, true, 0u), "submit area: no skip (dance owns it)");
-            t.IsFalse(qpNavShouldSkipTyping(4u, 0x0cu, true, 0u), "config screen: never skip");
-            t.IsFalse(qpNavShouldSkipTyping(2u, 9u, true, 0u), "menus: never skip");
-            t.IsFalse(qpNavShouldSkipTyping(0u, 0u, true, 0u), "unreadable words: never skip");
-            t.IsFalse(qpNavShouldSkipTyping(3u, 0x16u, false, 0u), "no credentials: keep the dance");
-            t.IsFalse(qpNavShouldSkipTyping(3u, 0x16u, true, 3934u), "early auth: card-path shortcut owns it");
-        });
-
         tc.Run("online-card-1: outrun catch-up rejoins the guest at persona or filter", [](TestCase &t)
         {
             using ps2_net_protocol::qpNavFilterShowing;
