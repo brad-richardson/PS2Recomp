@@ -64,6 +64,8 @@ namespace
     struct DirectJob
     {
         int event = 0;
+        int typeArg = 0;
+        int rulesArg = 0;
     };
 
     DirectJob &tkDirectJob()
@@ -101,10 +103,10 @@ namespace
         case 2:
             wr32(ram, 0x535c08u, static_cast<uint32_t>(tkDirectJob().event)); // donor event
             wr32(ram, getRegU32(ctx, 28) - 0x1f38u, 1);
-            call(0x144df0u, 3, config, 0); // nav node +4: race
+            call(0x144df0u, 3, config, static_cast<uint32_t>(tkDirectJob().typeArg)); // nav node +4
             break;
         case 3:
-            call(0x1451e8u, 4, config, 0); // nav node +8: race rules
+            call(0x1451e8u, 4, config, static_cast<uint32_t>(tkDirectJob().rulesArg)); // nav node +8
             break;
         case 4:
         {
@@ -173,6 +175,8 @@ namespace
         if (!tkl::applyCourseMap(ram, PS2_RAM_SIZE, dg.map))
             return false;
         tkDirectJob().event = dg.event;
+        tkDirectJob().typeArg = dg.typeArg;
+        tkDirectJob().rulesArg = dg.rulesArg;
         ps2_ssx3_tricky::state().directActive = true; // bypasses Map: keep the overlay shut so the pad reaches the briefing
         const uint32_t f = sp - kDirectFrame;
         std::memset(ram + f, 0, kDirectFrame);
@@ -198,24 +202,43 @@ namespace
                              0); // diagnostic entry rides the Race option
     }
 
-    // Pad-glue service for overlay taps: a parked ask becomes a launch.
-    // Game thread only; never fires mid-race (the app switch owns the pad
-    // there) and never while a continuation frame is already active.
+    // Pad-glue service for overlay taps: a parked ask becomes a launch once
+    // its BackOut drive reports Done (the guest is back at the main menu,
+    // the only proven launch context). Game thread only; never fires
+    // mid-race (the app switch owns the pad there).
     bool tkDirectServe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
     {
         namespace tkl = ps2_ssx3_tricky_list;
         if (!tkl::directKnob() || !ps2_ssx3_tricky::state().tricky)
             return false;
         tkl::ListState list;
-        if (!tkl::directTake(list))
+        bool backout = false;
+        if (!tkl::directPeek(list, backout))
             return false;
         if (ps2_ssx3_course::appUpdateFn(ram) == ps2_ssx3_course::kGameUpdate)
         {
             tkLog(runtime, "direct ask dropped: a race is live");
+            tkl::directDisarm();
             return false;
         }
         if (list.sel >= tkl::kCourseCount)
+        {
+            tkl::directDisarm();
             return false;
+        }
+        if (backout && !tkl::driveProgress().done)
+        {
+            if (tkl::directBump() > 1800)
+            {
+                tkLog(runtime, "direct backout timed out; overlay re-armed");
+                tkl::directDisarm();
+                tkl::driveDisarm();
+                ps2_ssx3_tricky::state().directActive = false;
+            }
+            return false;
+        }
+        tkl::driveDisarm();
+        tkl::directDisarm();
         return tkDirectStart(ram, ctx, runtime, list.sel, list.step == 1 ? list.mode : 0);
     }
 

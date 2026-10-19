@@ -137,20 +137,49 @@ inline constexpr int kDirectDonorMax = 22;
 
 struct DirectGoal
 {
-    bool ok = false;   // directable now (Race cell)
+    bool ok = false;   // directable now (cell with known accept args)
     int event = -1;    // donor event to write + queue
     MapSpec map = {};  // world mapping (event < 0 = native row, restore)
     bool mapped = false;
+    int typeArg = 0;  // a1 for the 0x144df0 config call (nav node type)
+    int rulesArg = 0; // a1 for the 0x1451e8 config call (nav node rules)
 };
+
+// Accept-arg candidates per (type-list, row), read off the static nav
+// tables (tk-menu-1 events.py: node[4]=ty, node[8]=words[0]). Race cells
+// (0,0)/(0,1) are proven with (0,0); Jam/freestyle pairs are hypotheses
+// confirmed per cell by a racing boot, starting with Aloha (5,4).
+inline bool directCellArgs(int type, int row, int &typeArg, int &rulesArg)
+{
+    switch (type)
+    {
+    case 0:
+        switch (row)
+        {
+        case 0:
+        case 1: typeArg = 0; rulesArg = 0; return true;
+        case 2: typeArg = 5; rulesArg = 4; return true; // Aloha Jam row: trial
+        default: return false;
+        }
+    case 1:
+        switch (row)
+        {
+        case 0: typeArg = 1; rulesArg = 0; return true; // trial
+        case 2: typeArg = 3; rulesArg = 2; return true; // Pipedream: trial
+        case 3: typeArg = 6; rulesArg = 5; return true; // Untracked/Alaska: trial
+        default: return false;
+        }
+    default: return false;
+    }
+}
 
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
 {
     DirectGoal d;
-    if (goal.type != 0)
+    // Donor cell + accept args by (type-list, row); unknown cells (Jam row 3,
+    // Freeride rows, pad rows) keep the navigator.
+    if (!directCellArgs(goal.type, goal.row, d.typeArg, d.rulesArg))
         return d;
-    const int donor = (goal.map.event >= 0) ? goal.map.event : c.event;
-    if (donor != 0 && donor != 1)
-        return d; // Jam cells need measured accept args (Aloha ev14 dies loading)
     // Donor cell: the table's explicit map, else the course's own event.
     d.event = (goal.map.event >= 0) ? goal.map.event : c.event;
     // Launch-time world pin: the explicit map, else the course's own
@@ -271,6 +300,15 @@ struct DirectAsk
 {
     bool pending = false;
     ListState list = {};
+    // Taps can land on any Map screen, but the loading chain is only proven
+    // from the main menu (a Setup-Character entry dies mid-load on a null
+    // call). With backout set, the tap site arms the proven BackOut drive
+    // and the game thread launches once it reports Done; the probe path
+    // (already at the menu) launches immediately. frames bounds the wait
+    // (~30 s of pad reads); on expiry the ask is dropped and the overlay
+    // re-arms so the player can retry by hand.
+    bool backout = false;
+    int frames = 0;
 };
 
 inline DirectAsk &directAsk()
@@ -285,23 +323,31 @@ inline std::mutex &directAskMu()
     return m;
 }
 
-inline void directArm(const ListState &list)
+inline void directArm(const ListState &list, bool backout)
 {
     std::lock_guard<std::mutex> lock(directAskMu());
     DirectAsk &a = directAsk();
     a.pending = true;
     a.list = list;
+    a.backout = backout;
+    a.frames = 0;
 }
 
-inline bool directTake(ListState &list)
+inline bool directPeek(ListState &list, bool &backout)
 {
     std::lock_guard<std::mutex> lock(directAskMu());
-    DirectAsk &a = directAsk();
+    const DirectAsk &a = directAsk();
     if (!a.pending)
         return false;
     list = a.list;
-    a.pending = false;
+    backout = a.backout;
     return true;
+}
+
+inline int directBump()
+{
+    std::lock_guard<std::mutex> lock(directAskMu());
+    return ++directAsk().frames;
 }
 
 inline void directDisarm()

@@ -348,17 +348,14 @@ void register_ps2_ssx3_tricky_list_tests()
             for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
             {
                 const Course &c = kCourses[i];
-                const DirectGoal race = directGoalFor(c, c.opts[0]);
-                const int donor = (c.opts[0].map.event >= 0) ? c.opts[0].map.event : c.event;
-                const bool proven = c.opts[0].type == 0 && (donor == 0 || donor == 1);
-                if (proven)
+                const DirectGoal goal = directGoalFor(c, c.opts[0]);
+                t.IsTrue(goal.ok, std::string("course entry directable: ") + c.name);
+                if (goal.ok)
                 {
-                    t.IsTrue(race.ok, std::string("Race directable: ") + c.name);
-                    t.Equals(race.event, donor, "donor event");
-                    t.IsTrue(race.mapped, "world pinned for the records guard");
+                    const int donor = (c.opts[0].map.event >= 0) ? c.opts[0].map.event : c.event;
+                    t.Equals(goal.event, donor, "donor event");
+                    t.IsTrue(goal.mapped, "world pinned for the records guard");
                 }
-                else
-                    t.IsFalse(race.ok, std::string("unproven cell defers: ") + c.name);
             }
             const Course &gari = kCourses[0];
             const DirectGoal g = directGoalFor(gari, gari.opts[0]);
@@ -372,9 +369,13 @@ void register_ps2_ssx3_tricky_list_tests()
             const DirectGoal s = directGoalFor(snow, snow.opts[0]);
             t.IsTrue(s.ok && s.event == 1, "Snowdream native donor ev1");
             const Course &pipe = kCourses[6];
-            t.IsFalse(directGoalFor(pipe, pipe.opts[0]).ok, "Pipedream Super Pipe defers");
+            const DirectGoal p = directGoalFor(pipe, pipe.opts[0]);
+            t.IsTrue(p.ok && p.event == 11, "Pipedream Super Pipe directable (donor ev11)");
+            t.IsTrue(p.typeArg == 3 && p.rulesArg == 2, "Pipe accept args trial (3,2)");
             const Course &aloha = kCourses[5];
-            t.IsFalse(directGoalFor(aloha, aloha.opts[0]).ok, "Aloha Jam donor defers (ev14 dies loading)");
+            const DirectGoal a = directGoalFor(aloha, aloha.opts[0]);
+            t.IsTrue(a.ok && a.event == 14, "Aloha Race directable (donor ev14)");
+            t.IsTrue(a.typeArg == 5 && a.rulesArg == 4, "Aloha accept args trial (5,4)");
             const Course &mega = kCourses[8];
             t.IsTrue(directGoalFor(mega, mega.opts[0]).ok, "Megaplex Race directable (donor ev0)");
             t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
@@ -383,11 +384,18 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(directCourseByCode(nullptr), 0, "null falls back to Garibaldi");
             ListState l;
             l.sel = 3;
-            directArm(l);
+            directArm(l, true);
             ListState got;
-            t.IsTrue(directTake(got), "take consumes the ask");
+            bool backout = false;
+            t.IsTrue(directPeek(got, backout), "peek sees the ask");
             t.Equals(got.sel, static_cast<uint8_t>(3), "list position survives");
-            t.IsFalse(directTake(got), "second take finds nothing");
+            t.IsTrue(backout, "tap asks back out to the menu entry");
+            t.IsTrue(directPeek(got, backout), "peek does not consume");
+            directDisarm();
+            t.IsFalse(directPeek(got, backout), "disarm clears the ask");
+            directArm(l, false);
+            t.IsTrue(directPeek(got, backout), "probe ask visible");
+            t.IsFalse(backout, "probe path launches immediately");
             directDisarm(); });
 
         tc.Run("navigator rides Mesablanca from the Event screen", [](TestCase &t)
