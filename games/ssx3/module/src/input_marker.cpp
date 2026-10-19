@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -971,7 +972,10 @@ namespace ps2_stubs
                         chordFired = true;
                         // UX1: the course picker confirms chords the same way
                         // (status line + Android toast; store-only elsewhere).
-                        ps2_savestate::noteQuickStatus("input marked");
+                        // toast-audit-1: dev-only behind PS2X_DEV_TOASTS=1.
+                        if (const char *dt = std::getenv("PS2X_DEV_TOASTS");
+                            dt != nullptr && std::strcmp(dt, "1") == 0)
+                            ps2_savestate::noteQuickStatus("input marked");
                     }
                 }
             }

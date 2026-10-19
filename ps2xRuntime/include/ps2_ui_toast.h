@@ -15,6 +15,8 @@
 // the overlay draw shows it.
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 
@@ -22,6 +24,15 @@
 
 namespace ps2x::ui
 {
+
+// toast-audit-1: diagnostic toasts hide unless PS2X_DEV_TOASTS=1. Default 0,
+// even in --dev builds (Brad runs a --dev build). Player-facing toasts use
+// toast()/notice() directly and always show. Output-only: host display only.
+inline bool devToastsEnabled()
+{
+    const char *v = std::getenv("PS2X_DEV_TOASTS");
+    return v != nullptr && std::strcmp(v, "1") == 0;
+}
 
 namespace detail
 {
@@ -92,6 +103,14 @@ inline void clearToastForTest()
     std::lock_guard<std::mutex> lock(s.mutex);
     s.live = false;
     s.text.clear();
+}
+
+// Diagnostic toast: shows only when PS2X_DEV_TOASTS=1, silent by default.
+// Use for progress/jargon lines a player can't act on.
+inline void toastDev(const std::string &text, float seconds = 3.0f)
+{
+    if (devToastsEnabled())
+        toast(text, seconds);
 }
 
 namespace notice_detail

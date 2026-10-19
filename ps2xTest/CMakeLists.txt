@@ -55,6 +55,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_log_tests.cpp
     src/ps2_perf_log_tests.cpp
     src/ps2_telemetry_tests.cpp
+    src/ps2_ui_toast_tests.cpp
     src/ps2_input_diag_tests.cpp
     src/ps2_adpf_tests.cpp
     src/ps2_thread_affinity_tests.cpp

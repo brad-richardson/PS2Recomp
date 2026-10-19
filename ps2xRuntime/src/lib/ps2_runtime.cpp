@@ -2708,9 +2708,9 @@ void ds1FireQuickSave()
     if (!ps2_savestate::requestQuickSave(slot))
     {
         if (ps2_savestate::quickRequestPending())
-            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+            ps2_savestate::noteQuickStatus("Busy - try again");
         else
-            ps2_savestate::noteQuickStatus("quick-save failed (see log)");
+            ps2_savestate::noteQuickStatus("Quick save failed");
     }
 }
 
@@ -2721,15 +2721,15 @@ void ds1FireQuickLoad()
     if (!std::filesystem::exists(slot, ec) || ec)
     {
         std::fprintf(stderr, "[savestate] quick-load: no quicksave in slot %s\n", slot.c_str());
-        ps2_savestate::noteQuickStatus("no quicksave in this slot yet");
+        ps2_savestate::noteQuickStatus("No quick save yet");
         return;
     }
     if (!ps2_savestate::requestQuickLoad(slot))
     {
         if (ps2_savestate::quickRequestPending())
-            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+            ps2_savestate::noteQuickStatus("Busy - try again");
         else
-            ps2_savestate::noteQuickStatus("quick-load failed (see log)");
+            ps2_savestate::noteQuickStatus("Couldn't load the quick save");
     }
 }
 
@@ -8555,7 +8555,7 @@ void PS2Runtime::run()
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
-                ps2x::ui::toast("Restart failed (settings)", 3.0f);
+                ps2x::ui::toast("Restart failed", 3.0f);
                 return;
             }
             ps2x::ios::setTarget120(want120);
@@ -8571,7 +8571,7 @@ void PS2Runtime::run()
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
-                ps2x::ui::toast("Restart failed (settings)", 3.0f);
+                ps2x::ui::toast("Restart failed", 3.0f);
                 return;
             }
             if (!set2AndroidRelaunch(want120 ? "120" : "60"))
@@ -8950,7 +8950,7 @@ void PS2Runtime::run()
                     // Part 4: a refused row (locked?) fails fast with the
                     // overlay left open; the tries-cap tail keeps the old
                     // line so logs tell them apart.
-                    ps2x::ui::toast(prog.refused ? "Tricky list: that course is locked" : "Tricky list: couldn't reach it",
+                    ps2x::ui::toast(prog.refused ? "That course is locked" : "Couldn't open that course",
                                     3.0f);
                     std::fprintf(stderr, "[tklist] tick=%llu aborted%s after %d presses\n",
                                  static_cast<unsigned long long>(tkTick), prog.refused ? " (refused)" : "",
@@ -9881,13 +9881,14 @@ void PS2Runtime::run()
         ps2x::inputdiag::pollHost(m_memory.gs().vsyncTick.load());
         // DS1: quick-save/load status line, drawn by the host over the
         // presented frame (never into the guest frame): "saving..." while a
-        // save waits, else the last result for 4 s. Skipped with the rest of
+        // save waits (toast-audit-1: dev-only behind PS2X_DEV_TOASTS), else
+        // the last result for 4 s. Skipped with the rest of
         // GL when the VK layer presents above (the play config); there the
         // logcat lines and the slot sidecar are the record.
         if (!skipGl)
         {
             std::string ds1Msg;
-            if (ps2_savestate::quickSavePending())
+            if (ps2_savestate::quickSavePending() && ps2x::ui::devToastsEnabled())
             {
                 ds1Msg = "saving...";
             }

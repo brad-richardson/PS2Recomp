@@ -574,7 +574,7 @@ void EeScheduler::run()
             else
             {
                 std::fprintf(stderr, "[savestate] quick-load refused: %s\n", error.c_str());
-                ps2_savestate::noteQuickStatus("load refused: " + error);
+                ps2_savestate::noteQuickStatus("Couldn't load this save");
                 if (ps2_savestate::quickSlotKind(ds1LoadPath) != ps2_savestate::QuickSlotKind::Other)
                     ps2x::ui::toast("Load refused: build changed", 3.0f);
             }
@@ -598,7 +598,7 @@ void EeScheduler::run()
                 {
                     ps2_savestate::clearPendingQuickSave();
                     ps2_savestate::writeQuickInfo(ds1SavePath, m_vsyncTick, currentEeCycle());
-                    ps2_savestate::noteQuickStatus("saved at tick " + std::to_string(m_vsyncTick));
+                    ps2_savestate::noteQuickStatus("Quick save done");
                     // QSR1: manual saves toast; the race-start auto snapshot
                     // stays silent (the user didn't tap anything).
                     if (ps2_savestate::quickSlotKind(ds1SavePath) ==
@@ -633,7 +633,9 @@ void EeScheduler::run()
                             if (ds1SaveDue)
                             {
                                 ps2_savestate::clearPendingQuickSave();
-                                ps2_savestate::noteQuickStatus("save abandoned (VU1 budget-parked)");
+                                // toast-audit-1: budget-park detail is dev-only.
+                                if (ps2x::ui::devToastsEnabled())
+                                    ps2_savestate::noteQuickStatus("save abandoned (VU1 budget-parked)");
                             }
                             else
                                 ssSaveAt = 0u;

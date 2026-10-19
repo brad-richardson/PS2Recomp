@@ -1659,9 +1659,11 @@ namespace ps2_savestate
         if (!ok)
             return false;
         ps2_turbo_boot::noteSavestateLoad(); // BTS1: a loaded state resumes paced
-        note = "loaded tick=" + std::to_string(savedTick);
+        // toast-audit-1: plain player language on the status line; the tick
+        // stays in the stderr line at the call sites.
+        note = "Save loaded";
         if (!cardNote.empty())
-            note += " (card kept: " + cardNote + ")";
+            note += " (memory card kept)";
         return true;
     }
 

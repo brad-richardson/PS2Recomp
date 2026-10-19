@@ -143,7 +143,8 @@ namespace
                               item, st, next);
                 tkLog(runtime, buf);
                 modeSet(rdram, true, msg);
-                ps2_savestate::noteQuickStatus("Tricky Courses");
+                // toast-audit-1: no mode toast (the Tricky list overlay itself
+                // confirms the mode; tkLog below keeps the record).
             }
             else if (s.tricky)
             {
