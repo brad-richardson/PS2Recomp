@@ -9049,9 +9049,10 @@ void PS2Runtime::run()
             // completes here so the done path below can close the overlay.
             tkl::driveWatchdog(tkTick);
             const tkl::DriveProgress tkProgEarly = tkl::driveProgress();
-            const bool tkTarget =
-                tkMapLive && (tkView.screen != 2 || tkView.row >= 0) &&
-                (!tkLatchedOn || ps2_ssx3_tricky::state().mapEntries != tkLatchGen);
+            const bool tkTarget = tkl::overlayTarget(
+                tkMapLive, tkView.screen, tkView.row, tkLatchedOn,
+                ps2_ssx3_tricky::state().mapEntries, tkLatchGen,
+                ps2_ssx3_tricky::state().directActive);
             if (!tkProgEarly.driving)
             {
                 if (tkTarget)

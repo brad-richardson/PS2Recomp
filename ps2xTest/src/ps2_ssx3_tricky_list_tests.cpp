@@ -333,6 +333,16 @@ void register_ps2_ssx3_tricky_list_tests()
             v = readView(ram.data(), 1024, 0x600000);
             t.IsFalse(v.mapLive, "short RAM rejected"); });
 
+        tc.Run("overlay target stays shut on a direct launch, even with live words", [](TestCase &t)
+               {
+            t.IsTrue(overlayTarget(true, 0, -1, false, 0, 0, false), "Peak screen opens stock");
+            t.IsFalse(overlayTarget(true, 0, -1, false, 0, 0, true), "direct launch suppresses the stale open");
+            t.IsFalse(overlayTarget(true, 0, -1, true, 1, 0, true), "suppressed even with a new Map generation");
+            t.IsTrue(overlayTarget(true, 0, -1, true, 1, 0, false), "a new Map entry re-opens stock");
+            t.IsFalse(overlayTarget(true, 0, -1, true, 0, 0, false), "latched same-gen stays shut");
+            t.IsFalse(overlayTarget(true, 2, -1, false, 0, 0, false), "dead Event widget stays shut");
+            t.IsFalse(overlayTarget(false, 0, -1, false, 0, 0, false), "non-Map words stay shut"); });
+
         tc.Run("navigator rides Mesablanca from the Event screen", [](TestCase &t)
                {
             // Part 4 goal: P1 Race row 0, mapped ev0. The overlay opened

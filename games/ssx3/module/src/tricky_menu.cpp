@@ -146,6 +146,7 @@ namespace
         // SET0001 records guard owns this ride.
         if (!ps2_ssx3_tricky_list::applyCourseMap(ram, PS2_RAM_SIZE, {0, "GARI", "Garibaldi"}))
             return false;
+        ps2_ssx3_tricky::state().directActive = true; // bypasses Map: keep the overlay shut so the pad reaches the briefing
         const uint32_t f = sp - kDirectFrame;
         std::memset(ram + f, 0, kDirectFrame);
         ps2_ssx3_tricky::wr32(ram, f, kDirectMagic);
@@ -194,6 +195,7 @@ namespace
         using namespace ps2_ssx3_tricky;
         State &s = state();
         s.mapController = 0u;
+        s.directActive = false;
         if (s.tricky)
         {
             std::string msg;
@@ -266,6 +268,7 @@ namespace
     {
         ps2_ssx3_tricky::state().mapController = getRegU32(ctx, 4);
         ++ps2_ssx3_tricky::state().mapEntries; // tk-menu-1: the overlay's reopen latch
+        ps2_ssx3_tricky::state().directActive = false; // a real Map entry re-arms the overlay
         g_tkMapFill(rdram, ctx, runtime);
     }
 

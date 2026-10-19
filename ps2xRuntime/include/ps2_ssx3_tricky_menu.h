@@ -352,6 +352,7 @@ struct State
 {
     bool on = false; // knob
     bool tricky = false;
+    bool directActive = false; // direct launch queued (bypasses Map): overlay stays shut so the pad reaches the briefing
     uint32_t mapController = 0u; // 0x200DE8's a0 since the last main-menu build / event
     uint32_t cmnamer = 0u;       // patched CMNAMER copy
     bool labelDone = false;

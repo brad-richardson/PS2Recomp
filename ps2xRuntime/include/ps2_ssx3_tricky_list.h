@@ -262,6 +262,18 @@ inline FeView readView(const uint8_t *ram, uint32_t size, uint32_t controller)
     return v;
 }
 
+// ---- Overlay open gate ----------------------------------------------------
+// Direct launches queue loading without any Map fill, leaving stale Map-live
+// words that would otherwise open the overlay (and zero the pad) through
+// loading and the briefing. The probe sets directActive; a real Map fill or
+// a main-menu build clears it, so the stock navigator path is untouched.
+inline bool overlayTarget(bool mapLive, int screen, int row, bool latchedOn, uint64_t entries,
+                          uint64_t latchGen, bool directActive)
+{
+    return !directActive && mapLive && (screen != 2 || row >= 0) &&
+        (!latchedOn || entries != latchGen);
+}
+
 // ---- Closed-loop navigator -----------------------------------------------
 // Drives the hidden stock screens to (peak, type, row) and accepts. One
 // navStep call per guest tick; the caller holds the returned mask until the
