@@ -650,5 +650,51 @@ void register_ps2_virtual_pad_tests()
                      "/docs/states/autosave.ps2xstate", "iOS Documents wins");
             t.Equals(autosaveSlotPathFor(nullptr, "", "/pinned/cd"),
                      "/pinned/cd/states/autosave.ps2xstate", "no card: elf fallback");
+        });
+
+        // resume-ios-1: the intent marker is a sidecar of the slot; its
+        // two-line form round-trips, and anything torn or malformed is
+        // untrusted (a kill mid-flush must never read as a valid marker).
+        tc.Run("resume-ios-1: intent path/format/parse round-trip", [](TestCase &t)
+               {
+            t.Equals(autosaveIntentPathFor("/docs/states/autosave.ps2xstate"),
+                     "/docs/states/autosave.ps2xstate.intent", "sidecar leaf");
+            t.Equals(formatAutosaveIntent(1760886267u, 10683u), "wall=1760886267\ntick=10683\n",
+                     "exact bytes");
+            uint64_t wall = 0u, tick = 0u;
+            t.IsTrue(parseAutosaveIntent("wall=1760886267\ntick=10683\n", wall, tick), "round-trip parses");
+            t.Equals(wall, 1760886267u, "wall survives");
+            t.Equals(tick, 10683u, "tick survives");
+            t.IsTrue(!parseAutosaveIntent("", wall, tick), "empty rejected");
+            t.IsTrue(!parseAutosaveIntent("wall=1760886267\n", wall, tick), "torn tail rejected");
+            t.IsTrue(!parseAutosaveIntent("wall=1760886267\ntick=10683", wall, tick), "missing newline rejected");
+            t.IsTrue(!parseAutosaveIntent("wall=abc\ntick=10683\n", wall, tick), "bad digits rejected");
+            t.IsTrue(!parseAutosaveIntent("wall=0\ntick=10683\n", wall, tick), "zero wall rejected");
+            t.IsTrue(!parseAutosaveIntent("wall=1760886267\ntick=10683\njunk\n", wall, tick),
+                    "trailing junk rejected");
+        });
+
+        // resume-ios-1: stale iff the last background is strictly newer than
+        // the slot. Same-second equality still counts as landed (a save that
+        // completes within its request second stamps the same value).
+        tc.Run("resume-ios-1: stale iff marker newer than slot", [](TestCase &t)
+               {
+            t.IsTrue(autosaveSlotStale(101u, 100u), "newer marker stale");
+            t.IsTrue(!autosaveSlotStale(100u, 100u), "same second landed");
+            t.IsTrue(!autosaveSlotStale(99u, 100u), "older marker fresh");
+            t.IsTrue(autosaveSlotStale(1760899500u, 1760886267u), "Brad's shape: later session marker vs Garibaldi slot");
+        });
+
+        // resume-ios-1: the prompt always shows the slot age (largest whole
+        // unit); future/zero ages read as just now.
+        tc.Run("resume-ios-1: age line units", [](TestCase &t)
+               {
+            t.Equals(autosaveAgeLine(1000u, 1000u), "Saved just now", "equal");
+            t.Equals(autosaveAgeLine(1001u, 1000u), "Saved just now", "future");
+            t.Equals(autosaveAgeLine(1000u, 1059u), "Saved just now", "59 s");
+            t.Equals(autosaveAgeLine(1000u, 1060u), "Saved 1 minute ago", "singular minute");
+            t.Equals(autosaveAgeLine(1000u, 4599u), "Saved 59 minutes ago", "plural minutes");
+            t.Equals(autosaveAgeLine(1000u, 4600u + 3600u), "Saved 2 hours ago", "plural hours");
+            t.Equals(autosaveAgeLine(0u, 90000u), "Saved 1 day ago", "singular day");
         }); });
 }

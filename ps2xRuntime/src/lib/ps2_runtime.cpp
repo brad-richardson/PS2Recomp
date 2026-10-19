@@ -3003,12 +3003,21 @@ inline float widthUniform(const char *s, float hPx)
 // ASV1: the choice is made before the game thread starts, so a rejected or
 // "Start fresh" slot cannot advance the guest even one tick. Touch and pad
 // input both work here; Resume is the selected/default action.
-bool asv1AskToResume(bool &closed)
+bool asv1AskToResume(bool &closed, bool lastSaveFailed, uint64_t savedWallUnixS, uint64_t nowWallUnixS)
 {
     closed = false;
-    bool resumeSelected = true;
+    // resume-ios-1: a disclosed-stale slot defaults to Start fresh (offering
+    // the older save as "Resume" is the silent-stale bug); a fresh slot keeps
+    // the Resume default. settings-ui-1 restyles inside this body.
+    bool resumeSelected = !lastSaveFailed;
     int lastTouchId = -1;
-    std::fprintf(stderr, "[autosave] prompt: Resume where you left off / Start fresh (default Resume)\n");
+    const std::string ageLine =
+        (savedWallUnixS != 0u && nowWallUnixS != 0u)
+            ? ps2x::vpad::autosaveAgeLine(savedWallUnixS, nowWallUnixS)
+            : std::string();
+    std::fprintf(stderr, "[autosave] prompt: %s%s (default %s)\n",
+                 lastSaveFailed ? "stale slot disclosed / Start fresh" : "Resume where you left off / Start fresh",
+                 ageLine.empty() ? "" : (" [" + ageLine + "]").c_str(), resumeSelected ? "Resume" : "Start fresh");
     while (!WindowShouldClose())
     {
         if (ps2x::hostPause::paused())
@@ -3025,9 +3034,16 @@ bool asv1AskToResume(bool &closed)
                                   static_cast<float>(buttonW), static_cast<float>(buttonH)};
         const Rectangle freshBox{static_cast<float>(x + buttonW + gap), static_cast<float>(y),
                                  static_cast<float>(buttonW), static_cast<float>(buttonH)};
-        if (IsKeyPressed(KEY_LEFT))
+        // Brad 10-19: the controller drives the prompt too (touch-only was a
+        // bug). D-pad/keyboard arrows move between the two options, X/cross
+        // (pad) or Enter (key) confirms. Same code on Android and iOS.
+        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_UP) ||
+            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT) ||
+            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP))
             resumeSelected = true;
-        if (IsKeyPressed(KEY_RIGHT))
+        if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_DOWN) ||
+            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) ||
+            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
             resumeSelected = false;
         if (IsKeyPressed(KEY_ENTER) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
             return resumeSelected;
@@ -3054,20 +3070,30 @@ bool asv1AskToResume(bool &closed)
         };
         BeginDrawing();
         ClearBackground(set2C(ps2x::set2::kSet2Bg));
-        const char *title = "Resume where you left off?";
+        const char *title = lastSaveFailed ? "Last session wasn't saved" : "Resume where you left off?";
         const int titleSize = ps2x::set2::set2TitleFont(static_cast<float>(h));
-        // settings-ui-1 part 2 (SSX font): title through the shared
-        // game-font helper (baked FEFONT, Neuropol, default fallback).
+        // resume-ios-1 (train-66b): stale title + slot age (no course: the
+        // host header records none), drawn through the shared game-font
+        // helper like the fresh prompt (all strings ASCII, bake-safe).
         const float titleW = set2font::width(title, static_cast<float>(titleSize));
         set2font::draw(title, (static_cast<float>(w) - titleW) * 0.5f,
                        static_cast<float>(h) / 3.0f, static_cast<float>(titleSize),
                        set2C(ps2x::set2::kSet2Title), false);
+        const int labelSize = ps2x::set2::set2RowFont(static_cast<float>(h));
+        if (!ageLine.empty())
+        {
+            const float ageW = set2font::width(ageLine.c_str(), static_cast<float>(labelSize));
+            set2font::draw(ageLine.c_str(), (static_cast<float>(w) - ageW) * 0.5f,
+                           static_cast<float>(h) / 3.0f + static_cast<float>(titleSize) +
+                               static_cast<float>(labelSize) * 0.5f,
+                           static_cast<float>(labelSize), set2C(ps2x::set2::kSet2Text), false);
+        }
         DrawRectangleRec(resumeBox, set2C(resumeSelected ? ps2x::set2::kSet2BtnSel : ps2x::set2::kSet2Btn));
         DrawRectangleRec(freshBox, set2C(resumeSelected ? ps2x::set2::kSet2Btn : ps2x::set2::kSet2BtnSel));
         DrawRectangleLinesEx(resumeSelected ? resumeBox : freshBox, 3.0f,
                              set2C(ps2x::set2::kSet2Border));
-        const int labelSize = ps2x::set2::set2RowFont(static_cast<float>(h));
-        const char *resume = "Resume", *fresh = "Start fresh";
+        // resume-ios-1 (train-66b): stale slot offers the older save honestly.
+        const char *resume = lastSaveFailed ? "Load older save" : "Resume", *fresh = "Start fresh";
         // settings-ui-1 part 2 (SSX font): button labels share one size,
         // so the uniform game-font scale keeps both buttons aligned.
         const float resumeW = set2font::widthUniform(resume, static_cast<float>(labelSize));
@@ -3649,6 +3675,30 @@ void bg1OnPause()
         autosave && std::strcmp(autosave, "1") == 0)
     {
         const std::string path = autosaveSlotPath();
+        // resume-ios-1: synchronous background-intent marker (a few bytes on
+        // the main thread, before the async save is requested). A kill, a
+        // guard refusal, or a save deferred past the deadline leaves it newer
+        // than the slot, so the next launch can tell the last session never
+        // landed instead of silently offering the stale slot.
+        {
+            const std::time_t wallNow = std::time(nullptr);
+            const uint64_t bgTick =
+                g_bg1Runtime ? g_bg1Runtime->eeScheduler().currentVSyncTick() : 0u;
+            if (wallNow > 0)
+            {
+                const std::string intentPath = ps2x::vpad::autosaveIntentPathFor(path);
+                std::ofstream intentOut(intentPath, std::ios::binary | std::ios::trunc);
+                if (intentOut)
+                {
+                    intentOut << ps2x::vpad::formatAutosaveIntent(static_cast<uint64_t>(wallNow),
+                                                                 bgTick);
+                    intentOut.flush();
+                }
+                if (!intentOut)
+                    std::fprintf(stderr, "[autosave] intent write failed path=%s\n",
+                                 intentPath.c_str());
+            }
+        }
         if (ps2_savestate::requestAutoSave(path))
         {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
@@ -7979,11 +8029,44 @@ void PS2Runtime::run()
                 }
                 else
                 {
+                    // resume-ios-1: consume the background-intent marker. A
+                    // marker newer than the slot proves the last session's
+                    // save never landed (guard refused, deferred past the
+                    // background deadline, or killed mid-save): never
+                    // silent-resume the stale slot; say so instead.
+                    bool lastSaveMissing = false;
+                    {
+                        const std::string intentPath = ps2x::vpad::autosaveIntentPathFor(slot);
+                        std::ifstream intentIn(intentPath, std::ios::binary);
+                        if (intentIn)
+                        {
+                            std::ostringstream intentText;
+                            intentText << intentIn.rdbuf();
+                            uint64_t markerWall = 0u, markerTick = 0u;
+                            if (ps2x::vpad::parseAutosaveIntent(intentText.str(), markerWall,
+                                                                markerTick) &&
+                                ps2x::vpad::autosaveSlotStale(markerWall, savedWall))
+                            {
+                                lastSaveMissing = true;
+                                std::fprintf(stderr,
+                                             "[autosave] launch: last background save missing "
+                                             "(intent wall=%llu tick=%llu; slot wall=%llu); stale "
+                                             "slot kept, not auto-offered\n",
+                                             static_cast<unsigned long long>(markerWall),
+                                             static_cast<unsigned long long>(markerTick),
+                                             static_cast<unsigned long long>(savedWall));
+                                ps2x::postQuickStatusToast("Latest session wasn't saved");
+                            }
+                            intentIn.close();
+                            std::error_code rmEc;
+                            std::filesystem::remove(intentPath, rmEc);
+                        }
+                    }
                     const std::time_t wallNow = std::time(nullptr);
                     const uint64_t now = wallNow > 0 ? static_cast<uint64_t>(wallNow) : 0u;
                     const auto choice = ps2_savestate::autoResumeDecision(
                         savedWall, now, ps2_savestate::autoResumeThresholdSeconds());
-                    if (choice == ps2_savestate::AutoResumeDecision::Silent)
+                    if (!lastSaveMissing && choice == ps2_savestate::AutoResumeDecision::Silent)
                     {
                         std::fprintf(stderr, "[autosave] auto-resume age=%llu s\n",
                                      static_cast<unsigned long long>(now - savedWall));
@@ -7992,7 +8075,7 @@ void PS2Runtime::run()
                     else
                     {
                         bool closed = false;
-                        const bool resume = asv1AskToResume(closed);
+                        const bool resume = asv1AskToResume(closed, lastSaveMissing, savedWall, now);
                         if (closed)
                         {
                             UnloadTexture(frameTex);
@@ -8001,7 +8084,8 @@ void PS2Runtime::run()
                         }
                         if (resume)
                             asv1ColdLoadPath = slot;
-                        std::fprintf(stderr, "[autosave] prompt choice=%s\n", resume ? "resume" : "fresh");
+                        std::fprintf(stderr, "[autosave] prompt choice=%s%s\n", resume ? "resume" : "fresh",
+                                     lastSaveMissing ? " (stale slot disclosed)" : "");
                     }
                 }
             }

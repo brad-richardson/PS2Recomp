@@ -838,4 +838,89 @@ namespace ps2x::vpad
         return (std::filesystem::path(autosaveSlotDirFor(iosDocs, mcRoot, elfDir)) / "autosave.ps2xstate")
             .string();
     }
+
+    // resume-ios-1: background-intent marker (pure; unit-tested). bg1OnPause
+    // writes it synchronously before requesting the async save; the next
+    // launch compares it against the slot header. A marker newer than the
+    // slot proves the last session never landed (guard refused, deferred past
+    // the background deadline, or killed mid-save), so the launch must not
+    // silently offer the stale slot.
+    inline std::string autosaveIntentPathFor(const std::string &slotPath)
+    {
+        return slotPath + ".intent";
+    }
+
+    inline std::string formatAutosaveIntent(uint64_t wallUnixS, uint64_t tick)
+    {
+        return "wall=" + std::to_string(wallUnixS) + "\ntick=" + std::to_string(tick) + "\n";
+    }
+
+    // Strict two-line form only; a torn write (kill mid-flush) is untrusted.
+    // wall==0 is rejected (the decision field; tick is informational only).
+    inline bool parseAutosaveIntent(const std::string &text, uint64_t &wallUnixS, uint64_t &tick)
+    {
+        wallUnixS = 0u;
+        tick = 0u;
+        uint64_t values[2] = {0u, 0u};
+        const char *keys[2] = {"wall=", "tick="};
+        size_t pos = 0u;
+        for (int i = 0; i < 2; ++i)
+        {
+            const std::string key(keys[i]);
+            if (text.compare(pos, key.size(), key) != 0)
+                return false;
+            pos += key.size();
+            const size_t end = text.find('\n', pos);
+            if (end == std::string::npos || end == pos)
+                return false;
+            uint64_t v = 0u;
+            for (size_t j = pos; j < end; ++j)
+            {
+                const char c = text[j];
+                if (c < '0' || c > '9')
+                    return false;
+                v = v * 10u + static_cast<uint64_t>(c - '0');
+            }
+            values[i] = v;
+            pos = end + 1u;
+        }
+        if (pos != text.size() || values[0] == 0u)
+            return false;
+        wallUnixS = values[0];
+        tick = values[1];
+        return true;
+    }
+
+    // Stale iff the last background (marker wall) is strictly newer than the
+    // slot's save wall. Same-second equality still counts as landed: a save
+    // that completes within its request second stamps the same value.
+    inline bool autosaveSlotStale(uint64_t markerWallUnixS, uint64_t slotSavedWallUnixS)
+    {
+        return markerWallUnixS > slotSavedWallUnixS;
+    }
+
+    // "Saved ..." age line for the resume prompt (pure; unit-tested). Largest
+    // whole unit; future/zero ages read as just now. No course: the host
+    // header records no course (guest RAM only), so age + tick is the honesty
+    // the prompt can offer.
+    inline std::string autosaveAgeLine(uint64_t savedWallUnixS, uint64_t nowWallUnixS)
+    {
+        if (nowWallUnixS <= savedWallUnixS)
+            return "Saved just now";
+        const uint64_t age = nowWallUnixS - savedWallUnixS;
+        if (age < 60u)
+            return "Saved just now";
+        if (age < 3600u)
+        {
+            const uint64_t m = age / 60u;
+            return "Saved " + std::to_string(m) + (m == 1u ? " minute ago" : " minutes ago");
+        }
+        if (age < 86400u)
+        {
+            const uint64_t h = age / 3600u;
+            return "Saved " + std::to_string(h) + (h == 1u ? " hour ago" : " hours ago");
+        }
+        const uint64_t d = age / 86400u;
+        return "Saved " + std::to_string(d) + (d == 1u ? " day ago" : " days ago");
+    }
 }
