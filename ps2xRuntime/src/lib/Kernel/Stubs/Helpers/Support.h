@@ -478,6 +478,35 @@ namespace
         return true;
     }
 
+    // tk-sky-1: reads disc bytes [offsetBytes, offsetBytes + byteCount) by
+    // logical (ISO) position. A slim image drops its hole sectors from the
+    // payload, so a raw file offset lands past them: composite `iso` segments
+    // read that way served Tricky worlds the wrong stock BAM.BIG ranges on
+    // slim builds (sky locations lost their meshes; only the sun flare drew).
+    // Plain images read exactly as before.
+    bool readImageBytes(const std::filesystem::path &image, uint64_t offsetBytes, uint8_t *dst, size_t byteCount)
+    {
+        const auto slim = ps2x::slim_cd::load(image);
+        if (slim.status == ps2x::slim_cd::Status::Invalid)
+        { std::cerr << "[cd-slim] REFUSED: " << slim.error << std::endl; g_lastCdError = -1; return false; }
+        if (slim.status != ps2x::slim_cd::Status::Slim)
+            return readHostRange(image, offsetBytes, dst, byteCount);
+        const uint64_t lbn = offsetBytes / kCdSectorSize;
+        const size_t head = static_cast<size_t>(offsetBytes % kCdSectorSize);
+        const uint64_t sectors = (head + byteCount + kCdSectorSize - 1) / kCdSectorSize;
+        if (lbn + sectors > slim.logicalSectors)
+        { g_lastCdError = -1; return false; }
+        if (head == 0)
+            return readSlimSectors(image, slim, static_cast<uint32_t>(lbn), static_cast<uint32_t>(sectors), dst,
+                                   byteCount);
+        std::vector<uint8_t> bounce(static_cast<size_t>(sectors) * kCdSectorSize);
+        if (!readSlimSectors(image, slim, static_cast<uint32_t>(lbn), static_cast<uint32_t>(sectors), bounce.data(),
+                             bounce.size()))
+            return false;
+        std::memcpy(dst, bounce.data() + head, byteCount);
+        return true;
+    }
+
     // Serves `f`'s bytes [offset, offset + byteCount) through its TK10
     // composite segments (Image = the disc image, Host = a host file). Shared
     // by the TK3 overlay branch and the TK25c mode alias below.
@@ -497,8 +526,8 @@ namespace
             {
                 std::memset(out, 0, n);
             }
-            else if (!readHostRange(piece.kind == ps2_cd_overlay::Piece::Image ? imagePath : f.host, piece.offset,
-                                    out, n))
+            else if (piece.kind == ps2_cd_overlay::Piece::Image ? !readImageBytes(imagePath, piece.offset, out, n)
+                                                                 : !readHostRange(f.host, piece.offset, out, n))
             {
                 return false;
             }

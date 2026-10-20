@@ -131,5 +131,62 @@ void register_ps2_cd_dirpatch_tests()
             std::vector<uint8_t> data(kSec, 0);
             t.IsTrue(readCdSectors(30, 1, data.data(), kSec), "data read ok");
             t.Equals(data[0], uint8_t(0xA0), "slim data byte intact");
+            fs::remove_all(root); });
+
+        // tk-sky-1: composite `iso` segments must read logical disc sectors on
+        // a slim image. Pre-fix serveComposite used raw file offsets, so a
+        // hole ahead of the range shifted every byte (the Tricky worlds' stock
+        // BAM.BIG ranges on public slim builds: sky meshes missing).
+        tc.Run("composite iso segment reads logical sectors on a slim image", [](TestCase &t)
+               {
+            const fs::path root = fs::temp_directory_path() / "ps2x-slimcomposite-1";
+            fs::remove_all(root);
+            fs::create_directories(root);
+            const auto logical = makeSlimPayload(); // sectors 30/31 = 0xA0/0xA1
+            // Hole over logical sectors 4-11 (ahead of the composite's range).
+            const fs::path slimImage = root / "slim.iso";
+            {
+                std::ofstream out(slimImage, std::ios::binary);
+                out.write(reinterpret_cast<const char *>(logical.data()), 4 * kSec);
+                out.write(reinterpret_cast<const char *>(logical.data() + 12 * kSec), (kSectors - 12) * kSec);
+            }
+            {
+                std::string b("PS2XSLM2", 8);
+                b += ps2x::slim_cd::PinnedSourceSha;
+                const uint64_t n = kSectors;
+                for (int i = 0; i < 8; ++i)
+                    b.push_back(char((n >> (8 * i)) & 0xFF));
+                for (uint32_t v : {1u, 4u, 8u, 1u})
+                    for (int i = 0; i < 4; ++i)
+                        b.push_back(char((v >> (8 * i)) & 0xFF));
+                std::ofstream(slimImage.string() + ".holes", std::ios::binary) << b;
+            }
+            const fs::path plainImage = root / "plain.iso";
+            std::ofstream(plainImage, std::ios::binary)
+                .write(reinterpret_cast<const char *>(logical.data()), kSectors * kSec);
+            const fs::path host = root / "world.cmp";
+            std::ofstream(host, std::ios::binary) << std::string(kSec, 'h') << std::string(kSec, 's');
+
+            ps2_cd_overlay::OverlayFile f;
+            f.host = host;
+            f.sectors = 3;
+            f.sizeBytes = 3 * kSec;
+            f.segments.push_back({true, 30, 0, 2});    // disc sectors 30-31
+            f.segments.push_back({false, kSec, 2, 1}); // host bytes after the header sector
+
+            for (const fs::path &image : {slimImage, plainImage})
+            {
+                const bool slim = image == slimImage;
+                std::vector<uint8_t> buf(3 * kSec, 0);
+                t.IsTrue(serveComposite(f, image, 0, buf.data(), buf.size()), slim ? "slim read ok" : "plain read ok");
+                t.Equals(buf[0], uint8_t(0xA0), slim ? "slim: first iso sector is logical 30" : "plain: logical 30");
+                t.Equals(buf[kSec], uint8_t(0xA1), slim ? "slim: second iso sector is logical 31" : "plain: logical 31");
+                t.Equals(buf[2 * kSec], uint8_t('s'), slim ? "slim: self piece from the host" : "plain: self piece");
+
+                std::vector<uint8_t> part(kSec, 0);
+                t.IsTrue(serveComposite(f, image, 100, part.data(), part.size()), "unaligned read ok");
+                t.Equals(part[0], uint8_t(0xA0), "unaligned start inside logical 30");
+                t.Equals(part[kSec - 1], uint8_t(0xA1), "unaligned tail inside logical 31");
+            }
             fs::remove_all(root); }); });
 }
