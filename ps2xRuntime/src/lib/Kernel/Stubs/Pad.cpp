@@ -898,18 +898,34 @@ namespace ps2_stubs
             // v0 option-0: collapsed floor (was R1 human 11.5 s pause).
             {"cfg-ok", kPadBtnCross, 54500, 250, QG_NETW_STAR, 0, 0, 1800},
             {"wait-star", 0, 65500, 0, QG_NETW_STAR, 0, 0, 900},
-            // v0 option-0: typing cluster removed (login-down-1..login-char-4):
-            // on-the-fly identity auto-auths; no sign-in screens ever show.
-            // v0 option-0: typing cluster removed (login-down-3..pw-char-4).
-            // v0 option-0: typing + submit + save-answer removed
-            // (pw-right-1..save-no-cross). The game auto-auths; the
-            // waits below observe it.
-            {"wait-conn", 0, 118500, 0, QG_SESS_CONN, 0, 0, 1500},
-            {"wait-auth", 0, 118500, 0, QG_GAME_AUTH, 0, 0, 900},
-            {"persona-pick", kPadBtnCross, 126800, 250, QG_TICK, 0, 0, 1800},
-            {"wait-pers", 0, 126800, 0, QG_PERS, 0, 0, 1200},
-            {"qm-entry", kPadBtnCross, 130200, 250, QG_TICK, 0, 0, 1800},
-            {"filter-stop", 0, 130200, 0, QG_FILTER_STOP, 0, 0, 1800},
+            // v0 encoder-night: first-entry save dance (fresh/allpeak cards
+            // with no usable login: the game shows sign-in instead of
+            // auto-auth). Dialog fields are prefilled via RAM (no typing);
+            // submit + save-Yes are 6 quick presses. Phase-gated on the
+            // dialogs + skipped when no dialog shows (auto-auth path jumps
+            // over via the early-auth/outrun arms). After Yes the game
+            // encodes OUR identity itself; the Mc HLE captures the 58
+            // bytes into a host-side cache (card never written) and later
+            // entries auto-auth from the cache with zero screens.
+            // Dance floor: sign-in dialog is up by wait-star+33 (frame
+            // pinned), so submit-down-1 fires at +90 — never into the
+            // link modal (long dismissed by then).
+            // Dance: 3 Downs reach OK from dialog-open focus (frame-pinned
+            // @4080; a 4th wraps to Name and opens the keyboard).
+            {"submit-down-1", kPadBtnDown, 67000, 150, QG_TICK, 0, 0, 900},
+            {"submit-down-2", kPadBtnDown, 67500, 150, QG_TICK, 0, 0, 900},
+            {"submit-down-3", kPadBtnDown, 68000, 150, QG_TICK, 0, 0, 900},
+            {"submit-ok", kPadBtnCross, 68500, 250, QG_TICK, 0, 0, 900},
+            {"save-yes", kPadBtnCross, 69500, 250, QG_TICK, 0, 0, 1200},
+            {"wait-conn", 0, 70000, 0, QG_SESS_CONN, 0, 0, 1500},
+            {"wait-auth", 0, 70000, 0, QG_GAME_AUTH, 0, 0, 900},
+            // Tail atMs renumbered to preserve proven gaps (persona-pick
+            // 8300 after wait-auth, qm-entry 3400 after pick): Brad timing
+            // identical with the dance inserted.
+            {"persona-pick", kPadBtnCross, 78300, 250, QG_TICK, 0, 0, 1800},
+            {"wait-pers", 0, 78300, 0, QG_PERS, 0, 0, 1200},
+            {"qm-entry", kPadBtnCross, 81700, 250, QG_TICK, 0, 0, 1800},
+            {"filter-stop", 0, 81700, 0, QG_FILTER_STOP, 0, 0, 1800},
         };
         constexpr size_t kQpNavSteps = sizeof(kQpNavRoute) / sizeof(kQpNavRoute[0]);
 
@@ -940,7 +956,16 @@ namespace ps2_stubs
             // hosts cfg-3/cfg-ok. cfg-ok still skips when login is up.
             {"cfg-1", "cfg-2", 4u, 0u, false},
             {"cfg-3", "cfg-ok", 3u, 0u, false},
-            // v0 option-0: typing + save phases removed with their steps.
+            // v0 encoder-night: first-entry dance phases (submit on the
+            // login dialog 3/0x16; save-yes on the save prompt 3/0x4,
+            // disambiguated by route order — the link modal is long gone).
+            // (fresh sign-in reads 3/0x4, same as modal/save: the dance
+            // floor + route order disambiguate, not the id.)
+            {"submit-down-1", "submit-ok", 3u, 4u, false},
+            // save-yes is phaseless (fires on any 3/x screen past submit):
+            // the save prompt's sub-id is unproven (3/0x16 was the
+            // keyboard, not the prompt), and route order already scopes
+            // it. The skip-arm below guards non-3 screens.
             {"persona-pick", "persona-pick", 4u, 2u, false},
             {"qm-entry", "qm-entry", 4u, 4u, true},
             {"filter-stop", "filter-stop", 7u, 0x16u, false},
@@ -1142,6 +1167,8 @@ namespace ps2_stubs
             uint64_t seenCreaCount = 0u;
             // ONL11 addendum: card-path shortcut indices.
             size_t autoAuthToIdx = 0u;
+            // v0 encoder-night: dance-skip landing (no dialog showing).
+            size_t waitConnIdx = 0u;
             size_t personaPickIdx = 0u;
             // online-card-1: outrun catch-up target (guest reached the
             // filter on its own; completes through the done path).
@@ -1263,12 +1290,14 @@ namespace ps2_stubs
             // typing/submit steps exist). Jumps land on persona-pick.
             g_qpNav.autoAuthFromIdx = qpNavFindStep("wait-star");
             g_qpNav.autoAuthToIdx = qpNavFindStep("wait-auth");
+            g_qpNav.waitConnIdx = qpNavFindStep("wait-conn");
             g_qpNav.personaPickIdx = qpNavFindStep("persona-pick");
             // online-card-1: outrun catch-up target (see above).
             g_qpNav.filterStopIdx = qpNavFindStep("filter-stop");
             if (g_qpNav.danceFrom >= g_qpNav.danceTo || g_qpNav.danceTo >= kQpNavSteps ||
                 g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.autoAuthFromIdx >= kQpNavSteps ||
-                g_qpNav.autoAuthToIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps ||
+                g_qpNav.autoAuthToIdx >= kQpNavSteps || g_qpNav.waitConnIdx >= kQpNavSteps ||
+                g_qpNav.personaPickIdx >= kQpNavSteps ||
                 g_qpNav.filterStopIdx >= kQpNavSteps)
             {
                 std::fprintf(stderr, "[qpnav] dance/jump targets unresolved: disarmed\n");
@@ -1465,6 +1494,13 @@ namespace ps2_stubs
             const ps2_net::QpNavMilestones m = ps2_net::qpNavMilestones();
             const uint32_t menuMain = qpNavReadMenu(rdram, kQpNavMenuMain);
             const uint32_t menuSub = qpNavReadMenu(rdram, kQpNavMenuSub);
+            // v0 encoder-night: per-vsync login prefill (the dialog
+            // snapshots its display at open; net-event prefill may never
+            // run before submit). Self-floored; online-mode only.
+            if (rdram && g_qpNav.onlineMode && g_qpNav.armed && !g_qpNav.done && !g_qpNav.aborted)
+            {
+                ps2_net::qpPrefillLogin(rdram, guestVsyncTick);
+            }
             if (guestVsyncTick >= g_qpNav.stepStart + s.timeout)
             {
                 g_qpNav.aborted = true;
@@ -1600,8 +1636,30 @@ namespace ps2_stubs
                 g_qpNav.holdMask = 0u;
                 return;
             }
-            // v0 option-0: no save prompt exists (faked login), so the
-            // save-answer steps are gone with the typing cluster.
+            // v0 encoder-night: dance-skip arms. The submit cluster only
+            // runs against a 3/0x4 dialog (sign-in here; modal long gone
+            // by the dance floor); save-yes only against the save prompt
+            // (3/0x4). Any other screen here
+            // (auto-auth already through, prompt dismissed early) skips
+            // to wait-conn instead of pressing blind. The gameAuth jump
+            // above usually rejoins first.
+            if (std::strcmp(s.name, "submit-down-1") == 0 &&
+                !(menuMain == 3u && menuSub == 4u))
+            {
+                std::fprintf(stderr, "[qpnav] jump submit-down-1 -> wait-conn (no dialog)\n");
+                g_qpNav.idx = g_qpNav.waitConnIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                return;
+            }
+            if (std::strcmp(s.name, "save-yes") == 0 && menuMain != 3u)
+            {
+                std::fprintf(stderr, "[qpnav] jump save-yes -> wait-conn (no prompt)\n");
+                g_qpNav.idx = g_qpNav.waitConnIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                return;
+            }
             if (s.gate == QG_FILTER_STOP)
             {
                 g_qpNav.done = true;

@@ -100,6 +100,13 @@ namespace ps2_net
     // (they are known faked-input garbage, not a real save).
     void qpNoteLoginFaked();
     bool qpLoginFaked();
+    // v0 encoder-night: host-side login-bytes cache (game-encoded, card
+    // never written). qpNoteLoginBytes accumulates McWrite payloads;
+    // qpCachedLoginBytes serves a validated 58-byte record.
+    void qpNoteLoginBytes(const uint8_t *bytes, size_t n);
+    bool qpCachedLoginBytes(std::vector<uint8_t> &out);
+    // v0 encoder-night: per-vsync prefill (self-floored; see above).
+    void qpPrefillLogin(uint8_t *rdram, uint64_t tick);
     // online-v0-1: the G6 first-run privacy card, once per install (flag
     // beside the Quick Play login path); Quick Play netplay posts it on its
     // first entry since its menu never reaches the DirtySock path.

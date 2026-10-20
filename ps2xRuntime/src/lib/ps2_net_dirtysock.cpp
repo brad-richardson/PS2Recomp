@@ -507,6 +507,29 @@ namespace ps2_net
         // with the "EA Login" title record (ELF vaddr 0x497390). v0
         // option-0 hooks the load instead (MemoryCard.cpp serves a faked
         // presence; the card is never written and real saves are ignored).
+        // v0 encoder-night: restored as a read-only routing input (the
+        // first-entry dance runs only when no save exists). Cached per
+        // boot; the card is static under us (dance writes are discarded).
+        bool qpCardHasEaLoginImpl()
+        {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+            const char *mc = std::getenv("PS2X_MC_ROOT");
+            if (!mc || !*mc)
+            {
+                return false;
+            }
+            const std::string data =
+                std::string(mc) + "/PSCD10088slogin/PSCD10088slogin";
+            struct stat st{};
+            if (::stat(data.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+            {
+                return false;
+            }
+            return true;
+#else
+            return false;
+#endif
+        }
 
         void parseLoginKnob()
         {
@@ -952,6 +975,138 @@ namespace ps2_net
         g_qpLoginFaked.store(true, std::memory_order_relaxed);
     }
 
+    bool qpCardHasEaLogin()
+    {
+        static int cached = -1;
+        if (cached < 0)
+        {
+            cached = qpCardHasEaLoginImpl() ? 1 : 0;
+        }
+        return cached > 0;
+    }
+
+    // v0 encoder-night: early-prefill routing. Late (>= 4200, proven)
+    // always; early (3300+, post-modal, pre-dialog-snapshot) only when
+    // the card holds no login save — cards WITH a save keep byte-
+    // identical behavior.
+    bool qpEarlyPrefillOk(uint64_t tick)
+    {
+        if (tick >= 4200u)
+        {
+            return true;
+        }
+        if (tick < 3300u || qpCardHasEaLogin())
+        {
+            return false;
+        }
+        return true;
+    }
+
+    // v0 encoder-night: host-side login-bytes cache. The game's own save
+    // dance encodes OUR identity; the Mc HLE captures the 58 data bytes
+    // (card never written) and later entries are served from the cache,
+    // so only the first entry dances. File = "<loginfile>.cache58":
+    // "<name>\n" + 58 raw bytes, mode 600. A name mismatch (lobby file
+    // changed) invalidates: the dance re-runs for the new identity.
+    std::string qpLoginCachePath()
+    {
+        const std::string base = quickplayLoginPath();
+        if (base.empty())
+        {
+            return {};
+        }
+        return base + ".cache58";
+    }
+    void qpNoteLoginBytes(const uint8_t *bytes, size_t n)
+    {
+        parseLoginKnob();
+        if (!g_loginOn || g_loginName.empty() || bytes == nullptr || n == 0u)
+        {
+            return;
+        }
+        const std::string path = qpLoginCachePath();
+        if (path.empty())
+        {
+            std::cerr << "[net] quickplay login-bytes captured (" << n
+                      << "B) but no cache path" << std::endl;
+            return;
+        }
+        // Accumulate per boot; finalize exactly one 58-byte record.
+        static std::vector<uint8_t> acc;
+        static bool done = false;
+        if (done)
+        {
+            return;
+        }
+        acc.insert(acc.end(), bytes, bytes + n);
+        if (acc.size() < 58u)
+        {
+            return;
+        }
+        if (acc.size() != 58u)
+        {
+            std::cerr << "[net] quickplay login-bytes size " << acc.size()
+                      << " (want 58): cache skipped" << std::endl;
+            done = true;
+            return;
+        }
+        const std::string blob(reinterpret_cast<const char *>(acc.data()), acc.size());
+        const std::string content = g_loginName + "\n" + blob;
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0)
+        {
+            std::cerr << "[net] quickplay login cache unwritable" << std::endl;
+            done = true;
+            return;
+        }
+        ::fchmod(fd, 0600);
+        size_t off = 0u;
+        while (off < content.size())
+        {
+            const ssize_t w = ::write(fd, content.data() + off, content.size() - off);
+            if (w <= 0)
+            {
+                break;
+            }
+            off += static_cast<size_t>(w);
+        }
+        ::close(fd);
+        done = true;
+        std::cerr << "[net] quickplay login cache wrote " << off << "B for "
+                  << g_loginName << std::endl;
+    }
+    bool qpCachedLoginBytes(std::vector<uint8_t> &out)
+    {
+        parseLoginKnob();
+        if (!g_loginOn || g_loginName.empty())
+        {
+            return false;
+        }
+        const std::string path = qpLoginCachePath();
+        if (path.empty())
+        {
+            return false;
+        }
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+        {
+            return false;
+        }
+        std::string name;
+        if (!std::getline(in, name) || name != g_loginName)
+        {
+            return false;
+        }
+        std::vector<uint8_t> blob((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+        if (blob.size() != 58u)
+        {
+            return false;
+        }
+        out = std::move(blob);
+        return true;
+    }
+
     bool qpLoginFaked()
     {
         return g_qpLoginFaked.load(std::memory_order_relaxed);
@@ -1376,12 +1531,30 @@ namespace ps2_net
     // copies, inert when the knob is off.
     void preloadPersona(uint8_t *rdram, uint64_t tick)
     {
-        (void)tick;
+        // Configuration here (not just at net events): the per-vsync
+        // drive may be the first caller in quiet windows.
+        parseLoginKnob();
         const size_t nameLen = g_loginName.size() + 1u;
         const size_t passLen = g_loginPass.size() + 1u;
         if (nameLen > 64u || passLen > 64u)
         {
             return;
+        }
+        // Self-floored (see qpEarlyPrefillOk): callers invoke
+        // unconditionally.
+        if (!qpEarlyPrefillOk(tick))
+        {
+            return;
+        }
+        // v0 encoder-night spike: one-shot proof the prefill executes.
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::cerr << "[net] quickplay prefill running tick=" << tick
+                          << " loginOn=" << g_loginOn << " nameLen=" << nameLen << std::endl;
+            }
         }
         for (size_t i = 0u; i < nameLen; i++)
         {
@@ -1391,6 +1564,32 @@ namespace ps2_net
         {
             rdram[0x54332Cu + 64u + i] = static_cast<uint8_t>(g_loginPass[i]);
         }
+        // v0 encoder-night: the save dance encodes from the 0x536760
+        // globals (17-byte name/pass the writer strncpy's), not the
+        // dialog struct — prefill those too so the captured bytes carry
+        // our identity. Floor: the dialog snapshots its display before
+        // tick ~3940, so no-save cards prefill from 3300 (post-modal);
+        // cards WITH a save keep the proven 4200 floor (Brad path
+        // byte-identical).
+        if (nameLen <= 17u && passLen <= 17u && qpEarlyPrefillOk(tick))
+        {
+            for (size_t i = 0u; i < nameLen; i++)
+            {
+                rdram[0x536760u + i] = static_cast<uint8_t>(g_loginName[i]);
+            }
+            for (size_t i = 0u; i < passLen; i++)
+            {
+                rdram[0x536760u + 17u + i] = static_cast<uint8_t>(g_loginPass[i]);
+            }
+        }
+    }
+
+    // v0 encoder-night: per-vsync prefill entry (the net-event-driven
+    // maybeLogin may not run between dialog-open and submit, so the
+    // navigator drive calls this every pad read; self-floored inside).
+    void qpPrefillLogin(uint8_t *rdram, uint64_t tick)
+    {
+        preloadPersona(rdram, tick);
     }
 
     // ONL4-P2: Verifying-wait detector. The game fills s2+0x48/+0x4C
@@ -1412,6 +1611,8 @@ namespace ps2_net
     // always safe to replace.
     void overwriteLoginTargets(uint8_t *rdram, uint64_t tick)
     {
+        // Preload first (self-floored: 4200, or 3300 no-save).
+        preloadPersona(rdram, tick);
         const size_t nameLen = g_loginName.size() + 1u;
         const size_t passLen = g_loginPass.size() + 1u;
         if (nameLen > 64u || passLen > 64u)
@@ -1423,7 +1624,7 @@ namespace ps2_net
         {
             return;
         }
-        // p3e boundary: no login-buffer writes before tick 4200. The auth
+        // p3e boundary: no STRUCT writes before tick 4200. The auth
         // struct exists almost at once (crea+16) but the flow hasn't
         // started; early writes derail the config flow (fresh2: link modal
         // never appeared, abort cfg-3 @4678 on menu 4/0xc).
@@ -1431,7 +1632,6 @@ namespace ps2_net
         {
             return;
         }
-        preloadPersona(rdram, tick);
         const bool faked = qpLoginFaked();
         const uint32_t targets[2] = {readEeU32(rdram, authObj + 0x48u),
                                      readEeU32(rdram, authObj + 0x4Cu)};
@@ -1480,12 +1680,8 @@ namespace ps2_net
         // 4200 — p3e proved writes to 0x54332C from tick 100
         // derail the menu flow (no net at all); the dialog
         // opens ~tick 3930, submit lands ~7110.
-        if (tick >= 4200u)
-        {
-            preloadPersona(rdram, tick);
-        }
-        // v0 option-0: always-on identity (covers the auto-auth window,
-        // not just the phase-3 submit).
+        // v0: always-on identity (covers the auto-auth window; the
+        // preload inside is self-floored).
         overwriteLoginTargets(rdram, tick);
         if (g_loginConn == 0u)
         {

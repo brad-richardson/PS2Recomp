@@ -603,9 +603,17 @@ namespace ps2_stubs
 
         RUNTIME_LOG("[MC] Chdir port=" << port << " '" << requestedDir
                                        << "' -> result=" << result << " cwd='" << currentDir << "'");
+        // v0 encoder-night D2: visible chdir log.
+        std::fprintf(stderr, " [MC] chdir port=%d req='%s' res=%d cwd='%s'\n", port,
+                     requestedDir.c_str(), result, currentDir.c_str());
         writeMcCString(rdram, currentDirAddr, currentDir);
         setReturnS32(ctx, 0);
     }
+
+    // v0 encoder-night: phantom fds (tmpfile-backed login children).
+    // Declared here (ahead of first use in sceMcClose); managed at
+    // Open/Write/Close. Real-file fds never enter this set.
+    std::unordered_set<int32_t> g_qpPhantomFds;
 
     void sceMcClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -620,6 +628,7 @@ namespace ps2_stubs
                 {
                     result = kMcResultSucceed;
                 }
+                g_qpPhantomFds.erase(fd);
                 g_mcFiles.erase(it);
             }
             setMcCommandResultLocked(kMcCmdClose, result);
@@ -757,12 +766,73 @@ namespace ps2_stubs
         }();
         return on;
     }
+    // (v0 encoder-night diagnostic knobs PS2X_QP_HIDE_CARD_LOGIN /
+    // PS2X_QP_FAKE_LOGIN_FILE were removed: ship path needs neither —
+    // serve is cache58 > bundled > zeros, inject is literal-wildcard.)
     bool qpLoginDataPath(const std::string &guestPath)
     {
         const std::string lower = toLowerAscii(guestPath);
         const std::string want = "pscd10088slogin/pscd10088slogin";
         return lower.size() >= want.size() &&
                lower.compare(lower.size() - want.size(), want.size(), want) == 0;
+    }
+    // v0 encoder-night D3: wildcard probe naming the login (the game
+    // enumerates `*slogin`, never an exact probe). A bare "*" root scan
+    // stays pristine (brad2: phantom in root scans poisoned the config
+    // select); only patterns with a literal char that glob-match the
+    // login name gain the entry.
+    bool qpWildLoginProbe(const std::string &pattern)
+    {
+        if (pattern == "*" || pattern.empty())
+        {
+            return false;
+        }
+        bool literal = false;
+        for (char c : pattern)
+        {
+            if (c != '*' && c != '?')
+            {
+                literal = true;
+                break;
+            }
+        }
+        if (!literal)
+        {
+            return false;
+        }
+        return wildcardMatch(toLowerAscii(pattern), "pscd10088slogin");
+    }
+    // v0 encoder-night D3: bundled bootstrap login record (58 bytes,
+    // game-written valid Electro record; wire identity is still always
+    // ours via qpRewriteGameAuth). Served only when no FAKE_FILE and no
+    // machine-captured cache58 exist. Wire name = lobby identity; the
+    // record only unlocks the game's local decode/submit/send gates.
+    const std::vector<uint8_t> &qpBundledLoginBytes()
+    {
+        static const std::vector<uint8_t> bytes = {
+            0x17u, 0x2cu, 0x33u, 0x38u, 0x63u, 0x69u, 0x67u, 0x68u, 0x74u, 0x32u,
+            0xb5u, 0xdbu, 0x2eu, 0x0cu, 0x1fu, 0x48u, 0x00u, 0x00u, 0x03u, 0x0du,
+            0x06u, 0x11u, 0x45u, 0x6cu, 0x65u, 0x63u, 0x74u, 0x72u, 0x6fu, 0x10u,
+            0x3cu, 0x31u, 0x29u, 0x63u, 0x69u, 0x67u, 0x68u, 0xc6u, 0xa1u, 0xd7u,
+            0x2cu, 0x22u, 0x0eu, 0x11u, 0x18u, 0x72u, 0x69u, 0x67u, 0x68u, 0x74u,
+            0x20u, 0x45u, 0x6cu, 0x65u, 0x63u, 0x74u, 0x72u, 0x6fu};
+        return bytes;
+    }
+    // v0 encoder-night: any path inside the login dir (data file +
+    // icon.sys/view.ico written by the game's save dance).
+    bool qpLoginChildPath(const std::string &guestPath)
+    {
+        const std::string lower = toLowerAscii(guestPath);
+        const std::string want = "/pscd10088slogin/";
+        const size_t at = lower.find(want);
+        return at != std::string::npos && at + want.size() < lower.size();
+    }
+    // (g_qpPhantomFds declared ahead of sceMcClose, above.)
+    bool qpIsLoginDataHostPath(const std::filesystem::path &hostPath)
+    {
+        const std::string file = toLowerAscii(hostPath.filename().string());
+        const std::string parent = toLowerAscii(hostPath.parent_path().filename().string());
+        return file == "pscd10088slogin" && parent == "pscd10088slogin";
     }
 
     void sceMcGetDir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -823,6 +893,12 @@ namespace ps2_stubs
                     {
                         pattern = "*";
                     }
+                    // v0 encoder-night D2: visible probe log (which form
+                    // the game uses for the login check).
+                    std::fprintf(stderr,
+                                 " [MC] GetDir port=%d raw='%s' pat='%s' par='%s' wild=%d\n",
+                                 port, rawPath.c_str(), pattern.c_str(),
+                                 parentRel.string().c_str(), hasWildcard ? 1 : 0);
 
                     std::filesystem::path hostDir = getMcRootPath(port);
                     if (!parentRel.empty())
@@ -912,7 +988,8 @@ namespace ps2_stubs
                         if (port == 0 && qpLoginHookOn() &&
                             (toLowerAscii(pattern) == "pscd10088slogin" ||
                              toLowerAscii(parentRel.filename().string()) ==
-                                 "pscd10088slogin"))
+                                 "pscd10088slogin" ||
+                             qpWildLoginProbe(pattern)))
                         {
                             bool haveLogin = false;
                             for (const SceMcTblGetDir &built : entries)
@@ -926,6 +1003,9 @@ namespace ps2_stubs
                             }
                             if (!haveLogin)
                             {
+                                std::fprintf(stderr,
+                                             " [MC] QP login injected pat='%s' par='%s'\n",
+                                             pattern.c_str(), parentRel.string().c_str());
                                 const bool inner =
                                     toLowerAscii(parentRel.filename().string()) ==
                                     "pscd10088slogin";
@@ -1105,7 +1185,14 @@ namespace ps2_stubs
                     const std::string guestPath = normalizeGuestMcPathLocked(port, path);
                     const std::filesystem::path hostPath = guestMcPathToHostPath(port, guestPath);
                     std::error_code ec;
-                    if (std::filesystem::exists(hostPath, ec) && !ec)
+                    // v0 encoder-night: the game's save dance creates the
+                    // login dir; report success without touching the card.
+                    if (port == 0 && qpLoginHookOn() &&
+                        toLowerAscii(guestPath) == "/pscd10088slogin")
+                    {
+                        result = kMcResultSucceed;
+                    }
+                    else if (std::filesystem::exists(hostPath, ec) && !ec)
                     {
                         result = std::filesystem::is_directory(hostPath, ec) ? kMcResultSucceed : kMcResultDeniedPermit;
                     }
@@ -1151,27 +1238,58 @@ namespace ps2_stubs
                     std::error_code ec;
                     const bool create = (flags & PS2_FIO_O_CREAT) != 0u;
                     const bool exists = std::filesystem::exists(hostPath, ec) && !ec;
-                    // v0 option-0: serve the EA Login data file faked (card
-                    // never written; a real save is ignored for Quick Play
-                    // IDENTITY, never modified). A real file present passes
-                    // through untouched (its bytes keep the game's own
-                    // decode/validation intact; the net HLE still
-                    // overwrites the login buffers with our identity). Only
-                    // an absent file is served 58 zero bytes from a
-                    // tmpfile: brad3 proved zeros wedge the config select
-                    // (abort cfg-3 @6454 with SET0001 present), so zeros
-                    // are a last resort, not the default.
-                    if (port == 0 && qpLoginHookOn() && qpLoginDataPath(guestPath) &&
+                    // v0 encoder-night D2: visible open log (all paths;
+                    // opens are rare, reads/writes stay unlogged).
+                    std::fprintf(stderr,
+                                 " [MC] open port=%d guest='%s' creat=%d exists=%d\n",
+                                 port, guestPath.c_str(), create ? 1 : 0,
+                                 exists ? 1 : 0);
+                    // v0 encoder-night: serve the login dir's children faked
+                    // (card never written). Data file: host-side cache when
+                    // the dance captured one (valid bytes, auto-auth with
+                    // zero screens), else 58 zeros (game reads no-login and
+                    // shows sign-in, where the dance runs once). Real files
+                    // pass through untouched (identity still ours via the
+                    // wire rewrite). icon.sys/view.ico: empty tmpfiles so
+                    // the save dance's writes "succeed" and are discarded.
+                    if (port == 0 && qpLoginHookOn() &&
+                        (qpLoginDataPath(guestPath) || qpLoginChildPath(guestPath)) &&
                         !std::filesystem::exists(hostPath, ec))
                     {
+                        const bool isData = qpLoginDataPath(guestPath);
+                        std::vector<uint8_t> prefill;
+                        const char *src = "empty-child";
+                        if (isData)
+                        {
+                            if (ps2_net::qpCachedLoginBytes(prefill) && !prefill.empty())
+                            {
+                                src = "cache58";
+                            }
+                            else if (qpBundledLoginBytes().size() == kQpLoginDataBytes)
+                            {
+                                prefill = qpBundledLoginBytes();
+                                src = "bundled";
+                            }
+                            else
+                            {
+                                prefill.assign(kQpLoginDataBytes, 0u);
+                                src = "zeros";
+                            }
+                        }
+                        std::fprintf(stderr,
+                                     " [MC] QP login open guest='%s' data=%d src=%s n=%zu\n",
+                                     guestPath.c_str(), isData ? 1 : 0, src, prefill.size());
                         FILE *fake = std::tmpfile();
                         bool served = false;
                         if (fake)
                         {
-                            static const char zeros[kQpLoginDataBytes] = {};
-                            served = std::fwrite(zeros, 1u, kQpLoginDataBytes, fake) ==
-                                     kQpLoginDataBytes;
-                            std::rewind(fake);
+                            served = true;
+                            if (!prefill.empty())
+                            {
+                                served = std::fwrite(prefill.data(), 1u, prefill.size(), fake) ==
+                                         prefill.size();
+                                std::rewind(fake);
+                            }
                             if (served)
                             {
                                 result = allocateMcFdLocked(fake, port, hostPath);
@@ -1179,8 +1297,16 @@ namespace ps2_stubs
                             }
                             if (served)
                             {
-                                ps2_net::qpNoteLoginFaked();
-                                RUNTIME_LOG("[MC] QP login data served faked (58 zeros)");
+                                if (isData)
+                                {
+                                    g_qpPhantomFds.insert(result);
+                                    ps2_net::qpNoteLoginFaked();
+                                    RUNTIME_LOG("[MC] QP login data served faked");
+                                }
+                                else
+                                {
+                                    g_qpPhantomFds.insert(result);
+                                }
                             }
                             else
                             {
@@ -1483,6 +1609,22 @@ namespace ps2_stubs
                 if (!std::ferror(it->second.file))
                 {
                     std::fflush(it->second.file);
+                    // v0 encoder-night: capture the game's own encoded
+                    // login bytes (phantom data fd only; tmpfile sink is
+                    // discarded, card never written).
+                    if (g_qpPhantomFds.count(fd) != 0u)
+                    {
+                        const bool isData =
+                            qpIsLoginDataHostPath(it->second.hostPath);
+                        std::fprintf(stderr,
+                                     " [MC] QP login write fd=%d n=%d data=%d host='%s'\n",
+                                     fd, size, isData ? 1 : 0,
+                                     it->second.hostPath.string().c_str());
+                        if (isData)
+                        {
+                            ps2_net::qpNoteLoginBytes(src, static_cast<size_t>(size));
+                        }
+                    }
                 }
                 else
                 {
