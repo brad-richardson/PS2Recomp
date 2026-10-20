@@ -64,6 +64,29 @@ namespace ps2_net_protocol
     // own; the navigator jumps forward to rejoin it instead of timing
     // out on a screen the guest already left. Persona 4/0x2 and filter
     // 7/0x16 are the D1-calibrated pairs the phases already use.
+    // Menu IDs change before newly entered widgets accept input. Track
+    // observed state in guest ticks; repeated pad reads do not advance it.
+    struct QpNavMenuSettle
+    {
+        uint32_t main = 0u, sub = 0u;
+        uint64_t since = 0u, last = 0u;
+        bool seen = false;
+
+        void observe(uint32_t nextMain, uint32_t nextSub, uint64_t tick)
+        {
+            if (!seen || nextMain != main || nextSub != sub || tick < last)
+                since = tick;
+            main = nextMain;
+            sub = nextSub;
+            last = tick;
+            seen = true;
+        }
+        bool ready(uint32_t wantMain, uint32_t wantSub, uint64_t ticks) const
+        {
+            return seen && main == wantMain && sub == wantSub && last - since >= ticks;
+        }
+    };
+
     inline bool qpNavPersonaShowing(uint32_t menuMain, uint32_t menuSub)
     {
         return menuMain == 4u && menuSub == 0x2u;

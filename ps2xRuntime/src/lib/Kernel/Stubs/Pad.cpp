@@ -1176,6 +1176,7 @@ namespace ps2_stubs
             size_t idx = 0u;
             uint64_t stepStart = 0u;
             uint64_t lastFire = 0u;
+            ps2_net_protocol::QpNavMenuSettle menuSettle;
             uint64_t holdUntil = 0u;
             uint16_t holdMask = 0u;
             bool done = false;
@@ -1242,6 +1243,13 @@ namespace ps2_stubs
                 const QpNavStep &s = kQpNavRoute[i];
                 g_qpNav.gaps[i] = (i == 0u) ? qpNavMsToTicks(s.atMs)
                                             : qpNavMsToTicks(s.atMs - prevMs);
+                // Online steps use observed game state + settle below;
+                // the recorded human-input delays remain for legacy mode.
+                if (g_qpNav.onlineMode &&
+                    (std::strcmp(s.name, "wait-star") == 0 ||
+                     std::strcmp(s.name, "persona-pick") == 0 ||
+                     std::strcmp(s.name, "qm-entry") == 0))
+                    g_qpNav.gaps[i] = 0u;
                 g_qpNav.holds[i] = qpNavMsToTicks(s.holdMs);
                 if (g_qpNav.holds[i] < 6u && s.press != 0u)
                 {
@@ -1442,6 +1450,7 @@ namespace ps2_stubs
                 g_qpNav.lastFire = guestVsyncTick;
                 g_qpNav.holdMask = 0u;
                 g_qpNav.seenCreaCount = wm.creaCount;
+                g_qpNav.menuSettle = {};
                 std::fprintf(stderr, "[qpnav] online-arm creaCount=%llu at tick=%llu\n",
                              static_cast<unsigned long long>(wm.creaCount),
                              static_cast<unsigned long long>(guestVsyncTick));
@@ -1494,6 +1503,7 @@ namespace ps2_stubs
             const ps2_net::QpNavMilestones m = ps2_net::qpNavMilestones();
             const uint32_t menuMain = qpNavReadMenu(rdram, kQpNavMenuMain);
             const uint32_t menuSub = qpNavReadMenu(rdram, kQpNavMenuSub);
+            g_qpNav.menuSettle.observe(menuMain, menuSub, guestVsyncTick);
             // v0 encoder-night: per-vsync login prefill (the dialog
             // snapshots its display at open; net-event prefill may never
             // run before submit). Self-floored; online-mode only.
@@ -1571,6 +1581,24 @@ namespace ps2_stubs
                 std::fprintf(stderr, "QP-NAV abort %s (sess-conn-failed) at tick=%llu\n", s.name,
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;
+            }
+            // A menu ID appears before the new widget accepts input.
+            // Require stable game state for 30 ticks plus a 20-tick settle,
+            // rather than timing from the preceding synthetic button.
+            // Timeout and failure handling above still bound every wait.
+            if (g_qpNav.onlineMode)
+            {
+                constexpr uint64_t settleTicks = 30u + 20u;
+                const bool personaReady =
+                    m.gameAuth != 0u && g_qpNav.menuSettle.ready(4u, 2u, settleTicks);
+                if (std::strcmp(s.name, "wait-star") == 0 &&
+                    !(m.netwStar != 0u && personaReady))
+                    return;
+                if (std::strcmp(s.name, "persona-pick") == 0 && !personaReady)
+                    return;
+                if (std::strcmp(s.name, "qm-entry") == 0 &&
+                    !(m.pset != 0u && g_qpNav.menuSettle.ready(4u, 4u, settleTicks)))
+                    return;
             }
             // online-card-1: guest-outrun catch-up (before gate+phase:
             // the departed screen's gate/phase fails by construction, so

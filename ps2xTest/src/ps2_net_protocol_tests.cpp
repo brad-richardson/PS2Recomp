@@ -104,6 +104,28 @@ namespace
             t.IsFalse(qpNavFilterShowing(0u, 0u), "unreadable words: no jump");
         });
 
+        tc.Run("Quick Play waits for a stable entered screen, not repeated pad polls", [](TestCase &t)
+        {
+            ps2_net_protocol::QpNavMenuSettle state;
+            t.IsFalse(state.ready(4u, 2u, 50u), "unobserved state is not ready");
+            state.observe(4u, 2u, 100u);
+            for (int i = 0; i < 100; ++i) state.observe(4u, 2u, 100u);
+            t.IsFalse(state.ready(4u, 2u, 50u), "same-tick polls cannot bypass settle");
+            state.observe(4u, 2u, 149u);
+            t.IsFalse(state.ready(4u, 2u, 50u), "transition still settling");
+            state.observe(4u, 2u, 150u);
+            t.IsTrue(state.ready(4u, 2u, 50u), "stable persona state can accept input");
+            state.observe(3u, 2u, 151u);
+            state.observe(4u, 2u, 152u);
+            t.IsFalse(state.ready(4u, 2u, 50u), "intervening modal resets settle");
+            state.observe(4u, 4u, 220u);
+            t.IsFalse(state.ready(4u, 4u, 50u), "online main gets its own settle");
+            state.observe(4u, 4u, 270u);
+            t.IsTrue(state.ready(4u, 4u, 50u), "online main settles independently");
+            state.observe(4u, 4u, 10u);
+            t.IsFalse(state.ready(4u, 4u, 50u), "guest clock rewind resets settle");
+        });
+
         tc.Run("online-card-1: title detector gates the dance recovery", [](TestCase &t)
         {
             using ps2_net_protocol::qpNavTitleShowing;
