@@ -197,8 +197,13 @@ inline int directDonorFor(int type, int row, int stockEvent)
         return 1; // Snowdream Race keeps its native donor ev1 (proven)
     if (type == 0)
         return 0; // every Race cell rides the ev0 race shell + own world pin
+    if (type == 1 && row == 2)
+        return 7; // TRIAL (pipe-show-brad): Pipedream Showoff on Untracked's
+                  // ev7 slopestyle shell — ev11+PIPE world dies in loading
+                  // on Brad's card (0x80000080 loop, tick ~9416, 2/2 runs)
+                  // while the same cell is clean on a fresh card
     if (type == 1)
-        return 11; // every Showoff cell rides Pipe's ev11 shell + own world pin
+        return 11; // every other Showoff cell rides Pipe's ev11 shell + own world pin
     return stockEvent;
 }
 

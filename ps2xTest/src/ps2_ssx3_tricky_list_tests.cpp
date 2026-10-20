@@ -393,7 +393,7 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(p.ok && p.event == 0, "Pipedream Race donor ev0 (world PIPE)");
             t.Equals(std::string(p.map.archive), std::string("PIPE"), "Pipedream world pin");
             const DirectGoal ps = directGoalFor(pipe, pipe.opts[1]);
-            t.IsTrue(ps.ok && ps.event == 11, "Pipedream Showoff donor ev11");
+            t.IsTrue(ps.ok && ps.event == 7, "Pipedream Showoff donor ev7 (trial: ev11 dies on Brad card)");
             int pta = -1, pra = -1;
             t.IsTrue(directCellArgs(1, 2, pta, pra) && pta == 3 && pra == 2, "showoff pipe args (3,2)");
             const Course &aloha = kCourses[5];
