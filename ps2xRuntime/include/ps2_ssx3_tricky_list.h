@@ -597,19 +597,23 @@ inline void navBackOut(NavState &n, uint64_t tick)
     n.lastTick = tick;
 }
 
-// Direct tap, second leg: the guest is back at the fresh main menu, cursor
-// on the top row. Walk down to the Tricky Courses row and accept; the
-// main-menu accept hook serves the parked ask in the proven handler
-// context. Blind by design (the main menu is not a Map screen, so no view
-// check can run or complete this): 3 downs + Cross, then Done. A mistimed
-// walk leaves the ask parked; the serve timeout disarms it and the overlay
-// re-arms, so the player retries by hand.
-inline constexpr int kTrickyAcceptPresses = 4;
+// Direct tap, second leg: the guest is back at the main menu. Clamp the
+// cursor to the top with 5 ups (5 rows: wrap or clamp, both land top),
+// walk down 3 to the Tricky Courses row, and accept; the main-menu accept
+// hook serves the parked ask in the proven handler context. Blind by
+// design (the main menu is not a Map screen, so no view check can run or
+// complete this). Settles first: BackOut done fires as the Map screens go,
+// while the menu is still building presses into it get eaten (tap-gari5:
+// cursor reached Tricky but the Cross never accepted). A walk that still
+// misses leaves the ask parked; the serve timeout disarms it and the
+// overlay re-arms, so the player retries by hand.
+inline constexpr int kTrickyAcceptPresses = 9;
+inline constexpr uint64_t kTrickySettleTicks = 150;
 inline void navToTricky(NavState &n, uint64_t tick)
 {
     n = NavState{};
     n.phase = NavPhase::ToTricky;
-    n.releaseUntil = tick;
+    n.releaseUntil = tick + kTrickySettleTicks;
     n.lastTick = tick;
 }
 
@@ -1150,9 +1154,10 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         }
         return press(kPadTriangle);
     case NavPhase::ToTricky:
-        // Blind Tricky-accept walk (main menu, no view): 3 downs to the
-        // Tricky Courses row, Cross to accept. The main-menu accept hook
-        // serves the parked tap ask; Done only parks the wait.
+        // Blind Tricky-accept walk (main menu, no view): clamp top with 5
+        // ups, 3 downs to the Tricky Courses row, Cross to accept. The
+        // main-menu accept hook serves the parked tap ask; Done parks the
+        // wait for it.
         if (n.presses >= kTrickyAcceptPresses)
         {
             n.handedOff = false;
@@ -1162,7 +1167,9 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         }
         if (n.presses >= kTrickyAcceptPresses - 1)
             return pressAccept(kPadCross);
-        return press(kPadDown);
+        if (n.presses >= kTrickyAcceptPresses - 4)
+            return press(kPadDown);
+        return press(kPadUp);
     default:
         return abort();
     }

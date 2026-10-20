@@ -665,7 +665,7 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(o.mask, 0, "pad released");
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "phase Aborted"); });
 
-        tc.Run("ToTricky walks down-down-down-cross blind, then parks", [](TestCase &t)
+        tc.Run("ToTricky clamps top, walks down-down-down-cross, parks", [](TestCase &t)
                {
             NavState n;
             navToTricky(n, 0);
@@ -674,7 +674,7 @@ void register_ps2_ssx3_tricky_list_tests()
             std::vector<uint16_t> presses;
             uint16_t prevMask = 0;
             uint64_t tick = 0;
-            for (int i = 0; i < 900 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, v, tick, false, false);
                 if (o.mask != 0 && prevMask == 0)
@@ -683,13 +683,15 @@ void register_ps2_ssx3_tricky_list_tests()
                 ++tick;
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done by count");
-            t.Equals(presses.size(), 4u, "four presses");
-            if (presses.size() == 4)
+            t.Equals(presses.size(), 9u, "nine presses");
+            if (presses.size() == 9)
             {
-                t.Equals(presses[0], kPadDown, "down 1");
-                t.Equals(presses[1], kPadDown, "down 2");
-                t.Equals(presses[2], kPadDown, "down 3");
-                t.Equals(presses[3], kPadCross, "accept");
+                for (int k = 0; k < 5; ++k)
+                    t.Equals(presses[static_cast<size_t>(k)], kPadUp, "clamp up");
+                t.Equals(presses[5], kPadDown, "down 1");
+                t.Equals(presses[6], kPadDown, "down 2");
+                t.Equals(presses[7], kPadDown, "down 3");
+                t.Equals(presses[8], kPadCross, "accept");
             }
             t.IsFalse(n.handedOff, "Done parks the wait, not a handoff"); });
 
