@@ -119,6 +119,10 @@ namespace ps2_net
         // data+1 invariant), so vary the hold per delivery.
         uint32_t recvLagFor(uint32_t handle, uint32_t tick)
         {
+            // ONL4 fixed the unrung-slot stall with DMA-time dispatch.
+            // Direct entry drops ONL3's failed delay experiment; the
+            // reference navigator retains its previous receive timing.
+            if (qpNavMode() == 3) return 0u;
             return (handle * 7u + tick * 13u) % 17u;
         }
         // SEC1: bound per-handle held bytes. The hold accumulates socket
@@ -1275,12 +1279,13 @@ namespace ps2_net
         }
         out << direction << " host=" << hostTick << " guest=" << guestTick
             << " len=" << length << " ";
-        char item[4] = {};
-        for (uint32_t i = 0; i < length; ++i)
+        if (std::strncmp(direction, "tcp-", 4) == 0 && data && length >= 4u)
         {
-            std::snprintf(item, sizeof(item), "%02X", data ? data[i] : 0);
-            out << item;
+            out << "opcode=";
+            for (uint32_t i = 0; i < 4; ++i)
+                out << ((data[i] >= 32 && data[i] < 127) ? char(data[i]) : '?');
         }
+        else out << "opcode=datagram";
         out << "\n";
     }
 
@@ -3015,6 +3020,7 @@ namespace ps2_net
                             const ssize_t r = ::recv(fd, tmp, sizeof(tmp), 0);
                             if (r > 0)
                             {
+                                capture("tcp-host-rx", hostMillis(), tick, tmp, static_cast<uint32_t>(r));
                                 if (fresh)
                                 {
                                     g_recvHold[w4] = std::vector<uint8_t>(tmp, tmp + r);
