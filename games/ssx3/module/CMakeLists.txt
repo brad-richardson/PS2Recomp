@@ -20,6 +20,7 @@ add_library(ssx3_game_module STATIC
     src/tricky_menu.cpp
     src/tricky_records_patch.cpp
     src/stock_meter.cpp
+    src/tricky_intro.cpp
     src/lod_scale.cpp
     src/tricky_layer_tick.cpp
     src/vis_native.cpp
