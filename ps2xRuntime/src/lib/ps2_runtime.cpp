@@ -9258,6 +9258,17 @@ void PS2Runtime::run()
                     {
                         tkl::driveDisarm();
                         tkClearRide();
+                        // A parked tap ask dies with the drive it rode: the
+                        // user took over, so no accept hook may launch it.
+                        // Peek-guarded: a probe launch in flight (no ask
+                        // parked) keeps directActive set.
+                        tkl::ListState tkCancelAsk;
+                        bool tkCancelBackout = false, tkCancelWalked = false;
+                        if (tkl::directPeek(tkCancelAsk, tkCancelBackout, tkCancelWalked))
+                        {
+                            tkl::directDisarm();
+                            ps2_ssx3_tricky::state().directActive = false;
+                        }
                         const tkl::CourseOption &tkCancelGoal = tkl::listGoal(tkList);
                         std::fprintf(stderr,
                                      "[tklist] tick=%llu cancel edge fresh=0x%04x prev=0x%04x "

@@ -202,18 +202,20 @@ namespace
                              0); // diagnostic entry rides the Race option
     }
 
-    // Pad-glue service for overlay taps: a parked ask becomes a launch once
-    // its BackOut drive reports Done (the guest is back at the main menu,
-    // the only proven launch context). Game thread only; never fires
-    // mid-race (the app switch owns the pad there).
+    // Pad-glue service for overlay taps: BackOut returns the guest to the
+    // main menu, then the blind Tricky-accept walk re-accepts the Tricky
+    // row; the main-menu accept hook serves the parked ask in the proven
+    // handler context. Never launches from pad glue (wrong stack: the old
+    // direct launch died mid-load on a JALR null). Game thread only; never
+    // fires mid-race (the app switch owns the pad there).
     bool tkDirectServe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
     {
         namespace tkl = ps2_ssx3_tricky_list;
         if (!tkl::directKnob() || !ps2_ssx3_tricky::state().tricky)
             return false;
         tkl::ListState list;
-        bool backout = false;
-        if (!tkl::directPeek(list, backout))
+        bool backout = false, walked = false;
+        if (!tkl::directPeek(list, backout, walked))
             return false;
         if (ps2_ssx3_course::appUpdateFn(ram) == ps2_ssx3_course::kGameUpdate)
         {
@@ -226,6 +228,7 @@ namespace
             tkl::directDisarm();
             return false;
         }
+        const uint64_t tick = runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
         if (backout && !tkl::driveProgress().done)
         {
             if (tkl::directBump() > 1800)
@@ -237,9 +240,25 @@ namespace
             }
             return false;
         }
-        tkl::driveDisarm();
-        tkl::directDisarm();
-        return tkDirectStart(ram, ctx, runtime, list.sel, list.step == 1 ? list.mode : 0);
+        if (backout)
+        {
+            // BackOut reached the main menu: arm the accept walk.
+            tkl::driveDisarm();
+            tkl::driveArmToTricky(tick);
+            tkl::directSetWalked();
+            tkLog(runtime, "direct backout done; Tricky-accept walk armed");
+            return false;
+        }
+        // Walk armed or done: the accept hook serves the ask. Give up only
+        // if the walk mistimed and no accept ever comes.
+        if (tkl::directBump() > 3600)
+        {
+            tkLog(runtime, "direct accept walk missed; overlay re-armed");
+            tkl::directDisarm();
+            tkl::driveDisarm();
+            ps2_ssx3_tricky::state().directActive = false;
+        }
+        return false;
     }
 
     // preserve-fix-1: stock handles/count remain untouched. Only exact
@@ -337,6 +356,27 @@ namespace
                 // confirms the mode; tkLog below keeps the record).
                 // tricky-direct: probe the direct load; stop here if the
                 // briefing is reached (no hidden stock-menu walk).
+                // A parked overlay tap launches here: this accept handler
+                // is the proven direct-launch context (the probe rides it).
+                // The blind pad-glue launch is gone (wrong stack: JALR
+                // null); the tap's BackOut + accept walk ends here.
+                {
+                    namespace tkl = ps2_ssx3_tricky_list;
+                    tkl::ListState ask;
+                    bool askBackout = false, askWalked = false;
+                    if (tkl::directPeek(ask, askBackout, askWalked))
+                    {
+                        tkl::directDisarm();
+                        tkl::driveDisarm();
+                        if (tkDirectStart(rdram, ctx, runtime, ask.sel,
+                                          ask.step == 1 ? ask.mode : 0))
+                        {
+                            tkLog(runtime, "direct tap served at Tricky accept");
+                            return;
+                        }
+                        tkLog(runtime, "direct tap unstartable; stock continues");
+                    }
+                }
                 if (tkDirectProbe(rdram, ctx, runtime))
                     return;
             }

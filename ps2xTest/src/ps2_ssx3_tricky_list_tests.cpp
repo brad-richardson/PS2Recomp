@@ -386,16 +386,23 @@ void register_ps2_ssx3_tricky_list_tests()
             l.sel = 3;
             directArm(l, true);
             ListState got;
-            bool backout = false;
-            t.IsTrue(directPeek(got, backout), "peek sees the ask");
+            bool backout = false, walked = false;
+            t.IsTrue(directPeek(got, backout, walked), "peek sees the ask");
             t.Equals(got.sel, static_cast<uint8_t>(3), "list position survives");
             t.IsTrue(backout, "tap asks back out to the menu entry");
-            t.IsTrue(directPeek(got, backout), "peek does not consume");
+            t.IsFalse(walked, "fresh asks have not walked");
+            t.IsTrue(directPeek(got, backout, walked), "peek does not consume");
             directDisarm();
-            t.IsFalse(directPeek(got, backout), "disarm clears the ask");
+            t.IsFalse(directPeek(got, backout, walked), "disarm clears the ask");
             directArm(l, false);
-            t.IsTrue(directPeek(got, backout), "probe ask visible");
+            t.IsTrue(directPeek(got, backout, walked), "probe ask visible");
             t.IsFalse(backout, "probe path launches immediately");
+            directDisarm();
+            directArm(l, true);
+            directSetWalked();
+            t.IsTrue(directPeek(got, backout, walked), "walked ask visible");
+            t.IsFalse(backout, "walk clears the backout flag");
+            t.IsTrue(walked, "walk waits on the accept hook");
             directDisarm(); });
 
         tc.Run("navigator rides Mesablanca from the Event screen", [](TestCase &t)
@@ -656,6 +663,34 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(o.aborted, "aborts off the Map screens");
             t.Equals(o.mask, 0, "pad released");
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "phase Aborted"); });
+
+        tc.Run("ToTricky walks down-down-down-cross blind, then parks", [](TestCase &t)
+               {
+            NavState n;
+            navToTricky(n, 0);
+            FeView v; // main menu: never Map-live
+            v.mapLive = false;
+            std::vector<uint16_t> presses;
+            uint16_t prevMask = 0;
+            uint64_t tick = 0;
+            for (int i = 0; i < 900 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            {
+                NavOut o = navStep(n, v, tick, false, false);
+                if (o.mask != 0 && prevMask == 0)
+                    presses.push_back(o.mask);
+                prevMask = o.mask;
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done by count");
+            t.Equals(presses.size(), 4u, "four presses");
+            if (presses.size() == 4)
+            {
+                t.Equals(presses[0], kPadDown, "down 1");
+                t.Equals(presses[1], kPadDown, "down 2");
+                t.Equals(presses[2], kPadDown, "down 3");
+                t.Equals(presses[3], kPadCross, "accept");
+            }
+            t.IsFalse(n.handedOff, "Done parks the wait, not a handoff"); });
 
         tc.Run("a dead Event widget after accept is the handoff", [](TestCase &t)
                {

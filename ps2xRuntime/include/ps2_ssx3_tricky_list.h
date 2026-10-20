@@ -308,6 +308,8 @@ struct DirectAsk
     // (~30 s of pad reads); on expiry the ask is dropped and the overlay
     // re-arms so the player can retry by hand.
     bool backout = false;
+    bool walked = false; // BackOut done: the Tricky-accept walk is armed or
+                         // done; the ask now waits on the main-menu accept hook
     int frames = 0;
 };
 
@@ -330,10 +332,11 @@ inline void directArm(const ListState &list, bool backout)
     a.pending = true;
     a.list = list;
     a.backout = backout;
+    a.walked = false;
     a.frames = 0;
 }
 
-inline bool directPeek(ListState &list, bool &backout)
+inline bool directPeek(ListState &list, bool &backout, bool &walked)
 {
     std::lock_guard<std::mutex> lock(directAskMu());
     const DirectAsk &a = directAsk();
@@ -341,7 +344,18 @@ inline bool directPeek(ListState &list, bool &backout)
         return false;
     list = a.list;
     backout = a.backout;
+    walked = a.walked;
     return true;
+}
+
+// Game thread: BackOut reached the main menu. The accept walk takes over;
+// the ask now waits on the main-menu accept hook (proven handler context).
+inline void directSetWalked()
+{
+    std::lock_guard<std::mutex> lock(directAskMu());
+    DirectAsk &a = directAsk();
+    a.backout = false;
+    a.walked = true;
 }
 
 inline int directBump()
@@ -481,6 +495,7 @@ enum class NavPhase : uint8_t
     ToEvent,  // step the event row, X to accept
     Accept,   // wait for the guest to leave the Map screens (loading)
     BackOut,  // user Triangle: back out until the Map screens are left
+    ToTricky, // direct tap: blind Tricky-accept walk on the fresh main menu
     Done,     // handed off (Accept) or backed out (BackOut)
     Aborted,  // budget/view failure; pad released, overlay stays open
 };
@@ -552,6 +567,8 @@ inline const char *navPhaseName(NavPhase p)
         return "Accept";
     case NavPhase::BackOut:
         return "BackOut";
+    case NavPhase::ToTricky:
+        return "ToTricky";
     case NavPhase::Done:
         return "Done";
     case NavPhase::Aborted:
@@ -586,6 +603,22 @@ inline void navBackOut(NavState &n, uint64_t tick)
 {
     n = NavState{};
     n.phase = NavPhase::BackOut;
+    n.releaseUntil = tick;
+    n.lastTick = tick;
+}
+
+// Direct tap, second leg: the guest is back at the fresh main menu, cursor
+// on the top row. Walk down to the Tricky Courses row and accept; the
+// main-menu accept hook serves the parked ask in the proven handler
+// context. Blind by design (the main menu is not a Map screen, so no view
+// check can run or complete this): 3 downs + Cross, then Done. A mistimed
+// walk leaves the ask parked; the serve timeout disarms it and the overlay
+// re-arms, so the player retries by hand.
+inline constexpr int kTrickyAcceptPresses = 4;
+inline void navToTricky(NavState &n, uint64_t tick)
+{
+    n = NavState{};
+    n.phase = NavPhase::ToTricky;
     n.releaseUntil = tick;
     n.lastTick = tick;
 }
@@ -632,11 +665,12 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         return out;
     };
     // Quick-load: the guest tick jumped back. Re-drive from the Sync phase
-    // (BackOut keeps backing out); the overlay re-opens from guest state.
+    // (BackOut keeps backing out, ToTricky keeps walking); the overlay
+    // re-opens from guest state.
     if (tick < n.lastTick && n.phase != NavPhase::Idle && n.phase != NavPhase::Done &&
         n.phase != NavPhase::Aborted)
     {
-        if (n.phase != NavPhase::BackOut)
+        if (n.phase != NavPhase::BackOut && n.phase != NavPhase::ToTricky)
             n.phase = NavPhase::Sync;
         n.hold = 0;
         n.releaseUntil = 0;
@@ -701,7 +735,11 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             out.done = true;
             return out;
         }
-        return abort();
+        // The accept walk runs on the main menu (never a Map screen):
+        // keep pressing blind; the press count in the switch completes it.
+        // Every other off-Map phase aborts here.
+        if (n.phase != NavPhase::ToTricky)
+            return abort();
     }
     if (tick < n.settleUntil)
         return out;
@@ -1121,6 +1159,20 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             return out;
         }
         return press(kPadTriangle);
+    case NavPhase::ToTricky:
+        // Blind Tricky-accept walk (main menu, no view): 3 downs to the
+        // Tricky Courses row, Cross to accept. The main-menu accept hook
+        // serves the parked tap ask; Done only parks the wait.
+        if (n.presses >= kTrickyAcceptPresses)
+        {
+            n.handedOff = false;
+            n.phase = NavPhase::Done;
+            out.done = true;
+            return out;
+        }
+        if (n.presses >= kTrickyAcceptPresses - 1)
+            return pressAccept(kPadCross);
+        return press(kPadDown);
     default:
         return abort();
     }
@@ -1483,6 +1535,20 @@ inline void driveArmBackOut(uint64_t tick)
     d.stallPresses = -1;
     d.stallSince = 0u;
     navBackOut(d.nav, tick);
+}
+
+// Game thread: BackOut reached the fresh main menu. Walk down to the
+// Tricky Courses row and accept it; the accept hook serves the parked tap.
+inline void driveArmToTricky(uint64_t tick)
+{
+    Drive &d = drive();
+    std::lock_guard<std::mutex> lock(d.mu);
+    d.armed = true;
+    d.backOut = false;
+    d.event = -1;
+    d.stallPresses = -1;
+    d.stallSince = 0u;
+    navToTricky(d.nav, tick);
 }
 
 // Render thread: disarm (overlay closed, user took over, or Done consumed).
