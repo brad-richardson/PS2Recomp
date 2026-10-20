@@ -989,24 +989,11 @@ namespace ps2_stubs
             return v;
         }
 
-        // ONL11 addendum: main-menu "Online" -> "Quick Play" label
-        // (online mode only). D1 RAM survey: the menu item is the
-        // string-handle slot 0x5AB2B4 {text_ptr, len}; at menu time it
-        // holds {0x540510, 7} = UTF-16 "Online". No instance has inline
-        // room for 10 chars, so the handle is redirected at its own +8
-        // slack (zeros at every surveyed tick). Verify everything: any
-        // mismatch -> skip loudly, stock text, zero corruption risk.
-        // Re-applied on sight (title + main menu) because the table
-        // rebuilds per screen (char-select clears it). Same font (same
-        // renderer); narrower than "Conquer The Mountain".
-        // f3 lesson: the handle page is a per-screen pool — a patched
-        // handle left in place goes stale into submenu screens (the
-        // dance stuck at char select). Two guards: (1) patch only when
-        // all six menu handles match (a submenu reusing one slot never
-        // replicates the set); (2) restore stock + zero the text when
-        // the menu is left while our patch is in place.
-        constexpr uint32_t kQpLabelSlot = 0x5AB2B4u;
-        constexpr uint32_t kQpLabelStockPtr = 0x540510u;
+        // Main-menu handles and text relocate after rebuilding the menu.
+        // Match the Online text + nearby Main Menu header, then use only
+        // verified zero slack. Remember the original handle for restoration.
+        uint32_t g_qpLabelSlot = 0u;
+        uint32_t g_qpLabelStockPtr = 0u;
         constexpr uint32_t kQpLabelStockLen = 7u;
         // online-stock-2 (Brad 10-17): "Quick Play (Alpha)". The handle
         // slots sit 0x100 apart, so the +8 slack spans 248 bytes; the 38
@@ -1014,20 +1001,6 @@ namespace ps2_stubs
         // stayed zero across the menu in the lane's survey boot.
         constexpr uint32_t kQpLabelNewLen = 19u; // "Quick Play (Alpha)" + NUL
         constexpr uint32_t kQpLabelBytes = 38u;
-        struct QpLabelHandle
-        {
-            uint32_t slot;
-            uint32_t ptr;
-            uint32_t len;
-        };
-        constexpr QpLabelHandle kQpLabelSet[6] = {
-            {0x5AB0B4u, 0x543140u, 10u}, // Main Menu (header)
-            {0x5AB2B4u, 0x540510u, 7u},  // Online (the item)
-            {0x5AB3B4u, 0x543120u, 9u},  // Previews
-            {0x5AB4B4u, 0x543100u, 11u}, // Multi Play
-            {0x5AB5B4u, 0x549B40u, 21u}, // Conquer The Mountain
-            {0x5AB6B4u, 0x5430E0u, 13u}, // Single Event
-        };
         bool qpNavReadBytes(uint8_t *rdram, uint32_t addr, uint8_t *out, uint32_t n)
         {
             if (!rdram || !out || addr == 0u || (addr & PS2_RAM_MASK) + n > PS2_RAM_SIZE)
@@ -1046,20 +1019,21 @@ namespace ps2_stubs
             std::memcpy(rdram + (addr & PS2_RAM_MASK), in, n);
             return true;
         }
-        // The full six-handle set must match: a submenu screen reusing
-        // one pool slot never replicates the menu's set (f3 lesson).
-        bool qpNavLabelSetMatches(uint8_t *rdram)
+        bool qpNavLabelHeaderNear(uint8_t *rdram, uint32_t slot)
         {
-            for (uint32_t i = 0u; i < 6u; ++i)
+            static const uint8_t headerText[20] = {
+                'M', 0, 'a', 0, 'i', 0, 'n', 0, ' ', 0,
+                'M', 0, 'e', 0, 'n', 0, 'u', 0, 0, 0};
+            for (int offset = -0x600; offset <= 0x600; offset += 0x100)
             {
-                const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSet[i].slot);
-                const uint32_t len = qpNavReadMenu(rdram, kQpLabelSet[i].slot + 4u);
-                if (ptr != kQpLabelSet[i].ptr || len != kQpLabelSet[i].len)
-                {
-                    return false;
-                }
+                const uint32_t header = slot + offset;
+                const uint32_t ptr = qpNavReadMenu(rdram, header);
+                if (ptr != 0u && ptr <= PS2_RAM_SIZE - sizeof(headerText) &&
+                    qpNavReadMenu(rdram, header + 4u) == 10u &&
+                    std::memcmp(rdram + ptr, headerText, sizeof(headerText)) == 0)
+                    return true;
             }
-            return true;
+            return false;
         }
         void qpNavPatchMenuLabel(uint8_t *rdram, uint64_t tick)
         {
@@ -1068,29 +1042,34 @@ namespace ps2_stubs
             static const uint8_t kNewText[kQpLabelBytes] = {
                 'Q', 0, 'u', 0, 'i', 0, 'c', 0, 'k', 0, ' ', 0, 'P', 0, 'l', 0, 'a', 0, 'y', 0,
                 ' ', 0, '(', 0, 'A', 0, 'l', 0, 'p', 0, 'h', 0, 'a', 0, ')', 0, 0,   0};
-            const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSlot);
-            const uint32_t len = qpNavReadMenu(rdram, kQpLabelSlot + 4u);
-            if (ptr == kQpLabelSlot + 8u && len == kQpLabelNewLen)
-            {
-                return; // already patched
-            }
-            if (ptr != kQpLabelStockPtr || len != kQpLabelStockLen || !qpNavLabelSetMatches(rdram))
-            {
-                static bool logged = false;
-                if (!logged)
-                {
-                    logged = true;
-                    std::fprintf(stderr,
-                                 "[qpnav] label: menu set not stock (ptr=0x%x len=%u), skipped\n",
-                                 ptr, len);
-                }
+            if (g_qpLabelSlot != 0u &&
+                qpNavReadMenu(rdram, g_qpLabelSlot) == g_qpLabelSlot + 8u &&
+                qpNavReadMenu(rdram, g_qpLabelSlot + 4u) == kQpLabelNewLen)
                 return;
+            // The surveyed frontend pool spans this arena. Match contents
+            // rather than a particular allocation; reject ambiguous matches.
+            uint32_t slot = 0u;
+            for (uint32_t at = 0x500000u; at < 0x600000u; at += 4u)
+            {
+                if (qpNavReadMenu(rdram, at + 4u) != kQpLabelStockLen) continue;
+                const uint32_t ptr = qpNavReadMenu(rdram, at);
+                if (ptr == 0u || ptr > PS2_RAM_SIZE - sizeof(kStockText) ||
+                    std::memcmp(rdram + ptr, kStockText, sizeof(kStockText)) != 0 ||
+                    !qpNavLabelHeaderNear(rdram, at)) continue;
+                bool zero = true;
+                for (uint32_t n = 0; n < kQpLabelBytes; ++n)
+                    zero = zero && rdram[at + 8u + n] == 0u;
+                if (!zero) continue;
+                if (slot != 0u) return;
+                slot = at;
             }
+            if (slot == 0u) return;
+            const uint32_t ptr = qpNavReadMenu(rdram, slot);
             uint8_t text[14] = {};
             uint8_t slack[kQpLabelBytes] = {};
             if (!qpNavReadBytes(rdram, ptr, text, sizeof(text)) ||
                 std::memcmp(text, kStockText, sizeof(text)) != 0 ||
-                !qpNavReadBytes(rdram, kQpLabelSlot + 8u, slack, sizeof(slack)))
+                !qpNavReadBytes(rdram, slot + 8u, slack, sizeof(slack)))
             {
                 std::fprintf(stderr, "[qpnav] label: text verify failed, skipped\n");
                 return;
@@ -1103,18 +1082,20 @@ namespace ps2_stubs
                     return;
                 }
             }
-            if (!qpNavWriteBytes(rdram, kQpLabelSlot + 8u, kNewText, sizeof(kNewText)))
+            if (!qpNavWriteBytes(rdram, slot + 8u, kNewText, sizeof(kNewText)))
             {
                 return;
             }
             uint8_t handle[8] = {};
-            const uint32_t newPtr = kQpLabelSlot + 8u;
+            const uint32_t newPtr = slot + 8u;
             std::memcpy(handle, &newPtr, 4u);
             std::memcpy(handle + 4u, &kQpLabelNewLen, 4u);
-            if (!qpNavWriteBytes(rdram, kQpLabelSlot, handle, sizeof(handle)))
+            if (!qpNavWriteBytes(rdram, slot, handle, sizeof(handle)))
             {
                 return;
             }
+            g_qpLabelSlot = slot;
+            g_qpLabelStockPtr = ptr;
             std::fprintf(stderr, "[qpnav] label: main-menu Online -> Quick Play (Alpha) at tick=%llu\n",
                          static_cast<unsigned long long>(tick));
         }
@@ -1124,24 +1105,27 @@ namespace ps2_stubs
         // ours) means no screen claims the slot.
         void qpNavRestoreMenuLabel(uint8_t *rdram, uint64_t tick)
         {
-            const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSlot);
-            const uint32_t len = qpNavReadMenu(rdram, kQpLabelSlot + 4u);
-            if (ptr != kQpLabelSlot + 8u || len != kQpLabelNewLen)
+            if (g_qpLabelSlot == 0u) return;
+            const uint32_t ptr = qpNavReadMenu(rdram, g_qpLabelSlot);
+            const uint32_t len = qpNavReadMenu(rdram, g_qpLabelSlot + 4u);
+            if (ptr != g_qpLabelSlot + 8u || len != kQpLabelNewLen)
             {
                 return;
             }
             static const uint8_t kZero[kQpLabelBytes] = {};
-            if (!qpNavWriteBytes(rdram, kQpLabelSlot + 8u, kZero, sizeof(kZero)))
+            if (!qpNavWriteBytes(rdram, g_qpLabelSlot + 8u, kZero, sizeof(kZero)))
             {
                 return;
             }
             uint8_t handle[8] = {};
-            std::memcpy(handle, &kQpLabelStockPtr, 4u);
+            std::memcpy(handle, &g_qpLabelStockPtr, 4u);
             std::memcpy(handle + 4u, &kQpLabelStockLen, 4u);
-            if (!qpNavWriteBytes(rdram, kQpLabelSlot, handle, sizeof(handle)))
+            if (!qpNavWriteBytes(rdram, g_qpLabelSlot, handle, sizeof(handle)))
             {
                 return;
             }
+            g_qpLabelSlot = 0u;
+            g_qpLabelStockPtr = 0u;
             std::fprintf(stderr, "[qpnav] label: restored stock at tick=%llu\n",
                          static_cast<unsigned long long>(tick));
         }
