@@ -24,6 +24,20 @@ namespace ps2_net_protocol
         return mode == 2 && !armed && count != 0u && count != seen;
     }
 
+    // resume-ios-1 Part 2: an online session is ACTIVE only while paired or
+    // racing — never merely because lobby/buddy TCP sockets are still open
+    // (the game leaves those up after backing out of Online; every later
+    // background autosave was refused for Brad's 10-19 sessions). raceLinkUp
+    // is any gmlk link up (every race mode creates one); a +ses pairing that
+    // arrived after the last link teardown is matchup staging. Generation
+    // counters (not the token string) so a post-race teardown reads inactive.
+    inline bool onlineSessionActive(bool raceLinkUp, uint64_t sesGen, uint64_t sesGenAtDest)
+    {
+        if (raceLinkUp)
+            return true;
+        return sesGen != sesGenAtDest;
+    }
+
     // ONL10 navigator cancel gate (Brad 10-17, live on iOS): only a new
     // press cancels. Buttons already held when the navigator armed (the
     // Cross that chose Online, still down at netw/crea) are ignored until

@@ -265,6 +265,23 @@ namespace
             ::unsetenv("PS2X_NET");
             ::unsetenv("PS2X_NET_SERVER");
         });
+        tc.Run("resume-ios-1 Part 2: session active only while paired or racing",
+               [](TestCase &t)
+               {
+                   using ps2_net_protocol::onlineSessionActive;
+                   t.IsFalse(onlineSessionActive(false, 0u, 0u),
+                             "fresh host (menus-only visit, idle sockets) inactive");
+                   t.IsTrue(onlineSessionActive(true, 0u, 0u),
+                            "race link up reads active");
+                   t.IsTrue(onlineSessionActive(true, 3u, 3u),
+                            "race link up wins over settled pairing");
+                   t.IsTrue(onlineSessionActive(false, 1u, 0u),
+                            "fresh +ses pairing (matchup staging) reads active");
+                   t.IsFalse(onlineSessionActive(false, 1u, 1u),
+                             "post-race link teardown reads inactive");
+                   t.IsTrue(onlineSessionActive(false, 2u, 1u),
+                            "re-pair after teardown reads active");
+               });
     }
 }
 

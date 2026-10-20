@@ -130,6 +130,13 @@ namespace ps2_net
         constexpr size_t kRecvHoldCap = 256u * 1024u;
         std::map<uint32_t, std::vector<uint8_t>> g_recvHold;
         std::atomic<bool> g_lockstepLink{false};  // any gmlk link up (ONL5-P3)
+        // resume-ios-1 Part 2: +ses generation vs the generation at the last
+        // link teardown. A pairing arranged after the last teardown is matchup
+        // staging (active); a teardown after the last pairing is post-race or
+        // back-out teardown (inactive). Idle lobby/buddy sockets never move
+        // these, so backing out of Online reads inactive.
+        std::atomic<uint64_t> g_sesGen{0u};
+        std::atomic<uint64_t> g_sesGenAtDest{0u};
         std::map<uint32_t, uint32_t> g_recvReady;
 
         struct PingReq
@@ -1058,10 +1065,13 @@ namespace ps2_net
     bool sessionActive()
     {
 #if PS2_NET_HAVE_POSIX_SOCKETS
-        if (g_lockstepLink.load(std::memory_order_acquire))
-            return true;
-        std::lock_guard<std::mutex> lock(g_sockMutex);
-        return !g_sockets.empty();
+        // resume-ios-1 Part 2: active only while paired or racing. Open
+        // lobby/buddy sockets alone (the game's steady state after backing
+        // out of Online) must not refuse background autosaves.
+        return ps2_net_protocol::onlineSessionActive(
+            g_lockstepLink.load(std::memory_order_acquire),
+            g_sesGen.load(std::memory_order_acquire),
+            g_sesGenAtDest.load(std::memory_order_acquire));
 #else
         return false;
 #endif
@@ -2166,6 +2176,10 @@ namespace ps2_net
                     if (method == 31u)
                     {
                         g_p2pLink.erase(w4);
+                        // resume-ios-1 Part 2: link teardown ends the pairing
+                        // (post-race or staging teardown reads inactive).
+                        g_sesGenAtDest.store(g_sesGen.load(std::memory_order_relaxed),
+                                             std::memory_order_relaxed);
                         g_lockstepLink.store(!g_p2pLink.empty());
                         if (g_p2pLink.empty())
                             g_linkForcedDown.store(false);
@@ -2776,6 +2790,9 @@ namespace ps2_net
                                         return {};
                                     };
                                     g_qpSes.store(tick, std::memory_order_relaxed);
+                                    // resume-ios-1 Part 2: a pairing is arranged (matchup
+                                    // staging counts as active until link teardown).
+                                    g_sesGen.fetch_add(1u, std::memory_order_relaxed);
                                     g_sesToken = field("SESSTOK");
                                     if (g_sesToken.empty()) g_sesToken = field("TOKEN");
                                     g_relayToken.clear();
