@@ -8355,7 +8355,7 @@ void PS2Runtime::run()
     bool tkOpen = false;
     int tkOpenDeb = 0;  // consecutive on-target frames (open at 4)
     int tkShutDeb = 0;  // consecutive off-target frames (close at 12)
-    bool tkLatchedOn = false; // reopen needs a NEW Map entry (stale words can't)
+    bool tkLatchedOn = false; // re-arm on a new Map entry or completed Tricky exit
     uint64_t tkLatchGen = 0;
     uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
     std::vector<int64_t> tkDown; // touch ids currently on the list
@@ -9275,6 +9275,12 @@ void PS2Runtime::run()
             // completes here so the done path below can close the overlay.
             tkl::driveWatchdog(tkTick);
             const tkl::DriveProgress tkProgEarly = tkl::driveProgress();
+            // A direct launch never visits Map. A completed mode exit
+            // therefore re-arms the host picker without inventing a Map
+            // generation or letting stale Map words reopen it mid-race.
+            if (tkl::directKnob() && !ps2_ssx3_tricky::state().tricky &&
+                !ps2_ssx3_tricky::state().directActive)
+                tkLatchedOn = false;
             const bool tkTarget = tkl::overlayTarget(
                 tkMapLive, tkView.screen, tkView.row, tkLatchedOn,
                 ps2_ssx3_tricky::state().mapEntries, tkLatchGen,
@@ -9641,7 +9647,6 @@ void PS2Runtime::run()
                             continue;
                         tkDown.push_back(tkts[i].id);
                         if (!tkOpen || tkHandled) continue;
-                        tkHandled = true;
                         const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
                         // A miss registers but never consumes the frame's
                         // action; after one tap acts, the rest of the frame
@@ -9653,6 +9658,7 @@ void PS2Runtime::run()
                         if (!tkWillAct || tkActed)
                             continue;
                         tkActed = true;
+                        tkHandled = true;
                         if (tkList.step == 0)
                         {
                             if (hit >= 0 && hit <= 9)
@@ -9693,14 +9699,10 @@ void PS2Runtime::run()
             }
             else
             {
-                // F05: a parked direct ask (the overlay closed at arm time)
-                // stays cancellable while the BackOut/accept walk runs: a
-                // fresh physical Triangle edge, or a fresh Previous tap,
-                // disarms the ask + drive before the accept hook serves it.
-                // Walk-injected presses merge on the game thread and never
-                // appear in ds1TrueRaw, so the walk cannot cancel itself.
-                // Peek-guarded: with no ask parked this is a no-op and the
-                // press/tap stays with the guest.
+                // F05: after the picker closes, a fresh Triangle/Previous
+                // may withdraw a request only until the FE boundary takes
+                // it. Consumption and cancellation share one mailbox lock.
+                // With no pending request, input stays with the guest.
                 const uint16_t tkClosedEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
                 bool tkClosedPrevTap = false;
                 {
@@ -9725,13 +9727,11 @@ void PS2Runtime::run()
                 }
                 if ((tkClosedEdge & ps2x::vpad::kTriangle) != 0u || tkClosedPrevTap)
                 {
-                    tkl::ListState tkClosedAsk;
-                    bool tkClosedBackout = false, tkClosedWalked = false;
-                    if (tkl::directPeek(tkClosedAsk, tkClosedBackout, tkClosedWalked))
+                    if (ps2_ssx3_fe_launch::cancelPending(tkTick))
                     {
-                        tkl::directDisarm();
                         tkl::driveDisarm();
                         ps2_ssx3_tricky::state().directActive = false;
+                        tkLatchedOn = false;
                         std::fprintf(stderr, "[tklist] tick=%llu direct ask cancelled (%s, closed)\n",
                                      static_cast<unsigned long long>(tkTick),
                                      tkClosedPrevTap ? "previous tap" : "triangle");

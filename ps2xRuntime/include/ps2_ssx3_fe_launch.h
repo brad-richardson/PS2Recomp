@@ -76,6 +76,17 @@ inline void note(const char *stage, uint64_t tick)
     std::lock_guard<std::mutex> lock(m.mutex);
     if (m.active) logLocked(m, stage, tick);
 }
+// Cancellation and guest consumption compete under the same lock. Once
+// consumed, the native transition owns the request and cannot be withdrawn.
+inline bool cancelPending(uint64_t tick)
+{
+    auto &m = mailbox();
+    std::lock_guard<std::mutex> lock(m.mutex);
+    if (!m.pending) return false;
+    logLocked(m, "cancelled-before-consume", tick);
+    m.active = m.pending = false;
+    return true;
+}
 inline void loading(uint64_t tick)
 {
     auto &m = mailbox();

@@ -239,6 +239,19 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(fe::mailbox().injectedPresses, uint64_t(0), "new request starts clean");
             fe::finish(0);
             t.IsFalse(fe::take(r), "exit cancels pending request"); });
+        tc.Run("FE cancellation only withdraws an unconsumed request", [&](TestCase &t)
+               {
+            namespace fe = ps2_ssx3_fe_launch;
+            fe::finish(0);
+            t.IsTrue(fe::request(7, 3, 2, 1), "pending request accepted");
+            t.IsTrue(fe::cancelPending(0), "cancel wins before guest consume");
+            fe::Request r;
+            t.IsFalse(fe::take(r), "cancelled request cannot reach guest");
+            t.IsTrue(fe::request(11, 6, 5, 1), "new request accepted after cancellation");
+            t.IsTrue(fe::take(r), "guest takes new request");
+            t.IsFalse(fe::cancelPending(0), "cannot cancel native transition after consume");
+            t.IsFalse(fe::request(0, 0, 0, 1), "consumed request stays active until exit");
+            fe::finish(0); });
         tc.Run("course table: Tricky order, targets and dual-type defaults", [](TestCase &t)
                {
             t.Equals(kCourseCount, 10u, "ten courses");

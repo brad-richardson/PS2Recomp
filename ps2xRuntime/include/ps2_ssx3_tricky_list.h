@@ -41,8 +41,8 @@ inline bool knob()
     return on;
 }
 
-// The DIRECT knob (default off until polished; the navigator stays the
-// fallback): overlay taps ride straight into the donor event instead of
+// The DIRECT knob (default off until polished; the navigator is the explicit
+// off/reference path): overlay taps ride straight into the donor event instead of
 // driving the stock screens. Requires Tricky mode, like the overlay itself.
 // Cached: knobs never change mid-run.
 inline bool directKnob()
@@ -211,8 +211,8 @@ inline int directDonorFor(int type, int row, int stockEvent)
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
 {
     DirectGoal d;
-    // Donor cell + accept args by (type-list, row); unknown cells (Jam row 3,
-    // Freeride rows, pad rows) keep the navigator.
+    // Donor cell + accept args by (type-list, row). Unknown cells fail closed;
+    // the DIRECT-on picker never falls back to the navigator.
     if (!directCellArgs(goal.type, goal.row, d.typeArg, d.rulesArg))
         return d;
     // Donor shell: clean-shell override, else the table's stock donor.

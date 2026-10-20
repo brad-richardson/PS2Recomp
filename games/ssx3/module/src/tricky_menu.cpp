@@ -187,14 +187,22 @@ namespace
         return tkDirectContinue(ram, ctx, runtime);
     }
 
-    void tkDirectProbe()
+    void tkDirectProbe(PS2Runtime *runtime)
     {
         namespace tkl = ps2_ssx3_tricky_list;
         const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
         if (!tkl::directKnob() || !probe || std::strcmp(probe, "1") != 0) return;
         const char *course = std::getenv("PS2X_SSX3_TRICKY_DIRECT_COURSE");
+        const int sel = tkl::directCourseByCode(course ? course : "GARI");
+        const char *opt = std::getenv("PS2X_SSX3_TRICKY_DIRECT_OPT");
+        if (sel < 0 || (opt && std::strcmp(opt, "0") != 0 && std::strcmp(opt, "1") != 0))
+        {
+            tkLog(runtime, "direct probe: unknown course or option; request rejected");
+            return;
+        }
         tkl::ListState list;
-        list.sel = static_cast<uint8_t>(tkl::directCourseByCode(course ? course : "GARI"));
+        list.sel = static_cast<uint8_t>(sel);
+        list.mode = opt && std::strcmp(opt, "1") == 0 ? 1 : 0;
         tkl::requestDirect(list);
     }
 
@@ -331,7 +339,7 @@ namespace
                 modeSet(rdram, true, msg);
                 // toast-audit-1: no mode toast (the Tricky list overlay itself
                 // confirms the mode; tkLog below keeps the record).
-                tkDirectProbe();
+                tkDirectProbe(runtime);
 
             }
             else if (s.tricky)
