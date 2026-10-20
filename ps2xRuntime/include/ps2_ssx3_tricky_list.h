@@ -56,11 +56,11 @@ inline bool directKnob()
 // ---- Course table (Tricky order; Part 1 §1 + receipts/ssx3-events-nav.txt)
 //
 // Each course names its SSX 3 event id and, per event-type option, the
-// (peak, mode-type, list row) the navigator must accept. Dual-mode courses
-// (Elysium, Aloha, Megaplex) offer the race-list row and the freestyle-list
+// (peak, mode-type, list row) the navigator must accept. Every course is
+// dual-mode (Tricky-authentic): the race-list row and the freestyle-list
 // row, picked on a second step (Part 2 amendment: no in-row toggle).
-// Mode labels are SSX 3's own event-type names: the singles' labels match
-// the stock pane headers. The Jam rows' donor events read discipline 6
+// Mode labels are Tricky's own event names (Race / Showoff); the drive
+// targets keep the stock SSX 3 rows. The Jam rows' donor events read discipline 6
 // (event table 23x8B at ISO 0x435820 = RAM 0x442820: events 14/15/16;
 // enum 2 race, 3 slopestyle, 4 big air, 5 halfpipe, 6 backcountry per
 // ps2_ssx3_course_manifest.h), but Brad 10-16: they play as trick events,
@@ -105,32 +105,35 @@ inline constexpr Course kCourses[10] = {
     // share P1 Race row 0 (ev0, proven fresh by Garibaldi Race); all
     // Slopestyle options share P1 Free row 3 (ev14, proven fresh by Aloha
     // Slopestyle): same (cell, rules-kind) pairings as the validated legs,
-    // only the world/name swap target changes. Each mapped option carries
-    // map{loadedEv, ownArchive, ownName}; the five native rows stay
-    // unmapped. Archive codes verified live (preview course() gate, except
-    // MEGA which ships in preset/worlds); names are display strings
-    // (<= 31 chars).
-    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 1, 3, {14, "GARI", "Garibaldi"}}}, 2, {"Race", "Slopestyle"}},
-    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 1, 3, {14, "SNOW", "Snowdream"}}}, 2, {"Race", "Slopestyle"}},
-    {"Elysium Alps", "ELYS", 16, {{0, 0, 0, {0, "ELYS", "Elysium Alps"}}, {0, 1, 3, {14, "ELYS", "Elysium Alps"}}}, 2, {"Race", "Slopestyle"}},
-    {"Mesablanca", "MESA", 2, {{0, 0, 0, {0, "MESA", "Mesablanca"}}, {0, 1, 3, {14, "MESA", "Mesablanca"}}}, 2, {"Race", "Slopestyle"}},
-    {"Merqury City", "MERQ", 4, {{0, 0, 0, {0, "MERQ", "Merqury City"}}, {0, 1, 3, {14, "MERQ", "Merqury City"}}}, 2, {"Race", "Slopestyle"}},
-    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Slopestyle"}},
-    {"Pipedream", "PIPE", 11, {{0, 1, 2}, {0, 0, 0}}, 1, {"Super Pipe", nullptr}},
-    {"Untracked", "UNTRACK", 7, {{0, 1, 3, {14, "UNTRACK", "Untracked"}}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
-    {"Tokyo Megaplex", nullptr, 15, {{0, 0, 0, {0, "MEGA", "Tokyo Megaplex"}}, {0, 1, 3, {14, "MEGA", "Tokyo Megaplex"}}}, 2, {"Race", "Slopestyle"}},
-    {"Alaska", "ALASKA", 6, {{0, 1, 3, {14, "ALASKA", "Alaska"}}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
+    // only the world/name swap target changes. Tricky-authentic modes
+    // (local Tricky ISO survey): every course offers Race AND Showoff,
+    // opts[0] = Race, opts[1] = Showoff, no navigator fallback in the
+    // picker path. Each mapped option carries map{loadedEv, ownArchive,
+    // ownName}; native rows stay unmapped. Archive codes verified live
+    // (preview course() gate, except MEGA which ships in preset/worlds);
+    // names are display strings (<= 31 chars).
+    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 1, 3, {14, "GARI", "Garibaldi"}}}, 2, {"Race", "Showoff"}},
+    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 1, 3, {14, "SNOW", "Snowdream"}}}, 2, {"Race", "Showoff"}},
+    {"Elysium Alps", "ELYS", 16, {{0, 0, 0, {0, "ELYS", "Elysium Alps"}}, {0, 1, 3, {14, "ELYS", "Elysium Alps"}}}, 2, {"Race", "Showoff"}},
+    {"Mesablanca", "MESA", 2, {{0, 0, 0, {0, "MESA", "Mesablanca"}}, {0, 1, 3, {14, "MESA", "Mesablanca"}}}, 2, {"Race", "Showoff"}},
+    {"Merqury City", "MERQ", 4, {{0, 0, 0, {0, "MERQ", "Merqury City"}}, {0, 1, 3, {14, "MERQ", "Merqury City"}}}, 2, {"Race", "Showoff"}},
+    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Showoff"}},
+    {"Pipedream", "PIPE", 11, {{0, 0, 0}, {0, 1, 2}}, 2, {"Race", "Showoff"}},
+    {"Untracked", "UNTRACK", 7, {{0, 0, 0}, {0, 1, 3, {14, "UNTRACK", "Untracked"}}}, 2, {"Race", "Showoff"}},
+    {"Tokyo Megaplex", nullptr, 15, {{0, 0, 0, {0, "MEGA", "Tokyo Megaplex"}}, {0, 1, 3, {14, "MEGA", "Tokyo Megaplex"}}}, 2, {"Race", "Showoff"}},
+    {"Alaska", "ALASKA", 6, {{0, 0, 0}, {0, 1, 3, {14, "ALASKA", "Alaska"}}}, 2, {"Race", "Showoff"}},
 };
 
 inline constexpr uint32_t kCourseCount = 10u;
 
 // ---- Direct-launch goal ---------------------------------------------------
-// The guest chain (config + shared loader, no menu walk) is proven for the
-// race-discipline donor cells ev0/ev1 only: the config calls take null nav
-// nodes, which the guest resolves as race type/rules. Jam donors (ev14: the
-// Aloha run dies in loading on a missing-target jump) and freestyle cells
-// (type 1) keep the navigator until their accept args are measured, so taps
-// on those fall back instead of riding the wrong event or crashing the load.
+// The guest chain (config + shared loader, no menu walk) rides proven-clean
+// donor shells: ev0 for the Race cells (null nav nodes, resolved as race
+// type/rules), ev1 for Snowdream Race (its native shell), ev11 (Pipe's own
+// freestyle shell) for the Showoff cells with measured args. Donor ev14
+// dies in loading on an unhandled-exception loop (0x80000080, probe path),
+// so no direct cell uses it; the world pin still loads the course's own
+// archive+name.
 // Donor bound for direct goals. Mirrors kMapDonorMax (map section below;
 // a static_assert there keeps the two in sync).
 inline constexpr int kDirectDonorMax = 22;
@@ -146,12 +149,14 @@ struct DirectGoal
 };
 
 // Accept args per (type-list, row), read off the static nav tables
-// (tk-menu-1 events.py: node[4]=ty, node[8]=words[0]). Merge-train scope
-// (1): Race cells (0,0)/(0,1) only, proven with (0,0) — Garibaldi,
-// Mesablanca, Snowdream, Elysium, Merqury, Megaplex direct; every other
-// cell defers to the navigator. Jam/freestyle pairs (Aloha (5,4), Pipe
-// (3,2), Untracked/Alaska (6,5)) land in the follow-up with per-cell race
-// proofs.
+// (tk-menu-1 events.py: node[4]=ty, node[8]=words[0]). Refinement: all 10
+// courses x {Race, Showoff} direct — Race cells (0,0)/(0,1)/(0,2), Showoff
+// cells (1,2) Pipe + (1,3) everywhere else, with measured args. Donor
+// ev14 (Aloha/Untracked/Alaska stock shell) dies in loading on an
+// unhandled-exception loop (0x80000080, probe path — independent of the
+// tap-path load-select repair), so those cells ride proven-clean shells:
+// Aloha Race on ev0 (the Race shape), the (1,3) cells on ev11 (Pipe's own
+// freestyle shell). World pins stay on the course's own archive+name.
 inline bool directCellArgs(int type, int row, int &typeArg, int &rulesArg)
 {
     if (type == 0 && (row == 0 || row == 1))
@@ -160,7 +165,41 @@ inline bool directCellArgs(int type, int row, int &typeArg, int &rulesArg)
         rulesArg = 0;
         return true;
     }
+    if (type == 0 && row == 2)
+    {
+        typeArg = 5;
+        rulesArg = 4;
+        return true; // Aloha Race (donor ev0, world ALOHA)
+    }
+    if (type == 1 && row == 2)
+    {
+        typeArg = 3;
+        rulesArg = 2;
+        return true; // Pipedream Showoff (donor ev11, own event)
+    }
+    if (type == 1 && row == 3)
+    {
+        typeArg = 6;
+        rulesArg = 5;
+        return true; // Showoff (donor ev11) for Gari/Snow/Elys/Mesa/Merq/Aloha/Untrack/Mega/Alaska
+    }
     return false;
+}
+
+// Direct-launch donor shell: the navigator walks the table's stock donor
+// (goal.map / c.event), but the direct chain rides proven-clean shells —
+// ev14 dies in loading, so ev14 cells are re-homed and every other cell
+// keeps its stock donor. The world pin (archive+name) is untouched: the
+// course's own geometry still loads under the clean shell.
+inline int directDonorFor(int type, int row, int stockEvent)
+{
+    if (type == 0 && row == 1)
+        return 1; // Snowdream Race keeps its native donor ev1 (proven)
+    if (type == 0)
+        return 0; // every Race cell rides the ev0 race shell + own world pin
+    if (type == 1)
+        return 11; // every Showoff cell rides Pipe's ev11 shell + own world pin
+    return stockEvent;
 }
 
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
@@ -170,8 +209,9 @@ inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
     // Freeride rows, pad rows) keep the navigator.
     if (!directCellArgs(goal.type, goal.row, d.typeArg, d.rulesArg))
         return d;
-    // Donor cell: the table's explicit map, else the course's own event.
-    d.event = (goal.map.event >= 0) ? goal.map.event : c.event;
+    // Donor shell: clean-shell override, else the table's stock donor.
+    const int stock = (goal.map.event >= 0) ? goal.map.event : c.event;
+    d.event = directDonorFor(goal.type, goal.row, stock);
     // Launch-time world pin: the explicit map, else the course's own
     // archive+name on its donor (the proven Garibaldi shape). This also
     // marks the ride for the records guard, like the navigator's edge.
@@ -208,8 +248,8 @@ inline int directCourseByCode(const char *code)
 // ---- List navigation (pad edges and touch taps map to the same steps) ----
 // Two steps (Part 2 amendment): step 0 picks the course (10 names, Tricky
 // order); step 1 picks the mode from the course's own modeName list
-// (data-driven: later modes appear with no UI change). A single-mode
-// course skips step 1 (Cross launches it directly). Triangle steps back.
+// (data-driven: later modes appear with no UI change). Every course is
+// dual-mode (Race / Showoff), so step 1 always shows. Triangle steps back.
 struct ListState
 {
     uint8_t sel = 0;  // highlighted course 0..9 (kept across re-opens)

@@ -166,7 +166,7 @@ namespace
         const tkl::DirectGoal dg = tkl::directGoalFor(c, goal);
         if (!dg.ok)
         {
-            tkLog(runtime, std::string("direct defers ") + c.name + " to the navigator (no Race cell yet)");
+            tkLog(runtime, std::string("direct defers ") + c.name + " to the navigator (no direct cell yet)");
             return false;
         }
         using namespace ps2_ssx3_tricky;
@@ -226,9 +226,12 @@ namespace
         const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
         if (!probe || std::strcmp(probe, "1") != 0) return false;
         const char *course = std::getenv("PS2X_SSX3_TRICKY_DIRECT_COURSE");
+        int opt = 0;
+        if (const char *optEnv = std::getenv("PS2X_SSX3_TRICKY_DIRECT_OPT"))
+            opt = std::atoi(optEnv);
         return tkDirectStart(ram, ctx, runtime,
                              ps2_ssx3_tricky_list::directCourseByCode(course ? course : "GARI"),
-                             0); // diagnostic entry rides the Race option
+                             opt);
     }
 
     // Pad-glue service for overlay taps: BackOut returns the guest to the

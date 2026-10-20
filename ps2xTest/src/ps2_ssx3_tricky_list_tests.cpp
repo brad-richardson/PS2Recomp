@@ -67,7 +67,7 @@ FeView evView(uint32_t peak, uint32_t type, uint8_t row)
 
 // P4: scripted guest whose Peak cursor resets to `reset` on every
 // triangle-back (the gari5 stock behavior), or persists (`persist`:
-// the p4-gari2 shape). Part 4 goal Garibaldi Slopestyle {peak 0,
+// the p4-gari2 shape). Part 4 goal Garibaldi Showoff {peak 0,
 // type 1, row 3} on donor ev 14; clamps, no wrap (hard model). The
 // Event cursor is tracked too: Cross leaves only on the goal row.
 struct ResetDrive
@@ -226,14 +226,17 @@ void register_ps2_ssx3_tricky_list_tests()
                 t.Equals(std::strcmp(kCourses[i].name, want[i]), 0, "Tricky order");
             // Part 4: every goal is Peak 1 (fresh-card selectable). Singles
             // keep their native rows; dual-mode Races share P1 Race row 0
-            // (ev0), Slopestyles share P1 Free row 3 (ev14).
+            // (ev0), Showoffs share P1 Free row 3 (ev14).
             for (uint32_t i = 0; i < 10; ++i)
                 for (uint32_t m = 0; m < kCourses[i].nOpts; ++m)
                     t.Equals(kCourses[i].opts[m].peak, 0, "all goals Peak 1");
             t.Equals(kCourses[0].opts[0].row, 0, "Garibaldi row 0");
-            t.Equals(kCourses[6].opts[0].type, 1, "Pipedream freestyle");
-            t.Equals(kCourses[6].opts[0].row, 2, "Pipedream row 2");
-            t.Equals(kCourses[9].opts[0].type, 1, "Alaska freestyle");
+            t.Equals(kCourses[6].opts[0].type, 0, "Pipedream Race first");
+            t.Equals(kCourses[6].opts[0].row, 0, "Pipedream Race row 0");
+            t.Equals(kCourses[6].opts[1].type, 1, "Pipedream Showoff second");
+            t.Equals(kCourses[6].opts[1].row, 2, "Pipedream Showoff row 2");
+            t.Equals(kCourses[9].opts[0].type, 0, "Alaska Race first");
+            t.Equals(kCourses[9].opts[1].type, 1, "Alaska Showoff second");
             // Dual-type courses share one event id; Race is the default.
             t.Equals(kCourses[2].nOpts, 2, "Elysium dual");
             t.Equals(kCourses[2].event, 16, "Elysium event 16 both rows");
@@ -249,15 +252,17 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(listGoal(s).row, 0, "Elysium step 0 is the Race row");
             s.step = 1;
             s.mode = 1;
-            t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Slopestyle row");
+            t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Showoff row");
             s.mode = 0;
             t.Equals(listGoal(s).row, 0, "step 1 mode 0 is Race");
-            t.Equals(std::strcmp(kCourses[2].modeName[1], "Slopestyle"), 0, "Jam mode name");
-            t.Equals(kCourses[6].nOpts, 1, "Pipedream single-mode"); });
+            t.Equals(std::strcmp(kCourses[2].modeName[1], "Showoff"), 0, "Jam mode name");
+            t.Equals(kCourses[6].nOpts, 2, "Pipedream dual");
+            t.Equals(kCourses[7].nOpts, 2, "Untracked dual");
+            t.Equals(kCourses[9].nOpts, 2, "Alaska dual"); });
 
         tc.Run("Part 4 table: remapped goals share two fresh P1 cells", [](TestCase &t)
                {
-            // Race options share P1 Race row 0 (loaded ev0); Slopestyle
+            // Race options share P1 Race row 0 (loaded ev0); Showoff
             // options share P1 Free row 3 (loaded ev14). Each mapped
             // option carries map{loadedEv, ownArchive, ownName}.
             const int raceMapped[] = {2, 3, 4, 8};
@@ -296,7 +301,7 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(kCourses[5].opts[1].map.event, -1, "Aloha jam native");
             t.Equals(kCourses[6].opts[0].map.event, -1, "Pipedream native"); });
 
-        tc.Run("list nav wraps per step; single-mode cursor stays put", [](TestCase &t)
+        tc.Run("list nav wraps per step; mode step moves modes", [](TestCase &t)
                {
             ListState s;
             listMove(s, true);
@@ -306,14 +311,14 @@ void register_ps2_ssx3_tricky_list_tests()
             s.sel = 2;
             s.step = 1;
             listMove(s, false);
-            t.Equals(s.mode, 1, "Elysium mode down to Slopestyle");
+            t.Equals(s.mode, 1, "Elysium mode down to Showoff");
             listMove(s, false);
             t.Equals(s.mode, 0, "mode wraps over the course's own modes");
             s.sel = 6;
             s.mode = 0;
             listMove(s, false);
             t.Equals(s.sel, 6, "step 1 moves modes, not courses");
-            t.Equals(s.mode, 0, "single-mode course has one mode"); });
+            t.Equals(s.mode, 1, "Pipedream dual: mode moves to Showoff"); });
 
         tc.Run("readView gates on the Map sub-state and short RAM", [](TestCase &t)
                {
@@ -343,29 +348,39 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsFalse(overlayTarget(true, 2, -1, false, 0, 0, false), "dead Event widget stays shut");
             t.IsFalse(overlayTarget(false, 0, -1, false, 0, 0, false), "non-Map words stay shut"); });
 
-        tc.Run("merge scope: 6 Race cells direct, Jam/freestyle defer", [](TestCase &t)
+        tc.Run("refinement: every cell direct on clean donors, no ev14", [](TestCase &t)
                {
-            // Merge-train (1): Garibaldi, Snowdream, Elysium, Mesablanca,
-            // Merqury, Megaplex direct; Aloha, Pipe, Untracked, Alaska keep
-            // the navigator until the follow-up lands their accept args.
+            // Refinement: all 10 courses x {Race, Showoff} direct, no
+            // navigator fallback in the picker path. Race cells on ev0
+            // (Snowdream keeps native ev1), Showoff cells on ev11 (Pipe's
+            // own freestyle shell; donor ev14 dies in loading). Both
+            // options of every course are directable.
             for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
             {
                 const Course &c = kCourses[i];
-                const DirectGoal goal = directGoalFor(c, c.opts[0]);
-                int ta = -1, ra = -1;
-                const bool cell = directCellArgs(c.opts[0].type, c.opts[0].row, ta, ra);
-                t.Equals(goal.ok, cell, std::string("directable == known cell: ") + c.name);
-                if (goal.ok)
+                t.Equals(c.nOpts, static_cast<uint8_t>(2), std::string("dual: ") + c.name);
+                for (uint32_t m = 0; m < c.nOpts; ++m)
                 {
-                    const int donor = (c.opts[0].map.event >= 0) ? c.opts[0].map.event : c.event;
-                    t.Equals(goal.event, donor, "donor event");
-                    t.IsTrue(goal.mapped, "world pinned for the records guard");
+                    const DirectGoal goal = directGoalFor(c, c.opts[m]);
+                    int ta = -1, ra = -1;
+                    const bool cell = directCellArgs(c.opts[m].type, c.opts[m].row, ta, ra);
+                    t.Equals(goal.ok, cell, std::string("directable == known cell: ") + c.name);
+                    if (goal.ok)
+                    {
+                        const int stock = (c.opts[m].map.event >= 0) ? c.opts[m].map.event : c.event;
+                        t.Equals(goal.event, directDonorFor(c.opts[m].type, c.opts[m].row, stock),
+                                 "clean-shell donor");
+                        t.IsTrue(goal.mapped, "world pinned for the records guard");
+                        t.IsTrue(goal.event != 14, "no direct cell rides ev14");
+                    }
                 }
             }
             const Course &gari = kCourses[0];
             const DirectGoal g = directGoalFor(gari, gari.opts[0]);
             t.IsTrue(g.ok && g.event == 0, "Garibaldi donor ev0 (probe shape)");
             t.Equals(std::string(g.map.archive), std::string("GARI"), "Garibaldi archive");
+            const DirectGoal gs = directGoalFor(gari, gari.opts[1]);
+            t.IsTrue(gs.ok && gs.event == 11, "Garibaldi Showoff donor ev11");
             const Course &mesa = kCourses[3];
             const DirectGoal m = directGoalFor(mesa, mesa.opts[0]);
             t.IsTrue(m.ok && m.event == 0, "Mesablanca donor ev0");
@@ -374,11 +389,30 @@ void register_ps2_ssx3_tricky_list_tests()
             const DirectGoal s = directGoalFor(snow, snow.opts[0]);
             t.IsTrue(s.ok && s.event == 1, "Snowdream native donor ev1");
             const Course &pipe = kCourses[6];
-            t.IsFalse(directGoalFor(pipe, pipe.opts[0]).ok, "Pipedream defers (follow-up)");
+            const DirectGoal p = directGoalFor(pipe, pipe.opts[0]);
+            t.IsTrue(p.ok && p.event == 0, "Pipedream Race donor ev0 (world PIPE)");
+            t.Equals(std::string(p.map.archive), std::string("PIPE"), "Pipedream world pin");
+            const DirectGoal ps = directGoalFor(pipe, pipe.opts[1]);
+            t.IsTrue(ps.ok && ps.event == 11, "Pipedream Showoff donor ev11");
+            int pta = -1, pra = -1;
+            t.IsTrue(directCellArgs(1, 2, pta, pra) && pta == 3 && pra == 2, "showoff pipe args (3,2)");
             const Course &aloha = kCourses[5];
-            t.IsFalse(directGoalFor(aloha, aloha.opts[0]).ok, "Aloha defers (follow-up)");
+            const DirectGoal ar = directGoalFor(aloha, aloha.opts[0]);
+            t.IsTrue(ar.ok && ar.event == 0, "Aloha Race donor ev0 (world ALOHA)");
+            t.Equals(std::string(ar.map.archive), std::string("ALOHA"), "Aloha world pin");
+            const DirectGoal asl = directGoalFor(aloha, aloha.opts[1]);
+            t.IsTrue(asl.ok && asl.event == 11, "Aloha Showoff donor ev11");
+            int ata = -1, ara = -1;
+            t.IsTrue(directCellArgs(0, 2, ata, ara) && ata == 5 && ara == 4, "aloha race args (5,4)");
+            int sta = -1, sra = -1;
+            t.IsTrue(directCellArgs(1, 3, sta, sra) && sta == 6 && sra == 5, "showoff args (6,5)");
             const Course &mega = kCourses[8];
             t.IsTrue(directGoalFor(mega, mega.opts[0]).ok, "Megaplex Race directable (donor ev0)");
+            t.IsTrue(directGoalFor(mega, mega.opts[1]).ok, "Megaplex Showoff directable (donor ev11)");
+            const Course &untrack = kCourses[7];
+            t.IsTrue(directGoalFor(untrack, untrack.opts[0]).ok, "Untracked Race directable (donor ev0)");
+            const Course &alaska = kCourses[9];
+            t.IsTrue(directGoalFor(alaska, alaska.opts[1]).ok, "Alaska Showoff directable (donor ev11)");
             t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
             t.Equals(directCourseByCode("Garibaldi"), 0, "name lookup");
             t.Equals(directCourseByCode("NOPE"), 0, "unknown falls back to Garibaldi");
@@ -480,7 +514,7 @@ void register_ps2_ssx3_tricky_list_tests()
 
         tc.Run("Accept edge flags apply for mapped goals, restore for native", [](TestCase &t)
                {
-            // Part 4: Garibaldi Slopestyle shares P1 Free row 3 (loaded
+            // Part 4: Garibaldi Showoff shares P1 Free row 3 (loaded
             // ev14); the Accept edge swaps ev14 to GARI.
             FakeGuest g;
             g.screen = 2;
@@ -1257,28 +1291,28 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "flip completes");
             t.Equals(acceptedPeak, 0, "P1 accepted after flipping to Up"); });
 
-        tc.Run("P4 reset cursor at top still rides Garibaldi Slopestyle", [](TestCase &t)
+        tc.Run("P4 reset cursor at top still rides Garibaldi Showoff", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(0);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from top");
             t.IsTrue(d.handedOff, "handoff");
             t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
-        tc.Run("P4 reset cursor at Peak 2 still rides Garibaldi Slopestyle", [](TestCase &t)
+        tc.Run("P4 reset cursor at Peak 2 still rides Garibaldi Showoff", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(1);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from reset value");
             t.IsTrue(d.handedOff, "handoff");
             t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
-        tc.Run("P4 reset cursor at last row still rides Garibaldi Slopestyle", [](TestCase &t)
+        tc.Run("P4 reset cursor at last row still rides Garibaldi Showoff", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(2);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done from last row");
             t.IsTrue(d.handedOff, "handoff");
             t.Equals(d.acceptedPeak, 0, "P1 accepted"); });
 
-        tc.Run("P5 persisting cursor from last row still rides Garibaldi Slopestyle", [](TestCase &t)
+        tc.Run("P5 persisting cursor from last row still rides Garibaldi Showoff", [](TestCase &t)
                {
             const ResetDrive d = driveResetPeak(2, true);
             t.Equals(d.phase, static_cast<int>(NavPhase::Done), "done despite persist");
@@ -1334,8 +1368,8 @@ void register_ps2_ssx3_tricky_list_tests()
             // One-tap rule: multi-mode courses open the mode screen,
             // single-mode courses ride straight away.
             t.IsTrue(listCourseOpensModes(0), "Garibaldi opens modes");
-            t.IsFalse(listCourseOpensModes(6), "Pipedream rides at once");
-            t.IsFalse(listCourseOpensModes(9), "Alaska rides at once");
+            t.IsTrue(listCourseOpensModes(6), "Pipedream opens modes");
+            t.IsTrue(listCourseOpensModes(9), "Alaska opens modes");
             t.IsFalse(listCourseOpensModes(10), "out of range rides nowhere");
             // Triangle-back (Brad 10-19): step 0 leaves the overlay flow
             // (the list closes at once); step 1 returns to the course list.
@@ -1373,16 +1407,17 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(listDefaultGoal(s).peak, 0, "Garibaldi Race peak");
             t.Equals(listDefaultGoal(s).type, 0, "Garibaldi Race type");
             t.Equals(listDefaultGoal(s).row, 0, "Garibaldi Race row");
-            t.Equals(listCycleMode(s), 1, "toggle to Slopestyle");
-            t.IsTrue(std::strcmp(listDefaultModeName(s), "Slopestyle") == 0, "toggled name");
-            t.Equals(listDefaultGoal(s).type, 1, "Slopestyle type");
-            t.Equals(listDefaultGoal(s).row, 3, "Slopestyle row");
+            t.Equals(listCycleMode(s), 1, "toggle to Showoff");
+            t.IsTrue(std::strcmp(listDefaultModeName(s), "Showoff") == 0, "toggled name");
+            t.Equals(listDefaultGoal(s).type, 1, "Showoff type");
+            t.Equals(listDefaultGoal(s).row, 3, "Showoff row");
             t.Equals(listCycleMode(s), 0, "toggle wraps to Race");
-            // Single-mode course: the toggle is a no-op, the goal is fixed.
+            // Pipedream is dual too: Race default, toggle to Showoff.
             ListState p;
-            p.sel = 6; // Pipedream, Super Pipe only
-            t.Equals(listCycleMode(p), 0, "single stays 0");
-            t.IsTrue(std::strcmp(listDefaultModeName(p), "Super Pipe") == 0, "pipe name");
+            p.sel = 6;
+            t.IsTrue(std::strcmp(listDefaultModeName(p), "Race") == 0, "pipe default Race");
+            t.Equals(listCycleMode(p), 1, "pipe toggles to Showoff");
+            t.IsTrue(std::strcmp(listDefaultModeName(p), "Showoff") == 0, "pipe name");
             t.Equals(listDefaultGoal(p).row, 2, "pipe row");
             // Defaults are per course: cycling Garibaldi leaves Snowdream.
             ListState m;
