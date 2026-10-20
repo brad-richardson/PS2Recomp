@@ -5,12 +5,19 @@
 #include "Ssx3TrickyLayer.h"
 
 #include "ps2_ssx3_tricky_layer.h"
+#include "ps2_ssx3_tricky_records.h"
 
 namespace ps2_tricky_layer
 {
 
 void tickHook(uint8_t *rdram, size_t ramSize, uint64_t tick)
 {
+    namespace records = ps2_ssx3_tricky_records;
+    if (records::validRam(rdram, ramSize))
+        records::tick(records::state(), rdram, ramSize,
+                      ps2_ssx3_course::appUpdateFn(rdram) == ps2_ssx3_course::kGameUpdate,
+                      ps2_ssx3_tricky::state().tricky || ps2_ssx3_tricky_list::mapState().activeEvent >= 0,
+                      records::exactPath());
     ps2_ssx3_tricky_layer::onVBlankTick(rdram, ramSize, tick);
 }
 

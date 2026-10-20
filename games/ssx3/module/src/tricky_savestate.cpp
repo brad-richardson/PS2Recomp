@@ -10,6 +10,7 @@
 
 #include "ps2_ssx3_patch_grow_state.h"
 #include "ps2_ssx3_tricky_gems.h"
+#include "ps2_ssx3_tricky_records.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
@@ -146,6 +147,48 @@ bool courseLoad(Reader &r)
     return true;
 }
 
+void recordsSave(Writer &w)
+{
+    namespace records = ps2_ssx3_tricky_records;
+    const auto &s = records::state();
+    w.b(records::exactPath()); w.b(s.have); w.b(s.wasInGame); w.b(s.menusClean);
+    w.bytes(s.settings.data(), s.settings.size());
+    w.bytes(s.records.data(), s.records.size());
+    for (auto flags : s.flags) w.u32(flags);
+}
+
+bool recordsLoad(Reader &r)
+{
+    namespace records = ps2_ssx3_tricky_records;
+    records::State next;
+    const auto version = ps2_savestate::loadingSectionVersion();
+    // Version zero denotes direct calls outside the section loader (tests).
+    if (version && version < 3)
+    {
+        if (!records::exactPath() && (ps2_ssx3_course::courseModes().armed ||
+            ps2_ssx3_file_table::state().enabled || ps2_ssx3_tricky::knob()))
+            return r.fail("trickyrecords: legacy Tricky save lacks pre-race user snapshot");
+    }
+    else
+    {
+        if (r.b() != records::exactPath()) return r.fail("trickyrecords: exact setting differs");
+        next.have = r.b(); next.wasInGame = r.b(); next.menusClean = r.b();
+        r.bytes(next.settings.data(), next.settings.size());
+        r.bytes(next.records.data(), next.records.size());
+        for (auto &flags : next.flags)
+        {
+            const auto value = r.u32();
+            if (value > 0x1ffu) return r.fail("trickyrecords: invalid profile flags");
+            flags = static_cast<uint16_t>(value);
+        }
+        if ((!next.have && next.menusClean) || (next.wasInGame && next.menusClean))
+            return r.fail("trickyrecords: inconsistent snapshot lifetime");
+    }
+    if (!r.ok()) return false;
+    if (!r.validationOnly()) records::state() = next;
+    return true;
+}
+
 std::string courseReady()
 {
     if (ps2_ssx3_tricky::state().redirect) return "Tricky list refresh pending";
@@ -170,6 +213,7 @@ void trickyGemsSave(Writer &w)
     w.bytes(s.collected, sizeof(s.collected));
     w.bytes(s.spinSeen, sizeof(s.spinSeen));
     courseSave(w);
+    recordsSave(w);
 }
 
 bool trickyGemsLoad(Reader &r)
@@ -196,7 +240,7 @@ bool trickyGemsLoad(Reader &r)
         return r.fail("trickygems: invalid scan cursor");
     for (float x : next.prev)
         if (!std::isfinite(x)) return r.fail("trickygems: invalid segment");
-    if (!courseLoad(r)) return false;
+    if (!courseLoad(r) || !recordsLoad(r)) return false;
     if (!r.validationOnly())
         ps2_tk45c::state() = next; // derived lookup is rebuilt from restored RAM after all sections.
     return true;
@@ -263,9 +307,9 @@ namespace
 // K1 pattern: static registration in the family TU (this TU is always
 // linked — it defines the module entry — and section order is key-sorted,
 // so registration timing is inert). v2 owns course/mapper restore data;
-// v1 remains readable for default-off stock saves.
+// v3 adds the pre-race user records snapshot; legacy stock saves remain readable.
 const bool kTrickyGemsRegistered = ps2_savestate::registerSection(
     "trickygems",
-    {2u, &ps2_tricky_state::trickyGemsSave, &ps2_tricky_state::trickyGemsLoad, &courseReady, 1u, false,
+    {3u, &ps2_tricky_state::trickyGemsSave, &ps2_tricky_state::trickyGemsLoad, &courseReady, 1u, false,
      &ps2_tricky_state::trickyGemsLoad});
 } // namespace

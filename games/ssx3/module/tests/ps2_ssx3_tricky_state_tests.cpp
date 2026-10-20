@@ -3,6 +3,7 @@
 #include "ps2_ssx3_file_table.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ssx3_tricky_list.h"
+#include "ps2_ssx3_tricky_records.h"
 #include "runtime/ps2_savestate.h"
 
 void register_ps2_ssx3_tricky_state_tests()
@@ -16,11 +17,16 @@ void register_ps2_ssx3_tricky_state_tests()
             const auto oldModes = ps2_ssx3_course::courseModes();
             const auto oldMenu = ps2_ssx3_tricky::state();
             const auto oldGems = ps2_tk45c::state();
+            const auto oldRecords = ps2_ssx3_tricky_records::state();
             const auto oldAliases = ps2_cd_overlay::pendingAliases();
             const bool oldDormant = ps2_cd_overlay::directoryDormant();
             const uint32_t oldVersion = ps2_savestate::loadingSectionVersion();
             auto *oldOverlay = ps2_cd_overlay::runtimeOverlay();
+            ps2_savestate::setLoadingSectionVersion(3);
             ps2_tk45c::state() = {};
+            auto &records = ps2_ssx3_tricky_records::state();
+            records = {}; records.have = true; records.wasInGame = true;
+            records.records.fill(0x6d); records.settings.fill(0xa7); records.flags.fill(0x17b);
             std::vector<uint8_t> ram(32u * 1024u * 1024u, 0);
             constexpr uint32_t base = 0x100000, stride = 268;
             ft::write32(ram.data() + ft::kBase, base);
@@ -46,6 +52,7 @@ void register_ps2_ssx3_tricky_state_tests()
             std::strcpy(map.snapArchive[14], "BAM"); std::strcpy(map.snapName[14], "Happiness");
             ps2_savestate::Writer saved;
             ps2_tricky_state::trickyGemsSave(saved);
+            records = {};
             // A newly booted process has no host ownership image; another
             // timeline may also hold a contaminated donor snapshot.
             ft::reset(true);
@@ -65,6 +72,10 @@ void register_ps2_ssx3_tricky_state_tests()
             t.IsTrue(ps2_cd_overlay::runtimeOverlay() == nullptr, "preflight does not publish the lazy overlay");
             ps2_savestate::Reader reader(saved.buf.data(), saved.buf.size());
             t.IsTrue(ps2_tricky_state::trickyGemsLoad(reader), reader.error());
+            t.IsTrue(records.have && records.wasInGame && !records.menusClean, "records snapshot lifetime restored");
+            t.Equals(records.records[700], uint8_t(0x6d), "saved user record restored");
+            t.Equals(records.settings[20], uint8_t(0xa7), "saved user setting restored");
+            t.Equals(records.flags[5], uint16_t(0x17b), "saved profile flag restored");
             t.Equals(modes.owner, 1u, "explicit mode identity restored independently of donor rows");
             t.IsTrue(ft::state().active, "active overlay ownership survived the fresh-process load");
             t.Equals(ft::state().stock.size(), size_t(500 * stride), "true-stock restore image saved");
@@ -135,6 +146,7 @@ void register_ps2_ssx3_tricky_state_tests()
             t.Equals(map.activeEvent, -1, "legacy stock load clears mapper timeline");
             if (hadMenuEnv) setenv("PS2X_SSX3_TRICKY_MENU", oldMenuEnv.c_str(), 1);
             ps2_savestate::setLoadingSectionVersion(oldVersion);
+            records = oldRecords;
             ft::state() = oldFiles; list::mapState() = oldMap;
             modes = oldModes; ps2_ssx3_tricky::state() = oldMenu; ps2_tk45c::state() = oldGems;
             ps2_cd_overlay::runtimeOverlay() = oldOverlay;
