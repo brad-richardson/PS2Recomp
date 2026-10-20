@@ -1,3 +1,4 @@
+#include "ps2_quickplay_bootstrap.h"
 #include "Common.h"
 #include "ps2_e41_trace.h"
 #include "ps2_rpl3_nv.h" // RPL3: recorded card dates (padrec v3)
@@ -752,7 +753,7 @@ namespace ps2_stubs
     // v0 option-0: on-the-fly EA Login identity (Quick Play only).
     // PS2X_NET_QUICKPLAY=1 gates everything: knob off = zero behavior
     // change. The game believes a PSCD10088slogin save exists; reads
-    // of its data file are served 58 zero bytes from a tmpfile (the
+    // of its data file use a well-formed inert record in a tmpfile (the
     // card is never written) and the net HLE overwrites the login
     // buffers with our adj-noun identity. A real card save is ignored
     // for Quick Play (reads served the same way), never modified.
@@ -802,20 +803,11 @@ namespace ps2_stubs
         }
         return wildcardMatch(toLowerAscii(pattern), "pscd10088slogin");
     }
-    // v0 encoder-night D3: bundled bootstrap login record (58 bytes,
-    // game-written valid Electro record; wire identity is still always
-    // ours via qpRewriteGameAuth). Served only when no FAKE_FILE and no
-    // machine-captured cache58 exist. Wire name = lobby identity; the
-    // record only unlocks the game's local decode/submit/send gates.
+    // Inert local bootstrap; valid authentication always uses the install file.
     const std::vector<uint8_t> &qpBundledLoginBytes()
     {
-        static const std::vector<uint8_t> bytes = {
-            0x17u, 0x2cu, 0x33u, 0x38u, 0x63u, 0x69u, 0x67u, 0x68u, 0x74u, 0x32u,
-            0xb5u, 0xdbu, 0x2eu, 0x0cu, 0x1fu, 0x48u, 0x00u, 0x00u, 0x03u, 0x0du,
-            0x06u, 0x11u, 0x45u, 0x6cu, 0x65u, 0x63u, 0x74u, 0x72u, 0x6fu, 0x10u,
-            0x3cu, 0x31u, 0x29u, 0x63u, 0x69u, 0x67u, 0x68u, 0xc6u, 0xa1u, 0xd7u,
-            0x2cu, 0x22u, 0x0eu, 0x11u, 0x18u, 0x72u, 0x69u, 0x67u, 0x68u, 0x74u,
-            0x20u, 0x45u, 0x6cu, 0x65u, 0x63u, 0x74u, 0x72u, 0x6fu};
+        static const std::vector<uint8_t> bytes(ps2x::kInertQuickplayLogin.begin(),
+                                                 ps2x::kInertQuickplayLogin.end());
         return bytes;
     }
     // v0 encoder-night: any path inside the login dir (data file +

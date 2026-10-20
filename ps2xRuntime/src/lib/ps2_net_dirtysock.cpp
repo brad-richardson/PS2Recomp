@@ -1073,7 +1073,7 @@ namespace ps2_net
         ::close(fd);
         done = true;
         std::cerr << "[net] quickplay login cache wrote " << off << "B for "
-                  << g_loginName << std::endl;
+                  << "[redacted]" << std::endl;
     }
     bool qpCachedLoginBytes(std::vector<uint8_t> &out)
     {
@@ -2897,45 +2897,8 @@ namespace ps2_net
                             bytes[2] == 't' && bytes[3] == 'h' && !g_gameAuthSeen)
                         {
                             g_gameAuthSeen = true;
-                            // v0 option-0: log the WIRE identity (post
-                            // qpRewriteGameAuth: must be ours). Framing:
-                            // type + empty sub + BE size + KEY=value\n
-                            // pairs + NUL.
-                            std::string authName = "?";
-                            const std::string needle = "NAME=";
-                            for (size_t off = 12u; off + needle.size() < len; ++off)
-                            {
-                                bool hit = true;
-                                for (size_t k = 0u; k < needle.size(); ++k)
-                                {
-                                    if (bytes[off + k] != static_cast<uint8_t>(needle[k]))
-                                    {
-                                        hit = false;
-                                        break;
-                                    }
-                                }
-                                if (hit)
-                                {
-                                    std::string name;
-                                    for (size_t k = off + needle.size();
-                                         k < len && name.size() < 64u; ++k)
-                                    {
-                                        const char c = static_cast<char>(bytes[k]);
-                                        if (c == '\n' || c == '\0')
-                                        {
-                                            break;
-                                        }
-                                        name += c;
-                                    }
-                                    if (!name.empty())
-                                    {
-                                        authName = name;
-                                    }
-                                    break;
-                                }
-                            }
                             std::cerr << " [net] login: GAME AUTH seen n=" << len
-                                      << " tick=" << tick << " name=" << authName << std::endl;
+                                      << " tick=" << tick << std::endl;
                             if (qpNavNote())
                             {
                                 qpSetFirst(g_qpGameAuth, tick);

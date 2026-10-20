@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_login_paths.h"
+#include "ps2_quickplay_bootstrap.h"
 
 #include <filesystem>
 #include <fstream>
@@ -11,6 +12,36 @@ void register_ps2_login_paths_tests()
 {
     MiniTest::Case("Ps2LoginPaths", [](TestCase &tc)
                    {
+        tc.Run("bootstrap fields are well formed and cannot identify a lobby account", [](TestCase &t) {
+            const auto &record = ps2x::kInertQuickplayLogin;
+            const char mask[] = "Copyright Electro";
+            auto u32 = [](const uint8_t *p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 |
+                uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; };
+            for (size_t field = 0; field < 2; ++field) {
+                uint8_t header[12] = {}, value[17] = {};
+                for (size_t i = 0; i < 12; ++i) header[i] = record[field * 29 + i] ^ uint8_t(mask[i]);
+                for (size_t i = 0; i < 17; ++i) value[i] = record[field * 29 + 12 + i] ^ uint8_t(mask[i]);
+                uint32_t crc = ~0u;
+                for (uint8_t byte : value) {
+                    crc ^= byte;
+                    for (unsigned bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+                }
+                t.IsTrue(u32(header) == (field ? 0x50415353u : 0x41434354u), "field magic");
+                t.IsTrue(u32(header + 4) == 17u, "field length");
+                t.IsTrue(u32(header + 8) == ~crc, "field checksum");
+                t.IsTrue(value[0] != 0u && value[16] == 0u, "nonempty terminated field");
+                if (field == 0) {
+                    bool rejected = false;
+                    for (uint8_t c : value) {
+                        if (!c) break;
+                        rejected |= !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                      (c >= '0' && c <= '9') || c == '-' || c == '_');
+                    }
+                    t.IsTrue(rejected, "lobby name grammar rejects bootstrap identity");
+                }
+            }
+        });
+
         tc.Run("login path joins the directory", [](TestCase &t)
                {
             t.Equals(ps2x::loginpaths::loginPathForDir("/support"),
