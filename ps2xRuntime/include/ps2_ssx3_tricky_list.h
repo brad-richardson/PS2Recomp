@@ -145,32 +145,22 @@ struct DirectGoal
     int rulesArg = 0; // a1 for the 0x1451e8 config call (nav node rules)
 };
 
-// Accept-arg candidates per (type-list, row), read off the static nav
-// tables (tk-menu-1 events.py: node[4]=ty, node[8]=words[0]). Race cells
-// (0,0)/(0,1) are proven with (0,0); Jam/freestyle pairs are hypotheses
-// confirmed per cell by a racing boot, starting with Aloha (5,4).
+// Accept args per (type-list, row), read off the static nav tables
+// (tk-menu-1 events.py: node[4]=ty, node[8]=words[0]). Merge-train scope
+// (1): Race cells (0,0)/(0,1) only, proven with (0,0) — Garibaldi,
+// Mesablanca, Snowdream, Elysium, Merqury, Megaplex direct; every other
+// cell defers to the navigator. Jam/freestyle pairs (Aloha (5,4), Pipe
+// (3,2), Untracked/Alaska (6,5)) land in the follow-up with per-cell race
+// proofs.
 inline bool directCellArgs(int type, int row, int &typeArg, int &rulesArg)
 {
-    switch (type)
+    if (type == 0 && (row == 0 || row == 1))
     {
-    case 0:
-        switch (row)
-        {
-        case 0:
-        case 1: typeArg = 0; rulesArg = 0; return true;
-        case 2: typeArg = 5; rulesArg = 4; return true; // Aloha Jam row: trial
-        default: return false;
-        }
-    case 1:
-        switch (row)
-        {
-        case 0: typeArg = 1; rulesArg = 0; return true; // trial
-        case 2: typeArg = 3; rulesArg = 2; return true; // Pipedream: trial
-        case 3: typeArg = 6; rulesArg = 5; return true; // Untracked/Alaska: trial
-        default: return false;
-        }
-    default: return false;
+        typeArg = 0;
+        rulesArg = 0;
+        return true;
     }
+    return false;
 }
 
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)

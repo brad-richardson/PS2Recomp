@@ -343,13 +343,18 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsFalse(overlayTarget(true, 2, -1, false, 0, 0, false), "dead Event widget stays shut");
             t.IsFalse(overlayTarget(false, 0, -1, false, 0, 0, false), "non-Map words stay shut"); });
 
-        tc.Run("direct goals resolve Race cells, defer freestyle to the navigator", [](TestCase &t)
+        tc.Run("merge scope: 6 Race cells direct, Jam/freestyle defer", [](TestCase &t)
                {
+            // Merge-train (1): Garibaldi, Snowdream, Elysium, Mesablanca,
+            // Merqury, Megaplex direct; Aloha, Pipe, Untracked, Alaska keep
+            // the navigator until the follow-up lands their accept args.
             for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
             {
                 const Course &c = kCourses[i];
                 const DirectGoal goal = directGoalFor(c, c.opts[0]);
-                t.IsTrue(goal.ok, std::string("course entry directable: ") + c.name);
+                int ta = -1, ra = -1;
+                const bool cell = directCellArgs(c.opts[0].type, c.opts[0].row, ta, ra);
+                t.Equals(goal.ok, cell, std::string("directable == known cell: ") + c.name);
                 if (goal.ok)
                 {
                     const int donor = (c.opts[0].map.event >= 0) ? c.opts[0].map.event : c.event;
@@ -369,13 +374,9 @@ void register_ps2_ssx3_tricky_list_tests()
             const DirectGoal s = directGoalFor(snow, snow.opts[0]);
             t.IsTrue(s.ok && s.event == 1, "Snowdream native donor ev1");
             const Course &pipe = kCourses[6];
-            const DirectGoal p = directGoalFor(pipe, pipe.opts[0]);
-            t.IsTrue(p.ok && p.event == 11, "Pipedream Super Pipe directable (donor ev11)");
-            t.IsTrue(p.typeArg == 3 && p.rulesArg == 2, "Pipe accept args trial (3,2)");
+            t.IsFalse(directGoalFor(pipe, pipe.opts[0]).ok, "Pipedream defers (follow-up)");
             const Course &aloha = kCourses[5];
-            const DirectGoal a = directGoalFor(aloha, aloha.opts[0]);
-            t.IsTrue(a.ok && a.event == 14, "Aloha Race directable (donor ev14)");
-            t.IsTrue(a.typeArg == 5 && a.rulesArg == 4, "Aloha accept args trial (5,4)");
+            t.IsFalse(directGoalFor(aloha, aloha.opts[0]).ok, "Aloha defers (follow-up)");
             const Course &mega = kCourses[8];
             t.IsTrue(directGoalFor(mega, mega.opts[0]).ok, "Megaplex Race directable (donor ev0)");
             t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
