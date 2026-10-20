@@ -2014,6 +2014,11 @@ namespace ps2_savestate
             std::mutex mutex;
             std::string savePath; // live while a chord save waits to land
             std::string loadPath; // one-shot, consumed at the next save point
+            // resume-ios-1 (silent auto-save): set only by requestAutoSave.
+            // The completion surfaces (status line + toast) stay silent for
+            // these; explicit saves (chord, touch-menu manual) report loudly.
+            // Guarded by the same mutex; cleared with savePath.
+            bool saveSilent = false;
         };
         QuickRequest &quickRequests()
         {
@@ -2048,7 +2053,10 @@ namespace ps2_savestate
         }
     } // namespace
 
-    bool requestQuickSave(const std::string &path)
+    // Single-lock producer: path + silence flag land together, so a game
+    // thread can never complete-and-clear between them (that window would
+    // strand silent=true on the next explicit request and mute its toast).
+    bool requestQuickSaveImpl(const std::string &path, bool silent, const char *tag)
     {
         if (path.empty())
             return false;
@@ -2066,9 +2074,15 @@ namespace ps2_savestate
         if (!quickRequests().savePath.empty() || !quickRequests().loadPath.empty())
             return false;
         quickRequests().savePath = path;
+        quickRequests().saveSilent = silent;
         quickBits().fetch_or(1u, std::memory_order_release);
-        std::fprintf(stderr, "[savestate] quick-save requested path=%s\n", path.c_str());
+        std::fprintf(stderr, "[savestate] %s requested path=%s\n", tag, path.c_str());
         return true;
+    }
+
+    bool requestQuickSave(const std::string &path)
+    {
+        return requestQuickSaveImpl(path, false, "quick-save");
     }
 
     bool requestAutoSave(const std::string &path)
@@ -2081,12 +2095,11 @@ namespace ps2_savestate
             std::fprintf(stderr, "[autosave] skipped: online session active\n");
             return false;
         }
-        if (!requestQuickSave(path))
+        if (!requestQuickSaveImpl(path, true, "autosave"))
         {
             std::fprintf(stderr, "[autosave] skipped: quick request busy or path unavailable\n");
             return false;
         }
-        std::fprintf(stderr, "[autosave] requested path=%s\n", path.c_str());
         return true;
     }
 
@@ -2269,7 +2282,14 @@ namespace ps2_savestate
     {
         std::lock_guard<std::mutex> lock(quickRequests().mutex);
         quickRequests().savePath.clear();
+        quickRequests().saveSilent = false;
         quickBits().store(quickBitsFor(quickRequests()), std::memory_order_relaxed);
+    }
+
+    bool pendingQuickSaveSilent()
+    {
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        return !quickRequests().savePath.empty() && quickRequests().saveSilent;
     }
 
     void noteQuickStatus(const std::string &message)

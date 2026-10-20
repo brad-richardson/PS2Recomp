@@ -596,14 +596,27 @@ void EeScheduler::run()
             {
                 if (ds1SaveDue)
                 {
+                    // resume-ios-1: read silence before the clear drops it.
+                    // Background/auto saves land with no status line and no
+                    // toast (Brad: 'Quick save done' only for saves the
+                    // player explicitly asked for); failures stay loud.
+                    const bool silent = ps2_savestate::pendingQuickSaveSilent();
                     ps2_savestate::clearPendingQuickSave();
                     ps2_savestate::writeQuickInfo(ds1SavePath, m_vsyncTick, currentEeCycle());
-                    ps2_savestate::noteQuickStatus("Quick save done");
-                    // QSR1: manual saves toast; the race-start auto snapshot
-                    // stays silent (the user didn't tap anything).
-                    if (ps2_savestate::quickSlotKind(ds1SavePath) ==
-                        ps2_savestate::QuickSlotKind::Qsr1Manual)
-                        ps2x::ui::toast("Saved", 3.0f);
+                    if (silent)
+                    {
+                        std::fprintf(stderr, "[savestate] auto-save landed silent tick=%llu\n",
+                                     static_cast<unsigned long long>(m_vsyncTick));
+                    }
+                    else
+                    {
+                        ps2_savestate::noteQuickStatus("Quick save done");
+                        // QSR1: manual saves toast; the race-start auto snapshot
+                        // stays silent (the user didn't tap anything).
+                        if (ps2_savestate::quickSlotKind(ds1SavePath) ==
+                            ps2_savestate::QuickSlotKind::Qsr1Manual)
+                            ps2x::ui::toast("Saved", 3.0f);
+                    }
                 }
                 else
                     ssSaveAt = 0u;

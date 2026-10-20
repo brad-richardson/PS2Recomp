@@ -601,6 +601,10 @@ namespace ps2_savestate
     // (the request stays live across deferrals until it lands or is cleared).
     bool takePendingQuickLoad(std::string &path);
     bool pendingQuickSavePath(std::string &path);
+    // resume-ios-1: true while a requestAutoSave save waits (explicit chord
+    // and touch-menu saves read false). The scheduler consults it at
+    // completion: silent saves land with no status line and no toast.
+    bool pendingQuickSaveSilent();
     void clearPendingQuickSave();
     // Quick-load entry: the strict runner-identity check applies, and the
     // on-disk card wins over the saved card (never overwritten; differences

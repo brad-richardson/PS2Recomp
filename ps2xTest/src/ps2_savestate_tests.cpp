@@ -995,6 +995,40 @@ void register_ps2_savestate_tests()
             fs::remove_all(base);
         });
 
+        tc.Run("ds1: auto saves are silent, explicit saves report", [](TestCase &t)
+        {
+            using ps2_savestate::clearPendingQuickSave;
+            using ps2_savestate::pendingQuickSavePath;
+            using ps2_savestate::pendingQuickSaveSilent;
+            using ps2_savestate::requestAutoSave;
+            using ps2_savestate::requestQuickSave;
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ds1-silent-test";
+            fs::remove_all(base);
+            const std::string slot = (base / "states" / "autosave-test.state").string();
+            const char *prior = ::getenv("PS2X_AUTOSAVE");
+            const std::string saved = prior ? prior : "";
+            ::unsetenv("PS2X_AUTOSAVE");
+            clearPendingQuickSave();
+            t.IsTrue(!requestAutoSave(slot), "auto refused with the knob off");
+            t.IsTrue(!pendingQuickSaveSilent(), "nothing pending, not silent");
+            t.IsTrue(requestQuickSave(slot), "explicit request accepted");
+            t.IsTrue(!pendingQuickSaveSilent(), "explicit save reports loudly");
+            clearPendingQuickSave();
+            ::setenv("PS2X_AUTOSAVE", "1", 1);
+            t.IsTrue(requestAutoSave(slot), "auto accepted with knob on, session idle");
+            t.IsTrue(pendingQuickSaveSilent(), "auto save stays silent");
+            std::string peek;
+            t.IsTrue(pendingQuickSavePath(peek) && peek == slot, "silent save still peeks the path");
+            clearPendingQuickSave();
+            t.IsTrue(!pendingQuickSaveSilent(), "clear drops the silence flag");
+            if (saved.empty())
+                ::unsetenv("PS2X_AUTOSAVE");
+            else
+                ::setenv("PS2X_AUTOSAVE", saved.c_str(), 1);
+            fs::remove_all(base);
+        });
+
         tc.Run("ds1: quick status carries the last result with an age", [](TestCase &t)
         {
             ps2_savestate::noteQuickStatus("saved at tick 1714");
