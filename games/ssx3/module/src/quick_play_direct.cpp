@@ -14,12 +14,12 @@ constexpr uint32_t kMain = 0x194ea8, kPad = 0x3ffa58, kReturn = 0x200abc;
 constexpr uint32_t kMagic = 0x51504431, kFrame = 0x300;
 PS2Runtime::RecompiledFunction mainOriginal{}, padOriginal{}, returnOriginal{};
 template<uint32_t Pc> PS2Runtime::RecompiledFunction closeOriginal{};
-PS2Runtime::RecompiledFunction drawOriginal{};
-enum class Stage { Idle, Connect, Auth, Persona, RootQueued, Queued, Ready, Failed };
+PS2Runtime::RecompiledFunction drawOriginal{}, filterOriginal{}, switchOriginal{};
+enum class Stage { Idle, Connect, Auth, Persona, RootQueued, Queued, Ready, Leaving, Failed };
 struct State {
     Stage stage = Stage::Idle;
     uint32_t menu = 0, ui = 0, config = 0, root = 0, popup = 0, menuScreen = 0;
-    uint64_t tap = 0, lastTick = 0, injections = 0;
+    uint64_t tap = 0, lastTick = 0, injections = 0, rootRetired = 0;
     std::chrono::steady_clock::time_point started{};
 } state;
 uint32_t rd(const uint8_t *ram, uint32_t a) {
@@ -152,7 +152,8 @@ void mainHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
         object(menu,0x58)) {
         // Repeated accepts while the asynchronous connection is pending do
         // not launch another session or another frontend state.
-        if (state.stage!=Stage::Idle && state.stage!=Stage::Ready && state.stage!=Stage::Failed) {
+        if (state.stage!=Stage::Idle && state.stage!=Stage::Ready && state.stage!=Stage::Leaving &&
+            state.stage!=Stage::Failed) {
             c->pc=getRegU32(c,31); return;
         }
         state={}; state.menu=menu; state.ui=rd(ram,menu+0x10);
@@ -196,17 +197,48 @@ template<uint32_t Pc> void closeHook(uint8_t *ram, R5900Context *c, PS2Runtime *
     closeOriginal<Pc>(ram,c,r);
 }
 void drawHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
-    if ((state.stage==Stage::RootQueued || state.stage==Stage::Queued) && getRegU32(c,4)==state.root) {
+    // Online Main is only the filter's parent here: never drawn, including
+    // its dimmed backdrop behind the filter and its close after a switch.
+    // Forget it once its close has had time to finish.
+    if (state.rootRetired && tick(r)-state.rootRetired>120) state.root=0;
+    if (state.root && getRegU32(c,4)==state.root && rd(ram,state.root+8)==0x46ad48 &&
+        (state.stage==Stage::RootQueued || state.stage==Stage::Queued ||
+         state.stage==Stage::Ready || state.stage==Stage::Leaving)) {
         c->pc=getRegU32(c,31); return;
     }
     drawOriginal(ram,c,r);
+}
+void switchHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
+    // 0x1a8a40 replaces the top online state (Matchup, or Main Menu below);
+    // after it the root only plays its close.
+    if (state.root && !state.rootRetired &&
+        (state.stage==Stage::Ready || state.stage==Stage::Leaving)) state.rootRetired=tick(r);
+    switchOriginal(ram,c,r);
+}
+void filterHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
+    // Back (event 6) on the idle filter: stock notifies Online Main, which
+    // pops the filter and stays active; its own Back then offers
+    // "Disconnect from server", whose Yes pushes cFEStateNetAccountMem (the
+    // save prompt). Take Online Main's Logoff confirmation instead,
+    // 0x1c0138(root, child, 0xF): close the child, switch to a new
+    // cFEStateMainMenu (whose init destroys the session, auth, game link and
+    // net manager) and log off. A searching filter keeps stock Back (abort).
+    const auto self=getRegU32(c,4), event=getRegU32(c,6);
+    if (event==6 && state.stage==Stage::Ready && self==state.popup && object(self,0x734) &&
+        !rd(ram,self+0x6ec) && object(state.root,0x6d0) && rd(ram,self+0x20)==state.root) {
+        state.stage=Stage::Leaving; log(r,"back-to-main");
+        reg(c,4,state.root); reg(c,5,self); reg(c,6,0xf); c->pc=0x1c0138;
+        return;
+    }
+    filterOriginal(ram,c,r);
 }
 void padHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
     const auto returnPc=getRegU32(c,31);
     padOriginal(ram,c,r);
     // The original pad glue is an HLE leaf. A chained Tricky refresh can
     // redirect it; do not nest another continuation over that redirect.
-    if (c->pc!=returnPc || state.stage==Stage::Idle || state.stage==Stage::Failed || state.stage==Stage::Ready)
+    if (c->pc!=returnPc || state.stage==Stage::Idle || state.stage==Stage::Failed || state.stage==Stage::Ready ||
+        state.stage==Stage::Leaving)
         return;
     const auto now=tick(r);
     if (state.lastTick==now) return;
@@ -263,7 +295,8 @@ void apply(PS2Runtime &r) {
     }
     mainOriginal=r.lookupFunction(kMain); padOriginal=r.lookupFunction(kPad); returnOriginal=r.lookupFunction(kReturn);
     const uint32_t calls[]={0x1a86e8,0x14dc80,0x14dd58,0x145108,0x255860,0x25b650,0x260f80,0x266ca0,
-                           0x255f50,0x398638,0x3f3c50,0x3184e8,0x25b6d8,0x25c610,0x25cd28,0x317d70,0x1bfbb8,0x1c0f40,0x39f400,0x39f290,0x39ad38};
+                           0x255f50,0x398638,0x3f3c50,0x3184e8,0x25b6d8,0x25c610,0x25cd28,0x317d70,0x1bfbb8,0x1c0f40,0x39f400,0x39f290,0x39ad38,
+                           0x1c0138,0x1c1560,0x1a8a40};
     if (!mainOriginal || !padOriginal || !returnOriginal) { std::fprintf(stderr,"[qp-direct] refused: hook unavailable\n"); return; }
     for (const auto pc:calls) if (!r.lookupFunction(pc)) {
         std::fprintf(stderr,"[qp-direct] refused: guest function unavailable pc=%x\n",pc); return;
@@ -277,6 +310,8 @@ void apply(PS2Runtime &r) {
         r.replaceFunction(0x39ce98,closeHook<0x39ce98>);
         drawOriginal=r.lookupFunction(0x39e6b8);
         r.replaceFunction(0x39e6b8,drawHook);
+        filterOriginal=r.lookupFunction(0x1c1560); switchOriginal=r.lookupFunction(0x1a8a40);
+        r.replaceFunction(0x1c1560,filterHook); r.replaceFunction(0x1a8a40,switchHook);
     }
     state={}; std::fprintf(stderr,"[qp-direct] armed: stock session calls, pad navigator bypassed\n");
 }
