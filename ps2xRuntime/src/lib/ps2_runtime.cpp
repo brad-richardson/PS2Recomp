@@ -3099,11 +3099,13 @@ bool asv1AskToResume(bool &closed, bool lastSaveFailed, uint64_t savedWallUnixS,
                                               rStick.active ? rStick.y : 0.0f);
             rConfirmHeld = rConfirmHeld || ((rPressed & ps2x::vpad::kCross) != 0u);
         }
-        (void)ps2x::set2::resumeStep(rnav, rDirs);
-        resumeSelected = rnav.resumeSelected;
-        const bool rConfirmEdge = (rConfirmHeld && !rPrevConfirm) || IsKeyPressed(KEY_ENTER);
-        rPrevConfirm = rConfirmHeld;
-        if (rConfirmEdge)
+        // ui-pad-only-1: the frame decision is the pure, suite-covered
+        // resumePromptStep; this loop only samples (all pad slots, sticks,
+        // virtual pad) and draws.
+        const ps2x::set2::ResumeFrameOut rout = ps2x::set2::resumePromptStep(
+            rnav, rPrevConfirm, ps2x::set2::ResumeFrameIn{rDirs, rConfirmHeld}, IsKeyPressed(KEY_ENTER));
+        resumeSelected = rout.resumeSelected;
+        if (rout.confirmed)
             return resumeSelected;
         // settings-ui-1 (Brad 10-19): the resume prompt wears the settings
         // panel style — same shared constants (palette, fonts), same flat

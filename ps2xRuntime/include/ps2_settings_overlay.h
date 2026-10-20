@@ -1304,6 +1304,30 @@ inline bool resumeStep(ResumeNav &st, uint8_t dirHeld)
     return false;
 }
 
+// One prompt-loop frame, pure: the sampled levels in, the selection and
+// the confirm decision out. The device loop (Android/iOS only) samples
+// every pad slot, the sticks and the virtual pad into `in`, then acts on
+// `out`; the host suite scripts the same function for both choices.
+struct ResumeFrameIn
+{
+    uint8_t dirs = 0u;    // combined held directions (buttons, sticks, pad)
+    bool confirmHeld = false; // X held (pad or virtual pad)
+};
+
+struct ResumeFrameOut
+{
+    bool resumeSelected = true;
+    bool confirmed = false; // return the selection to the caller
+};
+
+inline ResumeFrameOut resumePromptStep(ResumeNav &nav, bool &prevConfirm, ResumeFrameIn in, bool enterEdge)
+{
+    (void)resumeStep(nav, in.dirs);
+    const bool confirmEdge = (in.confirmHeld && !prevConfirm) || enterEdge;
+    prevConfirm = in.confirmHeld;
+    return ResumeFrameOut{nav.resumeSelected, confirmEdge};
+}
+
 #if defined(__APPLE__) && !defined(PS2X_IOS)
 // Stashed by main() so the panel's Restart can re-exec the runner (Mac only;
 // defined in ps2_runtime.cpp).

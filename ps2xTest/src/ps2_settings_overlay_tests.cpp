@@ -1037,7 +1037,51 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(ps2x::set2::resumeStep(
                          st, static_cast<uint8_t>(ps2x::set2::kStickUp | ps2x::set2::kStickRight)),
                      "diagonal edges");
-            t.IsTrue(!ps2x::set2::resumeStep(st, 0u), "release: no step"); }); });
+            t.IsTrue(!ps2x::set2::resumeStep(st, 0u), "release: no step"); });
+
+        tc.Run("scripted prompt run, fresh slot: d-pad right + X confirms Start fresh", [](TestCase &t)
+               {
+            // ui-pad-only-1: the device loop's exact frame function,
+            // scripted as a pad run. Fresh slot defaults to Resume; Right
+            // moves to Start fresh; X confirms it.
+            ps2x::set2::ResumeNav nav; // fresh default: Resume
+            bool prevConfirm = false;
+            auto frame = [&](uint8_t dirs, bool x, bool enter) {
+                return ps2x::set2::resumePromptStep(
+                    nav, prevConfirm, ps2x::set2::ResumeFrameIn{dirs, x}, enter);
+            };
+            auto idle = frame(0u, false, false);
+            t.IsTrue(!idle.confirmed && idle.resumeSelected, "idle: Resume, unconfirmed");
+            auto move = frame(ps2x::set2::kStickRight, false, false);
+            t.IsTrue(!move.confirmed && !move.resumeSelected, "right: Start fresh, unconfirmed");
+            auto held = frame(ps2x::set2::kStickRight, true, false);
+            t.IsTrue(held.confirmed && !held.resumeSelected, "X confirms Start fresh");
+            t.IsTrue(!held.resumeSelected, "choice returned is Start fresh"); });
+
+        tc.Run("scripted prompt run, stale slot: stick left + X confirms Resume, Enter works", [](TestCase &t)
+               {
+            // Disclosed-stale slot defaults to Start fresh; the left stick
+            // moves to Resume; X confirms. A second run shows Enter
+            // confirms without any pad, and held X never double-confirms.
+            ps2x::set2::ResumeNav nav;
+            nav.resumeSelected = false; // stale default: Start fresh
+            bool prevConfirm = false;
+            auto frame = [&](uint8_t dirs, bool x, bool enter) {
+                return ps2x::set2::resumePromptStep(
+                    nav, prevConfirm, ps2x::set2::ResumeFrameIn{dirs, x}, enter);
+            };
+            t.IsTrue(!frame(0u, false, false).resumeSelected, "stale default holds");
+            auto move = frame(ps2x::set2::kStickLeft, false, false);
+            t.IsTrue(move.resumeSelected && !move.confirmed, "stick left: Resume, unconfirmed");
+            auto go = frame(0u, true, false);
+            t.IsTrue(go.confirmed && go.resumeSelected, "X confirms Resume");
+            auto again = frame(0u, true, false);
+            t.IsTrue(!again.confirmed, "held X: no second confirm");
+            ps2x::set2::ResumeNav nav2;
+            bool pc2 = false;
+            auto enterOnly = ps2x::set2::resumePromptStep(
+                nav2, pc2, ps2x::set2::ResumeFrameIn{0u, false}, true);
+            t.IsTrue(enterOnly.confirmed && enterOnly.resumeSelected, "Enter confirms default Resume"); }); });
 
     MiniTest::Case("Set2VpadNav", [](TestCase &tc)
                    {
