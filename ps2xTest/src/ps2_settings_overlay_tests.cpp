@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_settings_overlay.h"
+#include "ps2_virtual_pad.h"
 
 #include <array>
 #include <cstdint>
@@ -451,7 +452,11 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(tri.action == ps2x::set2::Action::Close, "triangle closes with stages");
             t.IsTrue(ps2x::set2::anyStaged(st), "stages stay in NavState for the caller to drop");
             auto chord = ps2x::set2::navStep(st, false, false, false, false, true);
-            t.IsTrue(chord.action == ps2x::set2::Action::Close, "chord closes"); });
+            t.IsTrue(chord.action == ps2x::set2::Action::Close, "chord closes");
+            // ui-pad-only-1 (Brad 10-20): Circle (O) is the same back edge
+            // as Triangle on the controller-only panel.
+            auto circle = ps2x::set2::navStep(st, false, false, false, false, false, false, false, true);
+            t.IsTrue(circle.action == ps2x::set2::Action::Close, "circle closes with stages"); });
 
         tc.Run("close-press overhang strips until each button releases", [](TestCase &t)
                {
@@ -464,24 +469,20 @@ void register_ps2_settings_overlay_tests()
 
     MiniTest::Case("Set2Panel", [](TestCase &tc)
                    {
-        tc.Run("row taps hit 0..Count-1, misses read -1, closed panel has no tap target", [](TestCase &t)
+        tc.Run("panel geometry lays every row out for draw (no hit test: controller-only)", [](TestCase &t)
                {
+            // ui-pad-only-1 (Brad 10-20): panelHit is removed — the rows
+            // are pad-navigated (navStep), never touch hit-tested. The
+            // layout still drives the draw code, so it stays covered here.
             const auto g = ps2x::set2::panelLayout(1280.0f, 720.0f);
+            t.IsTrue(g.rowH > 0.0f, "rows have height");
             for (int i = 0; i < ps2x::set2::kRowCount; ++i)
             {
-                const int hit = ps2x::set2::panelHit(g, true, g.rowX + g.rowW * 0.5f, g.rowY[i] + g.rowH * 0.5f);
-                t.IsTrue(hit == i, "row centre hits");
-            }
-            t.IsTrue(ps2x::set2::panelHit(g, true, g.px * 0.25f, g.py * 0.25f) == -1, "outside misses");
-            // set2-polish-1 (Brad 10-16): the gear dot is gone — the old
-            // dot corner is a plain miss now, and every closed-panel tap
-            // misses (the chord / two-finger tap opens it instead).
-            t.IsTrue(ps2x::set2::panelHit(g, true, 1280.0f - 0.055f * 720.0f, 0.20f * 720.0f) == -1,
-                     "old dot corner misses while open");
-            t.IsTrue(ps2x::set2::panelHit(g, false, g.rowX + g.rowW * 0.5f, g.rowY[0] + g.rowH * 0.5f) == -1,
-                     "row centre misses while closed");
-            t.IsTrue(ps2x::set2::panelHit(g, false, g.px * 0.25f, g.py * 0.25f) == -1,
-                     "outside misses while closed"); });
+                t.IsTrue(g.rowY[i] >= g.py, "row inside panel top");
+                t.IsTrue(g.rowY[i] + g.rowH <= g.py + g.ph, "row inside panel bottom");
+                if (i > 0)
+                    t.IsTrue(g.rowY[i] > g.rowY[i - 1], "rows run top to bottom");
+            } });
 
         tc.Run("row labels are short and complete (panel-polish-1, no truncation)", [](TestCase &t)
                {
@@ -524,13 +525,11 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(std::string(ps2x::set2::rowBlurb(Row::Apply)).find("discard") != std::string::npos,
                      "apply blurb says closing discards"); });
 
-        tc.Run("touch halves split the row middle; menu button clears the cutout", [](TestCase &t)
+        tc.Run("menu button clears the cutout (the panel's only touch target)", [](TestCase &t)
                {
-            const auto g = ps2x::set2::panelLayout(1280.0f, 720.0f);
-            t.IsTrue(ps2x::set2::rowTapBack(g, g.rowX), "far left steps back");
-            t.IsTrue(ps2x::set2::rowTapBack(g, g.rowX + g.rowW * 0.5f - 1.0f), "just left of middle steps back");
-            t.IsTrue(!ps2x::set2::rowTapBack(g, g.rowX + g.rowW * 0.5f), "middle steps forward");
-            t.IsTrue(!ps2x::set2::rowTapBack(g, g.rowX + g.rowW), "far right steps forward");
+            // ui-pad-only-1 (Brad 10-20): rowTapBack is removed with the
+            // row hit test — Left/Right come from the pad. The "..."
+            // launcher stays a touch target, so its geometry stays covered.
             const auto plain = ps2x::set2::menuButtonLayout(1920.0f, 1080.0f);
             const auto inset = ps2x::set2::menuButtonLayout(1920.0f, 1080.0f, 59.0f);
             t.IsTrue(inset.y == plain.y + 59.0f, "safeTop shifts the button below the cutout");
@@ -965,4 +964,142 @@ void register_ps2_settings_overlay_tests()
                 for (const unsigned char c : m) ascii = ascii && c < 0x80;
                 t.IsTrue(ascii, ("mapped ASCII: " + s).c_str());
             } }); });
+
+    // ui-pad-only-1 (Brad 10-20): controller-only host UIs. Sticks join the
+    // d-pad on the panel; the resume prompt steps from the same held
+    // directions on any pad (d-pad, stick or the virtual pad).
+    MiniTest::Case("Set2StickNav", [](TestCase &tc)
+                   {
+        tc.Run("stick directions threshold at half deflection", [](TestCase &t)
+               {
+            using ps2x::set2::stickDirBits;
+            t.Equals(stickDirBits(0.0f, 0.0f), static_cast<uint8_t>(0), "centred: none");
+            t.Equals(stickDirBits(0.0f, -0.6f), ps2x::set2::kStickUp, "up");
+            t.Equals(stickDirBits(0.0f, 0.6f), ps2x::set2::kStickDown, "down");
+            t.Equals(stickDirBits(-0.6f, 0.0f), ps2x::set2::kStickLeft, "left");
+            t.Equals(stickDirBits(0.6f, 0.0f), ps2x::set2::kStickRight, "right");
+            t.Equals(stickDirBits(0.49f, -0.49f), static_cast<uint8_t>(0), "inside dead zone");
+            t.Equals(stickDirBits(-0.5f, -0.5f),
+                     static_cast<uint8_t>(ps2x::set2::kStickUp | ps2x::set2::kStickLeft), "diagonal");
+            t.Equals(stickDirBits(-1.0f, 1.0f),
+                     static_cast<uint8_t>(ps2x::set2::kStickDown | ps2x::set2::kStickLeft), "full diagonal"); });
+
+        tc.Run("d-pad buttons map to the same direction bits", [](TestCase &t)
+               {
+            using ps2x::set2::dirsFromDpad;
+            t.Equals(dirsFromDpad(false, false, false, false), static_cast<uint8_t>(0), "none");
+            t.Equals(dirsFromDpad(true, false, false, true),
+                     static_cast<uint8_t>(ps2x::set2::kStickUp | ps2x::set2::kStickRight), "up+right"); });
+
+        tc.Run("edges fire once per press, release re-arms", [](TestCase &t)
+               {
+            ps2x::set2::StickNav st;
+            t.Equals(ps2x::set2::stickNavEdges(st, ps2x::set2::kStickDown), ps2x::set2::kStickDown,
+                     "press edges");
+            t.Equals(ps2x::set2::stickNavEdges(st, ps2x::set2::kStickDown), static_cast<uint8_t>(0),
+                     "held: no repeat");
+            t.Equals(ps2x::set2::stickNavEdges(st,
+                                              static_cast<uint8_t>(ps2x::set2::kStickDown | ps2x::set2::kStickLeft)),
+                     ps2x::set2::kStickLeft, "second direction edges while first held");
+            t.Equals(ps2x::set2::stickNavEdges(st, static_cast<uint8_t>(0)), static_cast<uint8_t>(0),
+                     "release: no edge");
+            t.Equals(ps2x::set2::stickNavEdges(st, ps2x::set2::kStickDown), ps2x::set2::kStickDown,
+                     "re-press edges again"); }); });
+
+    MiniTest::Case("Set2ResumeNav", [](TestCase &tc)
+                   {
+        tc.Run("fresh slot defaults to Resume; up/left select it, down/right select Start fresh", [](TestCase &t)
+               {
+            ps2x::set2::ResumeNav st;
+            t.IsTrue(st.resumeSelected, "fresh default is Resume");
+            t.IsTrue(!ps2x::set2::resumeStep(st, 0u), "no direction: no step");
+            t.IsTrue(st.resumeSelected, "still Resume");
+            t.IsTrue(ps2x::set2::resumeStep(st, ps2x::set2::kStickRight), "right edges");
+            t.IsTrue(!st.resumeSelected, "Start fresh selected");
+            t.IsTrue(!ps2x::set2::resumeStep(st, ps2x::set2::kStickRight), "held right: no repeat");
+            t.IsTrue(ps2x::set2::resumeStep(st, ps2x::set2::kStickUp), "up edges");
+            t.IsTrue(st.resumeSelected, "back to Resume"); });
+
+        tc.Run("stale slot defaults to Start fresh; both choices reachable by pad", [](TestCase &t)
+               {
+            // resume-ios-1: a disclosed-stale slot defaults to Start fresh.
+            ps2x::set2::ResumeNav st;
+            st.resumeSelected = false;
+            // Controller switch sequence (Brad 10-19): left, right, left,
+            // down — every switch lands, held dirs never stick.
+            t.IsTrue(ps2x::set2::resumeStep(st, ps2x::set2::kStickLeft), "left edges");
+            t.IsTrue(st.resumeSelected, "Resume chosen");
+            t.IsTrue(ps2x::set2::resumeStep(st, ps2x::set2::kStickDown), "down edges");
+            t.IsTrue(!st.resumeSelected, "Start fresh chosen");
+            t.IsTrue(ps2x::set2::resumeStep(st, ps2x::set2::kStickLeft), "left edges again");
+            t.IsTrue(st.resumeSelected, "Resume chosen again");
+            // A diagonal re-affirms the Resume side, then release clears.
+            t.IsTrue(ps2x::set2::resumeStep(
+                         st, static_cast<uint8_t>(ps2x::set2::kStickUp | ps2x::set2::kStickRight)),
+                     "diagonal edges");
+            t.IsTrue(!ps2x::set2::resumeStep(st, 0u), "release: no step"); }); });
+
+    MiniTest::Case("Set2VpadNav", [](TestCase &tc)
+                   {
+        tc.Run("scripted virtual-pad run: move, stick-move, stage, close", [](TestCase &t)
+               {
+            // ui-pad-only-1 (Brad 10-20): synthetic touches through the
+            // real layout + hit test drive the same open-panel input the
+            // render loop runs (union edges + stick edges into navStep).
+            // Window 1280x720 (u = 720): the D-pad disc, face buttons and
+            // stick zone below come from makeLayout, never hand-placed.
+            const float w = 1280.0f, h = 720.0f;
+            const auto layout = ps2x::vpad::makeLayout(w, h);
+            ps2x::vpad::PadState pad;
+            ps2x::set2::NavState st; // sel starts at Mode, like the open seed
+            uint16_t prevUnion = 0u;
+            ps2x::set2::StickNav sn;
+            ps2x::set2::Action lastAction = ps2x::set2::Action::None;
+            auto frame = [&](std::initializer_list<ps2x::vpad::TouchPoint> list) {
+                std::vector<ps2x::vpad::TouchPoint> ts(list);
+                const ps2x::vpad::PadFrame f =
+                    ps2x::vpad::updatePad(pad, layout, ts.data(), static_cast<int>(ts.size()), true);
+                const uint8_t held = ps2x::set2::stickDirBits(f.stick.active ? f.stick.x : 0.0f,
+                                                              f.stick.active ? f.stick.y : 0.0f);
+                const uint8_t se = ps2x::set2::stickNavEdges(sn, held);
+                const uint16_t edge =
+                    static_cast<uint16_t>(f.pressed & static_cast<uint16_t>(~prevUnion));
+                prevUnion = f.pressed;
+                const auto out = ps2x::set2::navStep(
+                    st, ((edge & ps2x::vpad::kUp) != 0u) || ((se & ps2x::set2::kStickUp) != 0u),
+                    ((edge & ps2x::vpad::kDown) != 0u) || ((se & ps2x::set2::kStickDown) != 0u),
+                    (edge & ps2x::vpad::kCross) != 0u, (edge & ps2x::vpad::kTriangle) != 0u, false,
+                    ((edge & ps2x::vpad::kLeft) != 0u) || ((se & ps2x::set2::kStickLeft) != 0u),
+                    ((edge & ps2x::vpad::kRight) != 0u) || ((se & ps2x::set2::kStickRight) != 0u),
+                    (edge & ps2x::vpad::kCircle) != 0u);
+                lastAction = out.action;
+                return f.pressed;
+            };
+            const float dcx = w - 0.532f * h, dcy = 0.78f * h; // D-pad disc centre
+            const float dOff = 0.16f * h * (11.0f / 19.0f);    // arrow offset
+            const float rx = w - 0.205f * h, cy = 0.60f * h;   // face cluster centre
+            const float off = 0.13f * h;                       // face offset
+            t.Equals(frame({}), static_cast<uint16_t>(0), "idle: nothing pressed");
+            // Down-tap on the D-pad disc moves Mode -> Resolution.
+            t.Equals(frame({{1, dcx, dcy + dOff}}), ps2x::vpad::kDown, "down arrow presses");
+            t.IsTrue(st.sel == ps2x::set2::Row::Res, "down moves to Resolution");
+            t.Equals(frame({{1, dcx, dcy + dOff}}), ps2x::vpad::kDown, "held: still down");
+            t.IsTrue(st.sel == ps2x::set2::Row::Res, "held: no repeat");
+            t.Equals(frame({}), static_cast<uint16_t>(0), "lift releases");
+            // Stick flick up (anchor, then drag past half deflection).
+            t.Equals(frame({{2, 0.28f * h, cy}}), static_cast<uint16_t>(0), "stick anchors, centred");
+            t.Equals(frame({{2, 0.28f * h, cy - 0.15f * h}}), static_cast<uint16_t>(0),
+                     "stick drag presses no button");
+            t.IsTrue(st.sel == ps2x::set2::Row::Mode, "stick up moves back to Mode");
+            t.Equals(frame({}), static_cast<uint16_t>(0), "lift releases the stick");
+            // X-tap on Cross stages the Mode row (change, then Cancel).
+            t.Equals(frame({{3, rx, cy + off}}), ps2x::vpad::kCross, "cross presses");
+            t.IsTrue(lastAction == ps2x::set2::Action::Changed, "cross stages");
+            t.IsTrue(ps2x::set2::modeDirty(st), "mode staged M120 -> M60");
+            t.Equals(frame({}), static_cast<uint16_t>(0), "lift releases");
+            // Triangle-tap closes (Cancel path: staged changes discarded).
+            t.Equals(frame({{4, rx, cy - off}}), ps2x::vpad::kTriangle, "triangle presses");
+            t.IsTrue(lastAction == ps2x::set2::Action::Close, "triangle closes");
+            t.IsTrue(ps2x::set2::modeDirty(st), "stages stay for the caller to drop"); }); });
+
 }

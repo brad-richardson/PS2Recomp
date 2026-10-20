@@ -3009,8 +3009,13 @@ bool asv1AskToResume(bool &closed, bool lastSaveFailed, uint64_t savedWallUnixS,
     // resume-ios-1: a disclosed-stale slot defaults to Start fresh (offering
     // the older save as "Resume" is the silent-stale bug); a fresh slot keeps
     // the Resume default. settings-ui-1 restyles inside this body.
-    bool resumeSelected = !lastSaveFailed;
-    int lastTouchId = -1;
+    // ui-pad-only-1 (Brad 10-20): controller-only prompt. resumeSelected is
+    // owned by ResumeNav (pure, suite-covered); the loop below only samples.
+    ps2x::set2::ResumeNav rnav;
+    rnav.resumeSelected = !lastSaveFailed;
+    bool resumeSelected = rnav.resumeSelected;
+    ps2x::vpad::PadState rpad; // virtual-pad touch ownership, carried across prompt frames
+    bool rPrevConfirm = false; // X held last frame (confirm edge)
     const std::string ageLine =
         (savedWallUnixS != 0u && nowWallUnixS != 0u)
             ? ps2x::vpad::autosaveAgeLine(savedWallUnixS, nowWallUnixS)
@@ -3034,34 +3039,72 @@ bool asv1AskToResume(bool &closed, bool lastSaveFailed, uint64_t savedWallUnixS,
                                   static_cast<float>(buttonW), static_cast<float>(buttonH)};
         const Rectangle freshBox{static_cast<float>(x + buttonW + gap), static_cast<float>(y),
                                  static_cast<float>(buttonW), static_cast<float>(buttonH)};
-        // Brad 10-19: the controller drives the prompt too (touch-only was a
-        // bug). D-pad/keyboard arrows move between the two options, X/cross
-        // (pad) or Enter (key) confirms. Same code on Android and iOS.
-        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_UP) ||
-            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT) ||
-            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP))
-            resumeSelected = true;
-        if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_DOWN) ||
-            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) ||
-            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
-            resumeSelected = false;
-        if (IsKeyPressed(KEY_ENTER) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-            return resumeSelected;
-        if (GetTouchPointCount() > 0)
+        // ui-pad-only-1 (Brad 10-20): controller-only prompt — no direct
+        // touch hit-testing. D-pad/stick on ANY connected controller moves
+        // between the two options (every slot is polled, not just slot 0,
+        // so switching works from any pad: Brad 10-19, relaunch switching
+        // failed with the controller); X (pad) or Enter (key) confirms.
+        // Touch players use the virtual pad drawn below, which feeds the
+        // same edges. Same code on Android and iOS.
+        uint8_t rDirs = 0u;
+        bool rConfirmHeld = false;
+        for (int ri = 0; ri < 8; ++ri)
         {
-            const int id = GetTouchPointId(0);
-            if (id != lastTouchId)
-            {
-                const Vector2 p = GetTouchPosition(0);
-                if (CheckCollisionPointRec(p, resumeBox))
-                    return true;
-                if (CheckCollisionPointRec(p, freshBox))
-                    return false;
-            }
-            lastTouchId = id;
+            if (!IsGamepadAvailable(ri))
+                continue;
+            if (IsGamepadButtonDown(ri, GAMEPAD_BUTTON_LEFT_FACE_UP))
+                rDirs |= ps2x::set2::kStickUp;
+            if (IsGamepadButtonDown(ri, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+                rDirs |= ps2x::set2::kStickDown;
+            if (IsGamepadButtonDown(ri, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+                rDirs |= ps2x::set2::kStickLeft;
+            if (IsGamepadButtonDown(ri, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+                rDirs |= ps2x::set2::kStickRight;
+            if (IsGamepadButtonDown(ri, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+                rConfirmHeld = true;
+            rDirs |= ps2x::set2::stickDirBits(GetGamepadAxisMovement(ri, GAMEPAD_AXIS_LEFT_X),
+                                              GetGamepadAxisMovement(ri, GAMEPAD_AXIS_LEFT_Y));
+            rDirs |= ps2x::set2::stickDirBits(GetGamepadAxisMovement(ri, GAMEPAD_AXIS_RIGHT_X),
+                                              GetGamepadAxisMovement(ri, GAMEPAD_AXIS_RIGHT_Y));
         }
-        else
-            lastTouchId = -1;
+        rDirs |= ps2x::set2::dirsFromDpad(IsKeyDown(KEY_UP) || IsKeyDown(KEY_W), IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S),
+                                          IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A),
+                                          IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D));
+        // The virtual pad stays up on the prompt (touch players' only
+        // controller here) and hides while a physical controller is
+        // connected (existing behaviour: presence on Android, real-press
+        // rule on iOS like the in-game overlay).
+        const bool rPadWanted = ps2x::vpad::enabledFromEnv(std::getenv("PS2X_VIRTUAL_PAD"));
+#if defined(__ANDROID__)
+        const bool rPadHides = gamepadConnected() || gamepadInUse();
+#else
+        const bool rPadHides = iosRealControllerPresent() || gamepadInUse();
+#endif
+        const bool rPadShow = rPadWanted && !rPadHides;
+        ps2x::vpad::Layout rLayout = ps2x::vpad::makeLayout(static_cast<float>(w), static_cast<float>(h));
+        uint16_t rPressed = 0u;
+        ps2x::vpad::StickVec rStick;
+        if (rPadShow)
+        {
+            ps2x::vpad::TouchPoint rts[8];
+            const int rn = virtualPadTouches(rts, 8, static_cast<float>(w), static_cast<float>(h));
+            const ps2x::vpad::PadFrame rf = ps2x::vpad::updatePad(rpad, rLayout, rts, rn, true);
+            rPressed = rf.pressed;
+            rStick = rf.stick;
+            rDirs |= ps2x::set2::dirsFromDpad((rPressed & ps2x::vpad::kUp) != 0u,
+                                              (rPressed & ps2x::vpad::kDown) != 0u,
+                                              (rPressed & ps2x::vpad::kLeft) != 0u,
+                                              (rPressed & ps2x::vpad::kRight) != 0u);
+            rDirs |= ps2x::set2::stickDirBits(rStick.active ? rStick.x : 0.0f,
+                                              rStick.active ? rStick.y : 0.0f);
+            rConfirmHeld = rConfirmHeld || ((rPressed & ps2x::vpad::kCross) != 0u);
+        }
+        (void)ps2x::set2::resumeStep(rnav, rDirs);
+        resumeSelected = rnav.resumeSelected;
+        const bool rConfirmEdge = (rConfirmHeld && !rPrevConfirm) || IsKeyPressed(KEY_ENTER);
+        rPrevConfirm = rConfirmHeld;
+        if (rConfirmEdge)
+            return resumeSelected;
         // settings-ui-1 (Brad 10-19): the resume prompt wears the settings
         // panel style — same shared constants (palette, fonts), same flat
         // buttons with the panel-orange selected outline.
@@ -3109,6 +3152,10 @@ bool asv1AskToResume(bool &closed, bool lastSaveFailed, uint64_t savedWallUnixS,
             static_cast<float>(x + buttonW + gap) + (static_cast<float>(buttonW) - freshW) * 0.5f,
             static_cast<float>(y + (buttonH - labelSize) / 2), static_cast<float>(labelSize),
             set2C(resumeSelected ? ps2x::set2::kSet2Text : ps2x::set2::kSet2TextSel), false);
+        // ui-pad-only-1 (Brad 10-20): the virtual pad stays visible and
+        // working on the prompt (touch players' only controller here).
+        if (rPadShow)
+            drawVirtualPad(rLayout, rPressed, rStick);
         EndDrawing();
     }
     closed = true;
@@ -8261,9 +8308,15 @@ void PS2Runtime::run()
     ps2x::set2::Res set2DefRes = ps2x::set2::Res::Screen; // (default) marker + preselect (correction 4)
     uint64_t set2HostFrame = 0;
     uint16_t set2PrevUnion = 0; // nav edge detect
+    ps2x::set2::StickNav set2StickNav; // stick held-directions last frame (nav edge detect)
+    // ui-pad-only-1: the open panel's virtual-pad frame, sampled with the
+    // nav input and drawn after the panel (so the pad stays visible).
+    ps2x::vpad::Layout set2OpenPadLayout;
+    uint16_t set2OpenPadPressed = 0u;
+    ps2x::vpad::StickVec set2OpenPadStick;
+    bool set2OpenPadShow = false;
     ps2x::set2::SwallowState set2Swallow; // close-press overhang, stripped until release
-    std::vector<int64_t> set2Down; // touch ids currently on the panel/dot
-    std::vector<int64_t> set2HeldTouches; // touches still down at close, masked until release
+    std::vector<int64_t> set2HeldTouches; // touches still down at open/close, masked until release
     std::vector<int64_t> set2MenuIds; // touch ids seen while closed (a held finger never re-opens)
     int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
     bool set2Perf = false;         // running perf-overlay flag (env default at boot)
@@ -8862,13 +8915,32 @@ void PS2Runtime::run()
             const bool acked = ps2x::hostPause::waitGateAck(2000);
             set2HoldsPause().store(true, std::memory_order_release);
             set2Open = true;
+            // ui-pad-only-1: resync the stick edge detector so a stick held
+            // while riding does not step the panel on the first open frame.
+            {
+                uint8_t set2heldDirs = 0u;
+                for (int si = 0; si < 4; ++si)
+                {
+                    if (!IsGamepadAvailable(si))
+                        continue;
+                    set2heldDirs |= ps2x::set2::stickDirBits(
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_LEFT_X),
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_LEFT_Y));
+                    set2heldDirs |= ps2x::set2::stickDirBits(
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_RIGHT_X),
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_RIGHT_Y));
+                }
+                set2StickNav.prev = set2heldDirs;
+            }
             // Seed: touches already down (incl. the tap/chord that opened us)
-            // must not edge in the open branch next frame.
+            // must not edge in the open branch next frame. ui-pad-only-1:
+            // the open panel is controller-only, so held fingers stay
+            // masked until lift (same rule as the close seed below).
             ps2x::vpad::TouchPoint seed[8];
             const int nseed = set2SampleTouches(seed);
-            set2Down.clear();
+            set2HeldTouches.clear();
             for (int i = 0; i < nseed; ++i)
-                set2Down.push_back(seed[i].id);
+                set2HeldTouches.push_back(seed[i].id);
             if (set2ShotPath && set2ShotPath[0] != '\0')
                 set2ShotIn = 45;
             std::fprintf(stderr, "[set2] open guestTick=%llu gateAck=%d mode=%s upscale=%s\n",
@@ -8892,13 +8964,9 @@ void PS2Runtime::run()
             {
                 ps2x::vpad::TouchPoint seed[8];
                 const int nseed = set2SampleTouches(seed);
-                set2Down.clear();
                 set2HeldTouches.clear();
                 for (int i = 0; i < nseed; ++i)
-                {
-                    set2Down.push_back(seed[i].id);
                     set2HeldTouches.push_back(seed[i].id);
-                }
             }
             ps2x::padlatch::setPanelOpenAll(false);
             set2HoldsPause().store(false, std::memory_order_release);
@@ -8907,8 +8975,9 @@ void PS2Runtime::run()
             // android-touch-1c: no underlay call here (it used to force
             // false and strand a shown overlay with GL skipped): the
             // per-frame rule above re-asserts next frame.
-            // NOTE: no set2Down.clear() here — the seed above must survive
-            // (a stale clear undid the seed and re-opened the panel).
+            // NOTE: no set2HeldTouches.clear() here — the seed above must
+            // survive (a stale clear undid the seed and re-opened the
+            // panel).
             set2ShotIn = -1;
             std::fprintf(stderr, "[set2] close guestTick=%llu\n",
                          static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
@@ -9078,16 +9147,81 @@ void PS2Runtime::run()
             }
             else
             {
-                const uint16_t set2Edge = static_cast<uint16_t>(set2Union & ~set2PrevUnion);
+                // ui-pad-only-1 (Brad 10-20): controller-only panel. No
+                // direct touch hit-testing: the virtual pad drives the same
+                // pad edges a physical controller uses (d-pad/stick move, X
+                // stages/confirms, Triangle/O closes), and the pad is drawn
+                // after the panel below so it stays visible.
+                // The pad shows exactly when the game branch would show it
+                // (wanted, no physical controller); with Touch=Off there is
+                // no overlay and only the physical pad navigates.
+                set2OpenPadShow =
+                    (vpadWanted && !vpadPadConnected) && vpadTouchMode != ps2x::set2::Touch::Off;
+                set2OpenPadLayout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
+                uint16_t set2PadPressed = 0u;
+                ps2x::vpad::StickVec set2PadStick;
+                if (set2OpenPadShow)
+                {
+                    ps2x::vpad::TouchPoint set2padTs[8];
+                    int set2padN = set2SampleTouches(set2padTs);
+                    // Fingers held across open/close never edge: drop them
+                    // until lift (same rule as the game branch), and drain
+                    // lifted ids.
+                    if (!set2HeldTouches.empty())
+                    {
+                        std::vector<int64_t> set2padStill;
+                        int set2padKept = 0;
+                        for (int i = 0; i < set2padN; ++i)
+                        {
+                            const int64_t id = set2padTs[i].id;
+                            if (std::find(set2HeldTouches.begin(), set2HeldTouches.end(), id) !=
+                                set2HeldTouches.end())
+                                set2padStill.push_back(id);
+                            else
+                                set2padTs[set2padKept++] = set2padTs[i];
+                        }
+                        set2padN = set2padKept;
+                        set2HeldTouches = set2padStill;
+                    }
+                    const ps2x::vpad::PadFrame set2padFrame = ps2x::vpad::updatePad(
+                        vpadPad, set2OpenPadLayout, set2padTs, set2padN, vpadShoulderBand);
+                    set2PadPressed = set2padFrame.pressed;
+                    set2PadStick = set2padFrame.stick;
+                }
+                set2OpenPadPressed = set2PadPressed;
+                set2OpenPadStick = set2PadStick;
+                // Sticks: the pad's stick plus every physical stick, as held
+                // directions with rising edges (a held stick never re-fires).
+                uint8_t set2StickHeld = ps2x::set2::stickDirBits(
+                    set2PadStick.active ? set2PadStick.x : 0.0f, set2PadStick.active ? set2PadStick.y : 0.0f);
+                for (int si = 0; si < 4; ++si)
+                {
+                    if (!IsGamepadAvailable(si))
+                        continue;
+                    set2StickHeld |= ps2x::set2::stickDirBits(
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_LEFT_X),
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_LEFT_Y));
+                    set2StickHeld |= ps2x::set2::stickDirBits(
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_RIGHT_X),
+                        GetGamepadAxisMovement(si, GAMEPAD_AXIS_RIGHT_Y));
+                }
+                const uint8_t set2StickEdge = ps2x::set2::stickNavEdges(set2StickNav, set2StickHeld);
+                const uint16_t set2OpenUnion = static_cast<uint16_t>(set2Union | set2PadPressed);
+                const uint16_t set2OpenEdge = static_cast<uint16_t>(set2OpenUnion & ~set2PrevUnion);
                 // settings-ui-1 (Brad 10-19): d-pad Left/Right stage a step
                 // back/forward; X stages forward. Nothing applies on a row.
+                // ui-pad-only-1: stick directions join the d-pad edges, and
+                // Circle (O) closes like Triangle.
                 const ps2x::set2::NavOut navOut = ps2x::set2::navStep(
-                    set2Nav, (set2Edge & ps2x::vpad::kUp) != 0u,
-                    (set2Edge & ps2x::vpad::kDown) != 0u,
-                    (set2Edge & ps2x::vpad::kCross) != 0u,
-                    (set2Edge & ps2x::vpad::kTriangle) != 0u, set2ChordOut.openEdge,
-                    (set2Edge & ps2x::vpad::kLeft) != 0u,
-                    (set2Edge & ps2x::vpad::kRight) != 0u);
+                    set2Nav, ((set2OpenEdge & ps2x::vpad::kUp) != 0u) || ((set2StickEdge & ps2x::set2::kStickUp) != 0u),
+                    ((set2OpenEdge & ps2x::vpad::kDown) != 0u) ||
+                        ((set2StickEdge & ps2x::set2::kStickDown) != 0u),
+                    (set2OpenEdge & ps2x::vpad::kCross) != 0u, (set2OpenEdge & ps2x::vpad::kTriangle) != 0u,
+                    set2ChordOut.openEdge,
+                    ((set2OpenEdge & ps2x::vpad::kLeft) != 0u) || ((set2StickEdge & ps2x::set2::kStickLeft) != 0u),
+                    ((set2OpenEdge & ps2x::vpad::kRight) != 0u) ||
+                        ((set2StickEdge & ps2x::set2::kStickRight) != 0u),
+                    (set2OpenEdge & ps2x::vpad::kCircle) != 0u);
                 if (navOut.action == ps2x::set2::Action::Apply)
                     set2ApplyStaged();
                 if (navOut.action != ps2x::set2::Action::None)
@@ -9101,8 +9235,14 @@ void PS2Runtime::run()
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
                     set2DoRestart();
+                set2PrevUnion = set2OpenUnion;
             }
-            set2PrevUnion = set2Union;
+            // ui-pad-only-1: the open branch tracks its own union (physical
+            // | virtual pad) above; only the closed branch lands here — and
+            // a close inside the open branch re-arms from the bare union so
+            // no stale virtual-pad edge fires next frame.
+            if (!set2Open)
+                set2PrevUnion = set2Union;
         }
         // tk-menu-1 Part 2: the Tricky course list. Knob off: the outer
         // bool only. While open the list owns the pad (the guest gets
@@ -10169,58 +10309,10 @@ void PS2Runtime::run()
         }
         else if (set2Open)
         {
-            // SET2: the panel owns the pad. Touches hit-test the panel (row
-            // taps act as X on that row, taps outside close); nothing
-            // reaches the guest (publish-zero, frozen anyway).
-            const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
-            ps2x::vpad::TouchPoint set2ts[8];
-            const int set2n = set2SampleTouches(set2ts);
-            std::vector<int64_t> set2Still;
-            for (int i = 0; i < set2n && set2Open; ++i)
-            {
-                set2Still.push_back(set2ts[i].id);
-                if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) != set2Down.end())
-                    continue;
-                set2Down.push_back(set2ts[i].id);
-                const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
-                if (hit >= 0 && hit < ps2x::set2::kRowCount)
-                {
-                    // settings-ui-1 (Brad 10-19): tapping a different row
-                    // selects it, then the tap stages (never applies): the
-                    // left/right halves of a value row step back/forward,
-                    // Apply/Cancel confirm either way.
-                    if (hit != static_cast<int>(set2Nav.sel))
-                        set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
-                    ps2x::set2::NavOut tapOut;
-                    if (hit == static_cast<int>(ps2x::set2::Row::Apply) ||
-                        hit == static_cast<int>(ps2x::set2::Row::Cancel))
-                        tapOut = ps2x::set2::navStep(set2Nav, false, false, true, false, false);
-                    else
-                    {
-                        const bool back = ps2x::set2::rowTapBack(set2g, set2ts[i].x);
-                        tapOut = ps2x::set2::navStep(set2Nav, false, false, false, false, false,
-                                                     back, !back);
-                    }
-                    if (tapOut.action == ps2x::set2::Action::Apply)
-                        set2ApplyStaged();
-                    std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
-                                 static_cast<int>(tapOut.action));
-                    if (tapOut.action == ps2x::set2::Action::Close)
-                        set2DoClose();
-                    else if (tapOut.action == ps2x::set2::Action::DoRestart)
-                        set2DoRestart();
-                }
-                else
-                    set2DoClose(); // taps outside the rows close (discards staged)
-            }
-            if (set2Open)
-            {
-                std::vector<int64_t> set2Left;
-                for (int64_t id : set2Down)
-                    if (std::find(set2Still.begin(), set2Still.end(), id) != set2Still.end())
-                        set2Left.push_back(id);
-                set2Down = set2Left;
-            }
+            // ui-pad-only-1 (Brad 10-20): controller-only panel — no direct
+            // touch hit-testing here (the nav input above already merged the
+            // virtual pad). Nothing reaches the guest (publish-zero, frozen
+            // anyway). The pad itself is drawn after the panel below.
             publishPad(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             vpadPressedPrev = 0u; // set2-polish-1: panel owns the pad while open
@@ -10603,6 +10695,11 @@ void PS2Runtime::run()
                                set2dg.py + set2dg.ph - static_cast<float>(rowFont) - 8.0f,
                                static_cast<float>(rowFont), set2C(ps2x::set2::kSet2Hint), false);
             }
+            // ui-pad-only-1 (Brad 10-20): the virtual controller stays
+            // visible over the open panel (drawn after it, same blend as
+            // the panel). The frame was sampled with the nav input above.
+            if (set2Open && set2OpenPadShow)
+                drawVirtualPad(set2OpenPadLayout, set2OpenPadPressed, set2OpenPadStick);
             if (!set2Open && ps2x::set2::menuButtonShown(set2MenuLive))
             {
                 // settings-ui-1 (Brad 10-19): the "..." menu button, top

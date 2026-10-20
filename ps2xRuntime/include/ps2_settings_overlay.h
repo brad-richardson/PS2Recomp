@@ -796,10 +796,13 @@ inline uint16_t swallowStep(SwallowState &st, uint16_t unionMask)
 // when clean. Cancel/Cancel-tap, Triangle and the chord Close (the caller
 // drops NavState, so staged changes are discarded without a write).
 inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, bool triangleEdge,
-                      bool chordEdge, bool leftEdge = false, bool rightEdge = false)
+                      bool chordEdge, bool leftEdge = false, bool rightEdge = false,
+                      bool circleEdge = false)
 {
     NavOut out;
-    if (chordEdge || triangleEdge)
+    // ui-pad-only-1 (Brad 10-20): controller-only panel — X stages/confirms,
+    // Triangle/O closes. Circle (O) is the same back edge as Triangle.
+    if (chordEdge || triangleEdge || circleEdge)
     {
         out.action = Action::Close;
         return out;
@@ -897,22 +900,9 @@ inline PanelGeom panelLayout(float w, float h)
     return g;
 }
 
-inline int panelHit(const PanelGeom &g, bool open, float x, float y)
-{
-    // set2-polish-1 (Brad 10-16): no gear dot — a closed panel has no row
-    // tap target (the "..." menu button is hit-tested separately), so any
-    // closed-panel row tap misses.
-    if (!open)
-        return -1;
-    if (x < g.rowX || x > g.rowX + g.rowW)
-        return -1;
-    for (int i = 0; i < kRowCount; ++i)
-    {
-        if (y >= g.rowY[i] && y < g.rowY[i] + g.rowH)
-            return i;
-    }
-    return -1;
-}
+// panelHit removed (ui-pad-only-1, Brad 10-20): controller-only panel, no
+// direct touch hit-testing. The "..." launcher keeps its own hit test
+// (menuButtonHit below); the rows are pad-navigated (navStep above).
 
 // --- settings.env: the user settings layer, read last at boot ---
 //
@@ -1214,12 +1204,104 @@ inline bool menuButtonHit(const MenuButtonGeom &g, float x, float y)
     return x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h;
 }
 
-// Touch halves (settings-ui-1, Brad 10-19): a tap left of the row middle
-// steps back, right of it steps forward. The draw wraps multi-value rows
-// in "< >" arrows as the affordance; the halves are the tap zones.
-inline bool rowTapBack(const PanelGeom &g, float x)
+// rowTapBack removed (ui-pad-only-1, Brad 10-20): controller-only panel, no
+// direct touch halves. Left/Right come from the pad (d-pad/stick); the
+// "< >" arrows stay as the drawn affordance.
+
+// --- Controller-only host UIs (ui-pad-only-1, Brad 10-20) ---
+//
+// The settings panel and the resume prompt take pad input only: d-pad/stick
+// move, X stages/confirms, Triangle/O closes. Touch players drive them
+// through the on-screen virtual controller, which the render loop keeps
+// visible and working on those screens. Pure here so the host suite covers
+// it; the render loop owns sampling, drawing and the guest pad latch.
+
+// Stick direction bits (screen coords: +x right, +y down, matching the
+// virtual pad's TouchPoint space). A 0.5 deflection threshold matches the
+// overlay-hide rule's half-way press.
+constexpr uint8_t kStickUp = 0x01u;
+constexpr uint8_t kStickDown = 0x02u;
+constexpr uint8_t kStickLeft = 0x04u;
+constexpr uint8_t kStickRight = 0x08u;
+
+// Held stick directions from one analog source (physical stick axes or the
+// virtual pad's stick vector, -1..1).
+inline uint8_t stickDirBits(float x, float y)
 {
-    return x < g.rowX + g.rowW * 0.5f;
+    uint8_t out = 0u;
+    if (y <= -0.5f)
+        out |= kStickUp;
+    else if (y >= 0.5f)
+        out |= kStickDown;
+    if (x <= -0.5f)
+        out |= kStickLeft;
+    else if (x >= 0.5f)
+        out |= kStickRight;
+    return out;
+}
+
+// Held d-pad buttons as direction bits, so buttons and sticks share one
+// edge detector below.
+inline uint8_t dirsFromDpad(bool up, bool down, bool left, bool right)
+{
+    uint8_t out = 0u;
+    if (up)
+        out |= kStickUp;
+    if (down)
+        out |= kStickDown;
+    if (left)
+        out |= kStickLeft;
+    if (right)
+        out |= kStickRight;
+    return out;
+}
+
+struct StickNav
+{
+    uint8_t prev = 0u; // held directions last frame
+};
+
+// Rising edges of the combined held directions (every stick source ORed
+// before this call). A held direction never re-fires; release + re-press
+// fires again.
+inline uint8_t stickNavEdges(StickNav &st, uint8_t held)
+{
+    const uint8_t edges = static_cast<uint8_t>(held & ~st.prev);
+    st.prev = held;
+    return edges;
+}
+
+// Resume prompt selection (pure; the prompt loop owns draw/input).
+// resumeSelected starts from the disclosed-stale rule (fresh slot offers
+// Resume; a stale slot discloses and defaults to Start fresh). Any up/left
+// edge selects Resume, any down/right edge selects Start fresh — d-pad,
+// stick and the virtual pad all feed the same held-direction bits, and
+// every physical controller slot is polled, so switching works from any
+// pad (Brad 10-19: relaunch switching failed with the controller).
+struct ResumeNav
+{
+    bool resumeSelected = true;
+    uint8_t prevDirs = 0u; // held directions last frame
+};
+
+// Steps the selection from the combined held directions. Returns true when
+// an edge moved the selection (re-affirming the current side still
+// returns true; callers read resumeSelected for the state).
+inline bool resumeStep(ResumeNav &st, uint8_t dirHeld)
+{
+    const uint8_t edges = static_cast<uint8_t>(dirHeld & ~st.prevDirs);
+    st.prevDirs = dirHeld;
+    if (edges & (kStickUp | kStickLeft))
+    {
+        st.resumeSelected = true;
+        return true;
+    }
+    if (edges & (kStickDown | kStickRight))
+    {
+        st.resumeSelected = false;
+        return true;
+    }
+    return false;
 }
 
 #if defined(__APPLE__) && !defined(PS2X_IOS)
