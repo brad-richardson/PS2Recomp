@@ -1234,6 +1234,9 @@ namespace ps2_stubs
                      std::strcmp(s.name, "persona-pick") == 0 ||
                      std::strcmp(s.name, "qm-entry") == 0))
                     g_qpNav.gaps[i] = 0u;
+                if (g_qpNav.onlineMode && std::strncmp(s.name, "cfg-", 4) == 0)
+                    g_qpNav.gaps[i] = (std::strcmp(s.name, "cfg-2") == 0 ||
+                                       std::strcmp(s.name, "cfg-ok") == 0) ? 30u : 20u;
                 g_qpNav.holds[i] = qpNavMsToTicks(s.holdMs);
                 if (g_qpNav.holds[i] < 6u && s.press != 0u)
                 {
@@ -1572,6 +1575,11 @@ namespace ps2_stubs
             // Timeout and failure handling above still bound every wait.
             if (g_qpNav.onlineMode)
             {
+                if ((std::strcmp(s.name, "cfg-1") == 0 || std::strcmp(s.name, "cfg-2") == 0) &&
+                    !g_qpNav.menuSettle.ready(4u, 0xcu, 20u)) return;
+                if ((std::strcmp(s.name, "cfg-3") == 0 || std::strcmp(s.name, "cfg-ok") == 0) &&
+                    !(std::strcmp(s.name, "cfg-ok") == 0 && menuMain == 3u && menuSub == 0x16u) &&
+                    !g_qpNav.menuSettle.ready(3u, 4u, 15u)) return;
                 constexpr uint64_t settleTicks = 30u + 20u;
                 const bool personaReady =
                     m.gameAuth != 0u && g_qpNav.menuSettle.ready(4u, 2u, settleTicks);
@@ -4210,11 +4218,14 @@ namespace ps2_stubs
         return (value && value[0] != '\0') ? value : "unset";
     }
 
-    // v0 option-0: no overlay (Brad: no Connecting screen over the walk).
-    // The walk runs visibly; any real user pad input still cancels it.
+    // Keep required network-config/login transitions behind the existing
+    // loading presentation. The normal cancel/failure/filter gates lift it.
     bool qpNavOverlayShowing()
     {
-        return false;
+        if (!g_qpNavArmed.load(std::memory_order_relaxed)) return false;
+        std::lock_guard<std::mutex> lock(g_qpNav.mutex);
+        return g_qpNav.onlineMode && g_qpNav.armed && !g_qpNav.done &&
+               !g_qpNav.aborted && !g_qpNav.cancelled;
     }
 
     void padRecordSanitize(char *text)
