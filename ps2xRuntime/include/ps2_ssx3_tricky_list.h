@@ -232,8 +232,29 @@ inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
     return d;
 }
 
+// ASCII case-insensitive compare (F09: env values like "gari" must match
+// the "GARI" table entries; no <cctype> locale dependence).
+inline bool directCodeEqCI(const char *a, const char *b)
+{
+    if (!a || !b)
+        return false;
+    while (*a && *b)
+    {
+        char ca = *a++, cb = *b++;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = static_cast<char>(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = static_cast<char>(cb + ('a' - 'A'));
+        if (ca != cb)
+            return false;
+    }
+    return *a == *b;
+}
+
 // Lookup by world archive code (or course name) for the diagnostic course
-// selector. Returns the course index, or 0 (Garibaldi, the proven default).
+// selector. Case-insensitive. Null/empty keeps the Garibaldi default; an
+// unknown non-empty code returns -1 so the probe caller defers to stock
+// instead of silently riding Garibaldi (F09).
 inline int directCourseByCode(const char *code)
 {
     if (!code || !*code)
@@ -241,13 +262,13 @@ inline int directCourseByCode(const char *code)
     for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
     {
         const Course &c = kCourses[i];
-        if ((c.tp && std::strcmp(code, c.tp) == 0) || std::strcmp(code, c.name) == 0)
+        if (directCodeEqCI(code, c.tp) || directCodeEqCI(code, c.name))
             return i;
         for (uint8_t m = 0; m < c.nOpts; ++m)
-            if (c.opts[m].map.archive && std::strcmp(code, c.opts[m].map.archive) == 0)
+            if (directCodeEqCI(code, c.opts[m].map.archive))
                 return i;
     }
-    return 0;
+    return -1;
 }
 
 // ---- List navigation (pad edges and touch taps map to the same steps) ----

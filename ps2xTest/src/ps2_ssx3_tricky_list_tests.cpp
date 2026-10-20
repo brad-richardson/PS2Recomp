@@ -415,7 +415,10 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(directGoalFor(alaska, alaska.opts[1]).ok, "Alaska Showoff directable (donor ev11)");
             t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
             t.Equals(directCourseByCode("Garibaldi"), 0, "name lookup");
-            t.Equals(directCourseByCode("NOPE"), 0, "unknown falls back to Garibaldi");
+            t.Equals(directCourseByCode("mesa"), 3, "archive lookup case-insensitive");
+            t.Equals(directCourseByCode("garibaldi"), 0, "name lookup case-insensitive");
+            t.Equals(directCourseByCode("NOPE"), -1, "unknown code rejected");
+            t.Equals(directCourseByCode(""), 0, "empty falls back to Garibaldi");
             t.Equals(directCourseByCode(nullptr), 0, "null falls back to Garibaldi");
             ListState l;
             l.sel = 3;

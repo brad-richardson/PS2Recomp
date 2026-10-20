@@ -229,9 +229,16 @@ namespace
         int opt = 0;
         if (const char *optEnv = std::getenv("PS2X_SSX3_TRICKY_DIRECT_OPT"))
             opt = std::atoi(optEnv);
-        return tkDirectStart(ram, ctx, runtime,
-                             ps2_ssx3_tricky_list::directCourseByCode(course ? course : "GARI"),
-                             opt);
+        const int sel = ps2_ssx3_tricky_list::directCourseByCode(course ? course : "GARI");
+        if (sel < 0)
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "direct probe: unknown course '%s'; stock continues",
+                          course ? course : "");
+            tkLog(runtime, buf);
+            return false;
+        }
+        return tkDirectStart(ram, ctx, runtime, sel, opt);
     }
 
     // Pad-glue service for overlay taps: BackOut returns the guest to the

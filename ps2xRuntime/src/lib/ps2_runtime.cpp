@@ -9482,6 +9482,11 @@ void PS2Runtime::run()
                     ps2x::vpad::TouchPoint tkts[8];
                     const int tkn = set2SampleTouches(tkts);
                     std::vector<int64_t> tkStill;
+                    // F06: one tap acts per frame (a second finger down in
+                    // the same frame only registers, so it cannot double-arm
+                    // or act on a list the first tap just closed); held ids
+                    // still prune below so nothing refires.
+                    bool tkActed = false;
                     for (int i = 0; i < tkn; ++i)
                     {
                         tkStill.push_back(tkts[i].id);
@@ -9489,6 +9494,16 @@ void PS2Runtime::run()
                             continue;
                         tkDown.push_back(tkts[i].id);
                         const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
+                        // A miss registers but never consumes the frame's
+                        // action; after one tap acts, the rest of the frame
+                        // only registers.
+                        const int tkModes = tkl::kCourses[tkList.sel].nOpts;
+                        const bool tkWillAct = (tkList.step == 0)
+                            ? ((hit >= 0 && hit <= 9) || hit == 11 || hit == 12)
+                            : ((hit >= 0 && hit < tkModes) || hit == 11 || hit == 12);
+                        if (!tkWillAct || tkActed)
+                            continue;
+                        tkActed = true;
                         if (tkList.step == 0)
                         {
                             if (hit >= 0 && hit <= 9)
@@ -9528,7 +9543,53 @@ void PS2Runtime::run()
                 tkPrevUnion = ds1TrueRaw;
             }
             else
+            {
+                // F05: a parked direct ask (the overlay closed at arm time)
+                // stays cancellable while the BackOut/accept walk runs: a
+                // fresh physical Triangle edge, or a fresh Previous tap,
+                // disarms the ask + drive before the accept hook serves it.
+                // Walk-injected presses merge on the game thread and never
+                // appear in ds1TrueRaw, so the walk cannot cancel itself.
+                // Peek-guarded: with no ask parked this is a no-op and the
+                // press/tap stays with the guest.
+                const uint16_t tkClosedEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
+                bool tkClosedPrevTap = false;
+                {
+                    const tkl::ListGeom tkClosedGeom = tkl::listLayout(screenWidth, screenHeight);
+                    ps2x::vpad::TouchPoint tkClosedTs[8];
+                    const int tkClosedN = set2SampleTouches(tkClosedTs);
+                    std::vector<int64_t> tkClosedStill;
+                    for (int i = 0; i < tkClosedN; ++i)
+                    {
+                        tkClosedStill.push_back(tkClosedTs[i].id);
+                        if (std::find(tkDown.begin(), tkDown.end(), tkClosedTs[i].id) != tkDown.end())
+                            continue;
+                        tkDown.push_back(tkClosedTs[i].id);
+                        if (tkl::listHit(tkClosedGeom, tkClosedTs[i].x, tkClosedTs[i].y) == 12)
+                            tkClosedPrevTap = true;
+                    }
+                    std::vector<int64_t> tkClosedLeft;
+                    for (int64_t id : tkDown)
+                        if (std::find(tkClosedStill.begin(), tkClosedStill.end(), id) != tkClosedStill.end())
+                            tkClosedLeft.push_back(id);
+                    tkDown = tkClosedLeft;
+                }
+                if ((tkClosedEdge & ps2x::vpad::kTriangle) != 0u || tkClosedPrevTap)
+                {
+                    tkl::ListState tkClosedAsk;
+                    bool tkClosedBackout = false, tkClosedWalked = false;
+                    if (tkl::directPeek(tkClosedAsk, tkClosedBackout, tkClosedWalked))
+                    {
+                        tkl::directDisarm();
+                        tkl::driveDisarm();
+                        ps2_ssx3_tricky::state().directActive = false;
+                        std::fprintf(stderr, "[tklist] tick=%llu direct ask cancelled (%s, closed)\n",
+                                     static_cast<unsigned long long>(tkTick),
+                                     tkClosedPrevTap ? "previous tap" : "triangle");
+                    }
+                }
                 tkPrevUnion = ds1TrueRaw;
+            }
         }
         else if (tkListOn)
         {
