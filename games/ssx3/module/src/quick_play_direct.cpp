@@ -18,7 +18,7 @@ PS2Runtime::RecompiledFunction drawOriginal{};
 enum class Stage { Idle, Connect, Auth, Persona, RootQueued, Queued, Ready, Failed };
 struct State {
     Stage stage = Stage::Idle;
-    uint32_t menu = 0, ui = 0, config = 0, root = 0, popup = 0;
+    uint32_t menu = 0, ui = 0, config = 0, root = 0, popup = 0, menuScreen = 0;
     uint64_t tap = 0, lastTick = 0, injections = 0;
     std::chrono::steady_clock::time_point started{};
 } state;
@@ -136,6 +136,7 @@ void continuation(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
         // The Main close animation already completed while connecting.
         // Finish its callback after queuing the successor so normal FE
         // cleanup runs before the new root initializes shared UI resources.
+        if (state.menuScreen && !rd(ram,state.menuScreen+0xd0)) wr(ram,state.menuScreen+0xd0,state.menu);
         wr(ram,state.menu+0x1c,(rd(ram,state.menu+0x1c)&~0x3f00u)|0x700u);
         log(r,"root-queued"); finish(ram,c); break;
     case 36:
@@ -163,6 +164,13 @@ void mainHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
         }
         state.stage=Stage::Failed; log(r,"invalid-entry");
     }
+    // Disabling the held Main's widgets (close callback 0x39ce48) reports
+    // a selection change, event 2. Main reacts as if still active and the
+    // state it starts is left dangling when the queue retires it.
+    if (event==2 && menu==state.menu &&
+        (state.stage==Stage::Connect || state.stage==Stage::Auth || state.stage==Stage::Persona)) {
+        log(r,"held-menu-event",event); c->pc=getRegU32(c,31); return;
+    }
     mainOriginal(ram,c,r);
 }
 template<uint32_t Pc> void closeHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
@@ -171,22 +179,18 @@ template<uint32_t Pc> void closeHook(uint8_t *ram, R5900Context *c, PS2Runtime *
     // it then reopens Main Menu, whose initializer destroys the session.
     // Defer only that owner phase store for this one pending transaction;
     // the normal queue operation retires Main before the authenticated root
-    // initializes. The rest of each callback still runs: skipping it left
-    // Main's widgets live, and their teardown then called freed vtables.
-    // 0x39ce48 = 0x398638(screen+0x40,0) (disable the widget group), then
-    // phase 6: tail-call that routine with the caller's ra. 0x39ce98 (leaf)
-    // = clear the animation record's pending bit, then phase 7.
+    // initializes. The rest still runs: 0x39ce48 = 0x398638(screen+0x40,0)
+    // (disable the widget group) then phase 6, so tail-call that routine
+    // with the caller's ra. padHook then detaches the held screen from Main
+    // (screen+0xd0, which both callbacks check before the phase store), so
+    // 0x39ce98 runs unchanged and Main's widget timeline events stay inert
+    // until the queue retires it (case 34 reattaches).
     const auto screen=getRegU32(c,4);
-    if (object(screen,0xd4) && rd(ram,screen+0xd0)==state.menu &&
+    if (Pc==0x39ce48 && object(screen,0xd4) && rd(ram,screen+0xd0)==state.menu &&
         (state.stage==Stage::Connect || state.stage==Stage::Auth || state.stage==Stage::Persona)) {
-        log(r,Pc==0x39ce48?"deferred-menu-close":"deferred-menu-closed",getRegU32(c,31));
-        if constexpr (Pc==0x39ce48) {
-            reg(c,4,screen+0x40); reg(c,5,0); c->pc=0x398638;
-        } else {
-            const auto record=getRegU32(c,7);
-            if (object(record,0x14)) wr(ram,record+0x10,rd(ram,record+0x10)&0xfeffffffu);
-            c->pc=getRegU32(c,31);
-        }
+        log(r,"deferred-menu-close",getRegU32(c,31));
+        state.menuScreen=screen;
+        reg(c,4,screen+0x40); reg(c,5,0); c->pc=0x398638;
         return;
     }
     closeOriginal<Pc>(ram,c,r);
@@ -208,6 +212,10 @@ void padHook(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
     if (state.lastTick==now) return;
     state.lastTick=now;
     const auto auth=rd(ram,0x4a3028);
+    if (state.menuScreen && rd(ram,state.menuScreen+0xd0)==state.menu &&
+        (state.stage==Stage::Connect || state.stage==Stage::Auth || state.stage==Stage::Persona)) {
+        wr(ram,state.menuScreen+0xd0,0); log(r,"held-menu-detached");
+    }
     if (now-state.tap>1200) { state.stage=Stage::Failed; log(r,"timeout",object(auth,0x300)?rd(ram,auth):0); return; }
     if (!object(auth,0x300)) return;
     const auto phase=rd(ram,auth);
