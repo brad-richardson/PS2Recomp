@@ -289,6 +289,18 @@ inline bool listCourseOpensModes(uint8_t sel)
     return sel < kCourseCount && kCourses[sel].nOpts > 1;
 }
 
+// Triangle-back (Brad 10-19: the first press must go back visibly). Step 1
+// returns to the course list with the overlay open; step 0 leaves the
+// overlay flow (BackOut drive) and the list closes at once — a BackOut that
+// stays open reads as an eaten press, and the next Triangle cancels the
+// walk instead, so the list never goes back. The done path only latches an
+// open overlay, so the caller latches at arm time. Pure so the render loop
+// and the unit tests share it.
+inline bool listTriangleClosesNow(uint8_t step)
+{
+    return step != 1;
+}
+
 // Render thread: park a tap-to-ride request for the game thread. The overlay
 // closes at the tap (host owns it); the game thread queues loading from pad
 // glue and keeps directActive set so the overlay cannot reopen mid-flight.

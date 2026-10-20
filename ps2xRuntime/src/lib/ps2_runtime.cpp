@@ -9250,13 +9250,27 @@ void PS2Runtime::run()
                         tkArmRide();
                 };
                 const auto tkTriangle = [&] {
-                    if (tkList.step == 1)
+                    if (!tkl::listTriangleClosesNow(tkList.step))
                     {
                         tkList.step = 0;
                         tkList.mode = 0;
                     }
                     else
+                    {
+                        // Close at once (Brad 10-19: the walk kept the
+                        // list open and the next press read as cancel, so
+                        // Triangle never went back). The BackOut drive
+                        // runs with the list closed; the done path only
+                        // latches an open overlay, so latch here; a new
+                        // Map entry reopens it (reopen latch).
                         tkl::driveArmBackOut(tkTick);
+                        tkOpen = false;
+                        tkDown.clear();
+                        tkLatchedOn = true;
+                        tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
+                        std::fprintf(stderr, "[tklist] tick=%llu triangle back (list closed at once)\n",
+                                     static_cast<unsigned long long>(tkTick));
+                    }
                 };
                 // One browse tap: step 0 highlights, then one-tap rides the
                 // default; the toggle cycles it. Step 1 is unchanged.
@@ -9338,7 +9352,31 @@ void PS2Runtime::run()
                     // player's Back press must never be swallowed: no guard
                     // here, logging only.
                     const uint16_t tkFresh = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
-                    if (tkFresh != 0u)
+                    // Touch parity (Brad 10-19): a fresh tap cancels too —
+                    // the browsing sampler below never runs while driving,
+                    // so without this a touch-only player's Previous tap
+                    // dies silently mid-drive.
+                    bool tkTapFresh = false;
+                    {
+                        ps2x::vpad::TouchPoint tkcts[8];
+                        const int tkcn = set2SampleTouches(tkcts);
+                        std::vector<int64_t> tkStill;
+                        for (int i = 0; i < tkcn; ++i)
+                        {
+                            tkStill.push_back(tkcts[i].id);
+                            if (std::find(tkDown.begin(), tkDown.end(), tkcts[i].id) == tkDown.end())
+                            {
+                                tkDown.push_back(tkcts[i].id);
+                                tkTapFresh = true;
+                            }
+                        }
+                        std::vector<int64_t> tkLeft;
+                        for (int64_t id : tkDown)
+                            if (std::find(tkStill.begin(), tkStill.end(), id) != tkStill.end())
+                                tkLeft.push_back(id);
+                        tkDown = tkLeft;
+                    }
+                    if (tkFresh != 0u || tkTapFresh)
                     {
                         tkl::driveDisarm();
                         tkClearRide();
@@ -9355,9 +9393,10 @@ void PS2Runtime::run()
                         }
                         const tkl::CourseOption &tkCancelGoal = tkl::listGoal(tkList);
                         std::fprintf(stderr,
-                                     "[tklist] tick=%llu cancel edge fresh=0x%04x prev=0x%04x "
+                                     "[tklist] tick=%llu cancel %s fresh=0x%04x prev=0x%04x "
                                      "goal=(%u,%u,%u evmap=%d) list(step%d sel%d mode%d)\n",
-                                     static_cast<unsigned long long>(tkTick), tkFresh, tkPrevUnion,
+                                     static_cast<unsigned long long>(tkTick),
+                                     tkTapFresh ? "tap" : "edge", tkFresh, tkPrevUnion,
                                      tkCancelGoal.peak, tkCancelGoal.type, tkCancelGoal.row,
                                      tkCancelGoal.map.event, tkList.step, tkList.sel, tkList.mode);
                     }
@@ -10012,25 +10051,7 @@ void PS2Runtime::run()
                     tkDraw(tkLabel, tkBx + (tkBw - tkLw) * 0.5f, tkBy + (tkBh - tkLh) * 0.5f, tkLh,
                            Color{250, 248, 244, 255}, false);
                 }
-                // tricky-picker-2: the mode toggle (hit 10) gets a visible
-                // button on step 0 for dual-mode courses, labelled with the
-                // one-tap ride default. Previously the zone was tappable but
-                // invisible and unwired on touch.
-                if (tkList.step == 0 && tkl::kCourses[tkList.sel].nOpts > 1)
-                {
-                    DrawRectangle(static_cast<int>(tkg.toggleX), static_cast<int>(tkg.toggleY),
-                                  static_cast<int>(tkg.toggleW), static_cast<int>(tkg.toggleH),
-                                  Color{24, 36, 62, 255});
-                    DrawRectangleLines(static_cast<int>(tkg.toggleX), static_cast<int>(tkg.toggleY),
-                                       static_cast<int>(tkg.toggleW), static_cast<int>(tkg.toggleH),
-                                       Color{154, 62, 2, 255});
-                    const float tkTgLh = static_cast<float>(tkSmall) * 1.1f;
-                    const float tkTgLw = tkW(tkl::listDefaultModeName(tkList), tkTgLh);
-                    tkDraw(tkl::listDefaultModeName(tkList),
-                           tkg.toggleX + (tkg.toggleW - tkTgLw) * 0.5f,
-                           tkg.toggleY + (tkg.toggleH - tkTgLh) * 0.5f, tkTgLh,
-                           Color{250, 248, 244, 255}, false);
-                }
+                // picker-3: no toggle button (the mode screen owns modes).
                 if (!tkDirect)
                 {
                     EndTextureMode();

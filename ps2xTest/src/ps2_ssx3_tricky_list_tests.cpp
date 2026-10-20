@@ -1336,7 +1336,11 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(listCourseOpensModes(0), "Garibaldi opens modes");
             t.IsFalse(listCourseOpensModes(6), "Pipedream rides at once");
             t.IsFalse(listCourseOpensModes(9), "Alaska rides at once");
-            t.IsFalse(listCourseOpensModes(10), "out of range rides nowhere"); });
+            t.IsFalse(listCourseOpensModes(10), "out of range rides nowhere");
+            // Triangle-back (Brad 10-19): step 0 leaves the overlay flow
+            // (the list closes at once); step 1 returns to the course list.
+            t.IsTrue(listTriangleClosesNow(0), "step0 closes");
+            t.IsFalse(listTriangleClosesNow(1), "step1 returns to list"); });
 
         tc.Run("help-bar buttons label the 11/12 zones per step", [](TestCase &t)
                {
