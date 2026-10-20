@@ -665,8 +665,11 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(o.mask, 0, "pad released");
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "phase Aborted"); });
 
-        tc.Run("ToTricky clamps top, walks down-down-down-cross, parks", [](TestCase &t)
+        tc.Run("ToTricky clamps top, walks downs, crosses thrice, parks", [](TestCase &t)
                {
+            ListState ask;
+            ask.sel = 0;
+            directArm(ask, true);
             NavState n;
             navToTricky(n, 0);
             FeView v; // main menu: never Map-live
@@ -674,7 +677,7 @@ void register_ps2_ssx3_tricky_list_tests()
             std::vector<uint16_t> presses;
             uint16_t prevMask = 0;
             uint64_t tick = 0;
-            for (int i = 0; i < 1500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            for (int i = 0; i < 2500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, v, tick, false, false);
                 if (o.mask != 0 && prevMask == 0)
@@ -682,16 +685,19 @@ void register_ps2_ssx3_tricky_list_tests()
                 prevMask = o.mask;
                 ++tick;
             }
+            directDisarm();
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done by count");
-            t.Equals(presses.size(), 9u, "nine presses");
-            if (presses.size() == 9)
+            t.Equals(presses.size(), 11u, "eleven presses");
+            if (presses.size() == 11)
             {
                 for (int k = 0; k < 5; ++k)
                     t.Equals(presses[static_cast<size_t>(k)], kPadUp, "clamp up");
                 t.Equals(presses[5], kPadDown, "down 1");
                 t.Equals(presses[6], kPadDown, "down 2");
                 t.Equals(presses[7], kPadDown, "down 3");
-                t.Equals(presses[8], kPadCross, "accept");
+                t.Equals(presses[8], kPadCross, "accept 1");
+                t.Equals(presses[9], kPadCross, "accept 2");
+                t.Equals(presses[10], kPadCross, "accept 3");
             }
             t.IsFalse(n.handedOff, "Done parks the wait, not a handoff"); });
 

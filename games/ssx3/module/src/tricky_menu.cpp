@@ -254,8 +254,9 @@ namespace
             return false;
         }
         // Walk armed or done: the accept hook serves the ask. Give up only
-        // if the walk mistimed and no accept ever comes.
-        if (tkl::directBump() > 3600)
+        // if the walk mistimed and no accept ever comes. Budget covers the
+        // ~1100-tick walk at ~2 pad reads per tick, plus BackOut.
+        if (tkl::directBump() > 5400)
         {
             tkLog(runtime, "direct accept walk missed; overlay re-armed");
             tkl::directDisarm();
