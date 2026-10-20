@@ -27,6 +27,8 @@
 // EE checkpoint unwind never skips hook work. Knob off: nothing is wrapped.
 namespace
 {
+    PS2Runtime::RecompiledFunction g_tkFeUpdate = nullptr;
+    PS2Runtime::RecompiledFunction g_tkLoadingUpdate = nullptr;
     PS2Runtime::RecompiledFunction g_tkMenuBuild = nullptr;
     PS2Runtime::RecompiledFunction g_tkMenuEvent = nullptr;
     PS2Runtime::RecompiledFunction g_tkMapFill = nullptr;
@@ -53,26 +55,10 @@ namespace
         ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value)));
     }
 
-    // tricky-direct-1 Part A probe: the stock Select Event configuration
-    // followed by the shared offline/online loading-app transition. Each
-    // continuation lives on the guest stack, like the preview continuation.
-    // Part B generalizes the donor event per course (Race cells); freestyle
-    // cells keep the navigator until their accept args are measured.
+    // FE-owned guest continuation. All call arguments and the original FE
+    // entry registers live in guest RAM across scheduler checkpoints.
     constexpr uint32_t kDirectMagic = 0x544b4431u;
     constexpr uint32_t kDirectFrame = 0x240u;
-
-    struct DirectJob
-    {
-        int event = 0;
-        int typeArg = 0;
-        int rulesArg = 0;
-    };
-
-    DirectJob &tkDirectJob()
-    {
-        static DirectJob j;
-        return j;
-    }
 
     bool tkDirectContinue(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -98,15 +84,15 @@ namespace
             break;
         case 1:
             wr32(ram, f + 12, getRegU32(ctx, 2));
-            call(0x145108u, 2, getRegU32(ctx, 2), 1); // Single Event
+            call(0x145108u, 2, getRegU32(ctx, 2), rd32(ram, f + 0x1c)); // context
             break;
         case 2:
-            wr32(ram, 0x535c08u, static_cast<uint32_t>(tkDirectJob().event)); // donor event
+            wr32(ram, 0x535c08u, rd32(ram, f + 0x10)); // donor event
             wr32(ram, getRegU32(ctx, 28) - 0x1f38u, 1);
-            call(0x144df0u, 3, config, static_cast<uint32_t>(tkDirectJob().typeArg)); // nav node +4
+            call(0x144df0u, 3, config, rd32(ram, f + 0x14)); // nav node +4
             break;
         case 3:
-            call(0x1451e8u, 4, config, static_cast<uint32_t>(tkDirectJob().rulesArg)); // nav node +8
+            call(0x1451e8u, 4, config, rd32(ram, f + 0x18)); // nav node +8
             break;
         case 4:
         {
@@ -138,37 +124,22 @@ namespace
                           config, app, rd32(ram, app + 4),
                           static_cast<unsigned long long>(state().mapEntries));
             tkLog(runtime, stateLine);
-            const uint32_t ret = rd32(ram, f + 8);
+            const uint32_t ret = rd32(ram, f + 0x20);
             std::memcpy(ctx->r, ram + f + 0x40, sizeof(ctx->r));
             wr32(ram, f, 0);
             tkSetGpr(ctx, 29, f + kDirectFrame);
-            tkSetGpr(ctx, 2, 1);
-            ctx->pc = ret;
-            tkLog(runtime, "direct probe loading queued; no stock menu navigation");
+            ctx->pc = ret; // re-enter the original FE update, with its original a0/ra
+            ps2_ssx3_fe_launch::note("loading-queued", runtime->memory().gs().vsyncTick.load());
+            tkLog(runtime, "direct loading queued at FE update; no stock menu navigation");
             break;
         }
         }
         return true;
     }
 
-    // Single entry for menu-hook probes and overlay-tap asks: resolve the
-    // course, pin its world, and hijack this guest call into the loading
-    // chain. False = not started (the caller runs the stock handler).
-    bool tkDirectStart(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime, int sel, int opt)
+    bool tkDirectStart(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime,
+                       const ps2_ssx3_fe_launch::Request &request)
     {
-        namespace tkl = ps2_ssx3_tricky_list;
-        if (sel < 0 || sel >= static_cast<int>(tkl::kCourseCount))
-            return false;
-        const tkl::Course &c = tkl::kCourses[sel];
-        if (opt < 0 || opt >= c.nOpts)
-            return false;
-        const tkl::CourseOption &goal = c.opts[opt];
-        const tkl::DirectGoal dg = tkl::directGoalFor(c, goal);
-        if (!dg.ok)
-        {
-            tkLog(runtime, std::string("direct defers ") + c.name + " to the navigator (no direct cell yet)");
-            return false;
-        }
         using namespace ps2_ssx3_tricky;
         // Tap-path loader repair (tricky-direct-2 RE): the menu walk leaves
         // the load-select row for [0x5305B0] at -1 (the walk's 0x1819ec
@@ -200,109 +171,70 @@ namespace
         }
         const uint32_t sp = getRegU32(ctx, 29);
         if (sp < kDirectFrame || sp > PS2_RAM_SIZE) return false;
-        // Pin the donor world (also marks the ride for the records guard).
-        if (!tkl::applyCourseMap(ram, PS2_RAM_SIZE, dg.map))
-            return false;
-        tkDirectJob().event = dg.event;
-        tkDirectJob().typeArg = dg.typeArg;
-        tkDirectJob().rulesArg = dg.rulesArg;
         ps2_ssx3_tricky::state().directActive = true; // bypasses Map: keep the overlay shut so the pad reaches the briefing
         const uint32_t f = sp - kDirectFrame;
         std::memset(ram + f, 0, kDirectFrame);
         ps2_ssx3_tricky::wr32(ram, f, kDirectMagic);
-        ps2_ssx3_tricky::wr32(ram, f + 8, getRegU32(ctx, 31));
+        wr32(ram, f + 8, getRegU32(ctx, 31));
+        wr32(ram, f + 0x10, request.event);
+        wr32(ram, f + 0x14, request.type);
+        wr32(ram, f + 0x18, request.rules);
+        wr32(ram, f + 0x1c, request.context);
+        wr32(ram, f + 0x20, ctx->pc);
         std::memcpy(ram + f + 0x40, ctx->r, sizeof(ctx->r));
         tkSetGpr(ctx, 29, f);
-        {
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "direct start %s (donor ev %d)", c.name, dg.event);
-            tkLog(runtime, buf);
-        }
+        ps2_ssx3_fe_launch::note("fe-consume", runtime->memory().gs().vsyncTick.load());
         return tkDirectContinue(ram, ctx, runtime);
     }
 
-    bool tkDirectProbe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
-        if (!probe || std::strcmp(probe, "1") != 0) return false;
-        const char *course = std::getenv("PS2X_SSX3_TRICKY_DIRECT_COURSE");
-        int opt = 0;
-        if (const char *optEnv = std::getenv("PS2X_SSX3_TRICKY_DIRECT_OPT"))
-            opt = std::atoi(optEnv);
-        const int sel = ps2_ssx3_tricky_list::directCourseByCode(course ? course : "GARI");
-        if (sel < 0)
-        {
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "direct probe: unknown course '%s'; stock continues",
-                          course ? course : "");
-            tkLog(runtime, buf);
-            return false;
-        }
-        return tkDirectStart(ram, ctx, runtime, sel, opt);
-    }
-
-    // Pad-glue service for overlay taps: BackOut returns the guest to the
-    // main menu, then the blind Tricky-accept walk re-accepts the Tricky
-    // row; the main-menu accept hook serves the parked ask in the proven
-    // handler context. Never launches from pad glue (wrong stack: the old
-    // direct launch died mid-load on a JALR null). Game thread only; never
-    // fires mid-race (the app switch owns the pad there).
-    bool tkDirectServe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    void tkDirectProbe()
     {
         namespace tkl = ps2_ssx3_tricky_list;
-        // No state().tricky gate: BackOut lands on the main menu, whose
-        // build clears tricky, but the parked ask still needs serving.
-        // The ask only ever parks from the Tricky overlay, and the
-        // mid-race + selector guards below cover the rest.
-        if (!tkl::directKnob())
-            return false;
+        const char *probe = std::getenv("PS2X_SSX3_TRICKY_DIRECT_PROBE");
+        if (!tkl::directKnob() || !probe || std::strcmp(probe, "1") != 0) return;
+        const char *course = std::getenv("PS2X_SSX3_TRICKY_DIRECT_COURSE");
         tkl::ListState list;
-        bool backout = false, walked = false;
-        if (!tkl::directPeek(list, backout, walked))
-            return false;
-        if (ps2_ssx3_course::appUpdateFn(ram) == ps2_ssx3_course::kGameUpdate)
+        list.sel = static_cast<uint8_t>(tkl::directCourseByCode(course ? course : "GARI"));
+        tkl::requestDirect(list);
+    }
+
+    void tkFeUpdateWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        // Interior resume PCs belong to the same generated function. Never
+        // consume there, in pad glue, or during a preview continuation.
+        if (ctx->pc == 0x1a27a0u && !state().redirect)
         {
-            tkLog(runtime, "direct ask dropped: a race is live");
-            tkl::directDisarm();
-            return false;
-        }
-        if (list.sel >= tkl::kCourseCount)
-        {
-            tkl::directDisarm();
-            return false;
-        }
-        const uint64_t tick = runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
-        if (backout && !tkl::driveProgress().done)
-        {
-            if (tkl::directBump() > 1800)
+            const uint32_t app = rd32(ram, 0x4a28a8u);
+            const uint32_t fe = getRegU32(ctx, 4);
+            const uint32_t sp = getRegU32(ctx, 29);
+            if (app && app < PS2_RAM_SIZE - 0x5c && fe && fe < PS2_RAM_SIZE - 16 &&
+                rd32(ram, app) == fe && rd32(ram, fe) == 0x46d7c0u &&
+                rd32(ram, app + 4) == 0 && rd32(ram, app + 0x58) == 0 &&
+                sp >= kDirectFrame && sp <= PS2_RAM_SIZE)
             {
-                tkLog(runtime, "direct backout timed out; overlay re-armed");
-                tkl::directDisarm();
-                tkl::driveDisarm();
-                ps2_ssx3_tricky::state().directActive = false;
+                ps2_ssx3_fe_launch::Request request;
+                if (ps2_ssx3_fe_launch::take(request))
+                {
+                    const auto venue = ps2_ssx3_tricky_list::takeDirectVenue();
+                    if (ps2_ssx3_tricky_list::applyCourseMap(ram, PS2_RAM_SIZE, venue))
+                    {
+                        if (tkDirectStart(ram, ctx, runtime, request)) return;
+                    }
+                    tkLog(runtime, "FE request refused: venue mapping did not apply");
+                    ps2_ssx3_fe_launch::finish(runtime->memory().gs().vsyncTick.load());
+                    state().directActive = false;
+                }
             }
-            return false;
         }
-        if (backout)
-        {
-            // BackOut reached the main menu: arm the accept walk.
-            tkl::driveDisarm();
-            tkl::driveArmToTricky(tick);
-            tkl::directSetWalked();
-            tkLog(runtime, "direct backout done; Tricky-accept walk armed");
-            return false;
-        }
-        // Walk armed or done: the accept hook serves the ask. Give up only
-        // if the walk mistimed and no accept ever comes. Budget covers the
-        // 2500-tick settle plus the walk at ~2 pad reads per tick.
-        if (tkl::directBump() > 15000)
-        {
-            tkLog(runtime, "direct accept walk missed; overlay re-armed");
-            tkl::directDisarm();
-            tkl::driveDisarm();
-            ps2_ssx3_tricky::state().directActive = false;
-        }
-        return false;
+        g_tkFeUpdate(ram, ctx, runtime);
+    }
+
+    void tkLoadingUpdateWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == 0x232930u)
+            ps2_ssx3_fe_launch::loading(runtime->memory().gs().vsyncTick.load());
+        g_tkLoadingUpdate(ram, ctx, runtime);
     }
 
     // preserve-fix-1: stock handles/count remain untouched. Only exact
@@ -343,6 +275,7 @@ namespace
     {
         using namespace ps2_ssx3_tricky;
         State &s = state();
+        ps2_ssx3_fe_launch::menuBuild(runtime->memory().gs().vsyncTick.load());
         s.mapController = 0u;
         s.directActive = false;
         if (s.tricky)
@@ -398,31 +331,8 @@ namespace
                 modeSet(rdram, true, msg);
                 // toast-audit-1: no mode toast (the Tricky list overlay itself
                 // confirms the mode; tkLog below keeps the record).
-                // tricky-direct: probe the direct load; stop here if the
-                // briefing is reached (no hidden stock-menu walk).
-                // A parked overlay tap launches here: this accept handler
-                // is the proven direct-launch context (the probe rides it).
-                // The blind pad-glue launch is gone (wrong stack: JALR
-                // null); the tap's BackOut + accept walk ends here.
-                {
-                    namespace tkl = ps2_ssx3_tricky_list;
-                    tkl::ListState ask;
-                    bool askBackout = false, askWalked = false;
-                    if (tkl::directPeek(ask, askBackout, askWalked))
-                    {
-                        tkl::directDisarm();
-                        tkl::driveDisarm();
-                        if (tkDirectStart(rdram, ctx, runtime, ask.sel,
-                                          ask.step == 1 ? ask.mode : 0))
-                        {
-                            tkLog(runtime, "direct tap served at Tricky accept");
-                            return;
-                        }
-                        tkLog(runtime, "direct tap unstartable; stock continues");
-                    }
-                }
-                if (tkDirectProbe(rdram, ctx, runtime))
-                    return;
+                tkDirectProbe();
+
             }
             else if (s.tricky)
             {
@@ -448,10 +358,6 @@ namespace
     void tkPadGlueWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         using namespace ps2_ssx3_tricky;
-        // Overlay tap asks park on the host; the game thread launches here.
-        // A started launch hijacks this pad read (like the menu probe).
-        if (tkDirectServe(rdram, ctx, runtime))
-            return;
         static uint8_t rows[kRowsBytes + kTopoBytes];
         const bool armed = rowsArmed();
         if (armed)
@@ -467,6 +373,7 @@ namespace
         {
             s.mapController = 0u;
             s.wasGame = true;
+            ps2_ssx3_fe_launch::playing(runtime->memory().gs().vsyncTick.load());
             return;
         }
         // tk-card-1: event-exit teardown. Quitting/restarting lands on peak
@@ -491,6 +398,8 @@ namespace
             else
                 tkLog(runtime, msg.empty() ? "event exit: Tricky off (no menu build)" : msg);
         }
+        if (s.wasGame)
+            ps2_ssx3_fe_launch::finish(runtime->memory().gs().vsyncTick.load());
         s.wasGame = false;
         if (!armed || s.redirect || !s.mapController ||
             (std::memcmp(rows, rdram + ps2_ssx3_course::kEventBase, kRowsBytes) == 0 &&
@@ -750,7 +659,8 @@ void applyTrickyMenu(PS2Runtime &runtime)
         return;
     const uint8_t *ram = runtime.memory().getRDRAM();
     if (!ram || ps2_ssx3_tricky::rd32(ram, ps2_ssx3_tricky_preview::kMapInfo) != 0x27bdf440u ||
-        ps2_ssx3_tricky::rd32(ram, 0x3e4508u) != 0x27bdfea0u)
+        ps2_ssx3_tricky::rd32(ram, 0x3e4508u) != 0x27bdfea0u ||
+        ps2_ssx3_tricky::rd32(ram, 0x1a27a0u) != 0x27bdff70u)
     {
         std::fprintf(stderr, "[ssx3-tricky] refused: Map info entry does not match\n");
         return;
@@ -768,7 +678,9 @@ void applyTrickyMenu(PS2Runtime &runtime)
         PS2Runtime::RecompiledFunction *orig;
         PS2Runtime::RecompiledFunction wrap;
     };
-    const Hook hooks[] = {{kMainMenuItemState, &g_tkMenuBuild, &tkMenuBuildWrapper},
+    const Hook hooks[] = {{0x1a27a0u, &g_tkFeUpdate, &tkFeUpdateWrapper},
+                          {0x232930u, &g_tkLoadingUpdate, &tkLoadingUpdateWrapper},
+                          {kMainMenuItemState, &g_tkMenuBuild, &tkMenuBuildWrapper},
                           {kMainMenuEvent, &g_tkMenuEvent, &tkMenuEventWrapper},
                           {kMapFill, &g_tkMapFill, &tkMapFillWrapper},
                           {kPadReadGlue, &g_tkPadGlue, &tkPadGlueWrapper},

@@ -2054,6 +2054,7 @@ namespace ps2_stubs
             const uint16_t mask = ps2_ssx3_tricky_list::driveOnRead(
                 rdram, ps2_ssx3_course::kRamSize, ps2_ssx3_tricky::state().mapController, guestVsyncTick, true,
                 false, false, done, handedOff, aborted);
+            ps2_ssx3_fe_launch::injected(mask);
             if (mask != 0u)
                 state.buttons = static_cast<uint16_t>(state.buttons & ~mask);
         }

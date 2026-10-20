@@ -1,4 +1,5 @@
 #pragma once
+#include "ps2_ssx3_fe_launch.h"
 // tk-menu-1 Part 2: the dedicated Tricky course list (option (a), Brad 10-15).
 //
 // A host-drawn, SSX 3-styled overlay listing Tricky's 10 courses in Tricky's
@@ -444,6 +445,26 @@ inline void directDisarm()
 {
     std::lock_guard<std::mutex> lock(directAskMu());
     directAsk().pending = false;
+}
+
+// Venue metadata is published with the generic request. The FE consumer
+// takes the request first, then this lock; no guest RAM is touched here.
+inline MapSpec &directVenue() { static MapSpec m; return m; }
+inline bool requestDirect(const ListState &list)
+{
+    if (list.sel >= kCourseCount) return false;
+    const Course &c = kCourses[list.sel];
+    const DirectGoal goal = directGoalFor(c, listGoal(list));
+    if (!goal.ok) return false;
+    std::lock_guard<std::mutex> lock(directAskMu());
+    if (!ps2_ssx3_fe_launch::request(goal.event, goal.typeArg, goal.rulesArg, 1)) return false;
+    directVenue() = goal.map;
+    return true;
+}
+inline MapSpec takeDirectVenue()
+{
+    std::lock_guard<std::mutex> lock(directAskMu());
+    return directVenue();
 }
 
 // ---- Guest FE view (read each tick; the navigator derives from this) ----

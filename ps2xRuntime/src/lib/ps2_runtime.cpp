@@ -9334,30 +9334,31 @@ void PS2Runtime::run()
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
                     const tkl::CourseOption &tkGoal = tkl::listGoal(tkList);
                     const tkl::DirectGoal tkDg = tkl::directGoalFor(c, tkGoal);
-                    if (tkl::directKnob() && tkDg.ok)
+                    if (tkl::directKnob())
                     {
-                        // tricky-direct: close the overlay here (the host owns
-                        // it), latch reopen on a new Map entry, and park the
-                        // launch for the game thread. The pad returns to the
-                        // guest immediately.
+                        if (!tkDg.ok || !tkl::requestDirect(tkList))
+                        {
+                            ps2x::ui::toast("Direct launch unavailable", 3.0f);
+                            std::fprintf(stderr, "[tklist] tick=%llu BLOCKED %s [%s]: %s\n",
+                                         static_cast<unsigned long long>(tkTick), c.name,
+                                         c.modeName[tkList.step == 1 ? tkList.mode : 0],
+                                         tkDg.ok ? "request already active" : "cell configuration pending");
+                            return;
+                        }
+                        // Publish only host arguments. The guest FE update
+                        // owns configuration, teardown and loading.
                         tkl::driveDisarm();
-                        tkl::directArm(tkList, true);
-                        tkl::driveArmBackOut(tkTick);
                         tkOpen = false;
                         tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
                         ps2_ssx3_tricky::state().directActive = true;
-                        std::fprintf(stderr, "[tklist] tick=%llu direct %s [%s] (peak %u type %u row %u ev %d) via backout\n",
+                        ps2_ssx3_fe_launch::note("picker-request", tkTick);
+                        std::fprintf(stderr, "[tklist] tick=%llu direct %s [%s] ev=%d via FE request\n",
                                      static_cast<unsigned long long>(tkTick), c.name,
-                                     c.modeName[tkList.step == 1 ? tkList.mode : 0], tkGoal.peak,
-                                     tkGoal.type, tkGoal.row, tkDg.event);
+                                     c.modeName[tkList.step == 1 ? tkList.mode : 0], tkDg.event);
                         return;
                     }
-                    if (tkl::directKnob())
-                        std::fprintf(stderr, "[tklist] tick=%llu direct defers %s [%s] to the navigator\n",
-                                     static_cast<unsigned long long>(tkTick), c.name,
-                                     c.modeName[tkList.step == 1 ? tkList.mode : 0]);
                     tkl::driveArm(tkGoal, c.event, tkTick);
                     tkNoteRide(c, c.modeName[tkList.step == 1 ? tkList.mode : 0]);
                     // Part 3: a mapped mode rides the donor event.
@@ -9371,15 +9372,15 @@ void PS2Runtime::run()
                 // offered) rides immediately, skipping the mode step. The
                 // touch toggle cycles the default; the pad path is untouched.
                 const auto tkRideDefault = [&] {
-                    const tkl::Course &c = tkl::listCourse(tkList);
-                    const tkl::CourseOption &tkGoal = tkl::listDefaultGoal(tkList);
-                    tkl::driveArm(tkGoal, c.event, tkTick);
-                    tkNoteRide(c, tkl::listDefaultModeName(tkList));
-                    const int tkEv = (tkGoal.map.event >= 0) ? tkGoal.map.event : c.event;
-                    std::fprintf(stderr, "[tklist] tick=%llu ride %s [%s] (peak %u type %u row %u ev %d) default\n",
-                                 static_cast<unsigned long long>(tkTick), c.name,
-                                 tkl::listDefaultModeName(tkList), tkGoal.peak, tkGoal.type,
-                                 tkGoal.row, tkEv);
+                    const uint8_t oldStep = tkList.step, oldMode = tkList.mode;
+                    tkList.mode = tkl::listDefMode(tkList);
+                    tkList.step = 1;
+                    tkArmRide();
+                    if (!tkl::directKnob())
+                    {
+                        tkList.step = oldStep;
+                        tkList.mode = oldMode;
+                    }
                 };
                 const auto tkCross = [&] {
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
@@ -9405,7 +9406,8 @@ void PS2Runtime::run()
                         // runs with the list closed; the done path only
                         // latches an open overlay, so latch here; a new
                         // Map entry reopens it (reopen latch).
-                        tkl::driveArmBackOut(tkTick);
+                        if (!tkl::directKnob())
+                            tkl::driveArmBackOut(tkTick);
                         tkOpen = false;
                         tkDown.clear();
                         tkLatchedOn = true;
@@ -9629,12 +9631,17 @@ void PS2Runtime::run()
                     // or act on a list the first tap just closed); held ids
                     // still prune below so nothing refires.
                     bool tkActed = false;
+                    // tk-fe-2: a pad edge that acted this frame also blocks
+                    // the touch pass, so one press never fires twice.
+                    bool tkHandled = (tkEdge & (ps2x::vpad::kTriangle | ps2x::vpad::kCross)) != 0;
                     for (int i = 0; i < tkn; ++i)
                     {
                         tkStill.push_back(tkts[i].id);
                         if (std::find(tkDown.begin(), tkDown.end(), tkts[i].id) != tkDown.end())
                             continue;
                         tkDown.push_back(tkts[i].id);
+                        if (!tkOpen || tkHandled) continue;
+                        tkHandled = true;
                         const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
                         // A miss registers but never consumes the frame's
                         // action; after one tap acts, the rest of the frame
@@ -10760,6 +10767,45 @@ void PS2Runtime::run()
                              static_cast<unsigned long long>(set2HostFrame),
                              static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
             }
+        }
+        // Capture every presented composite in the request window. Fast
+        // uncompressed PPM avoids PNG encoder stalls; timestamps permit a
+        // 0.1-second timeline, including periods with no new present.
+        if (tkShotPrefix && ps2_ssx3_fe_launch::captureWindow() && !skipGl)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+            char path[1024];
+            std::snprintf(path, sizeof(path), "%s-fe-%lld.ppm", tkShotPrefix, static_cast<long long>(us));
+            rlDrawRenderBatchActive();
+            Image shot = LoadImageFromScreen();
+            bool saved = false;
+            if (shot.data && shot.width > 0 && shot.height > 0)
+            {
+                Color *pixels = LoadImageColors(shot);
+                if (pixels)
+                {
+                    const size_t count = static_cast<size_t>(shot.width) * shot.height;
+                    std::vector<uint8_t> rgb(count * 3);
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        rgb[3 * i] = pixels[i].r;
+                        rgb[3 * i + 1] = pixels[i].g;
+                        rgb[3 * i + 2] = pixels[i].b;
+                    }
+                    if (FILE *file = std::fopen(path, "wb"))
+                    {
+                        const bool header = std::fprintf(file, "P6\n%d %d\n255\n", shot.width, shot.height) > 0;
+                        saved = header && std::fwrite(rgb.data(), 1, rgb.size(), file) == rgb.size();
+                        if (std::fclose(file) != 0) saved = false;
+                    }
+                    UnloadImageColors(pixels);
+                }
+            }
+            UnloadImage(shot);
+            std::fprintf(stderr, "[fe-launch-shot] monotonic_us=%lld tick=%llu saved=%d path=%s\n",
+                         static_cast<long long>(us),
+                         static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()), saved ? 1 : 0, path);
         }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {

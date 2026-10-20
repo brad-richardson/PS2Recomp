@@ -217,6 +217,28 @@ void register_ps2_ssx3_tricky_list_tests()
 {
     MiniTest::Case("Ps2Ssx3TrickyList", [](TestCase &tc)
                    {
+        tc.Run("FE request consumes once, preserves arguments, and counts actual injected edges", [&](TestCase &t)
+               {
+            namespace fe = ps2_ssx3_fe_launch;
+            fe::finish(0);
+            t.IsTrue(fe::request(11, 1, 2, 1), "first request accepted");
+            t.IsFalse(fe::request(0, 0, 0, 1), "double tap cannot replace request");
+            fe::Request r;
+            t.IsTrue(fe::take(r), "guest takes request");
+            t.Equals(r.event, 11u, "event survives");
+            t.Equals(r.type, 1u, "type survives");
+            t.Equals(r.rules, 2u, "rules survive");
+            t.Equals(r.context, 1u, "context survives");
+            t.IsFalse(fe::take(r), "second guest take cannot replay");
+            fe::injected(0x4000); fe::injected(0x4000);
+            fe::injected(0); fe::injected(0x5000);
+            t.Equals(fe::mailbox().injectedPresses, uint64_t(3), "counts button edges, not holds");
+            t.Equals(fe::mailbox().injectedSamples, uint64_t(3), "held samples retained");
+            fe::finish(0);
+            t.IsTrue(fe::request(1, 0, 0, 1), "next event allowed after exit");
+            t.Equals(fe::mailbox().injectedPresses, uint64_t(0), "new request starts clean");
+            fe::finish(0);
+            t.IsFalse(fe::take(r), "exit cancels pending request"); });
         tc.Run("course table: Tricky order, targets and dual-type defaults", [](TestCase &t)
                {
             t.Equals(kCourseCount, 10u, "ten courses");
