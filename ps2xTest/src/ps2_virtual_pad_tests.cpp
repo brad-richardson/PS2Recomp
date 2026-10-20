@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_virtual_pad.h"
 #include "runtime/ps2_pad.h"
+#include "runtime/ps2_savestate.h"
 
 #include <algorithm>
 #include <cmath>
@@ -696,5 +697,56 @@ void register_ps2_virtual_pad_tests()
             t.Equals(autosaveAgeLine(1000u, 4599u), "Saved 59 minutes ago", "plural minutes");
             t.Equals(autosaveAgeLine(1000u, 4600u + 3600u), "Saved 2 hours ago", "plural hours");
             t.Equals(autosaveAgeLine(0u, 90000u), "Saved 1 day ago", "singular day");
+        });
+
+        // resume-ios-1: Mac-side execution of the shipped launch routing
+        // (ps2_runtime.cpp gameMain ASV1 block, compiled out on Mac, so the
+        // predicates are composed here instead): marker? -> lastSaveMissing;
+        // silent iff !lastSaveMissing && threshold-decision == Silent.
+        tc.Run("resume-ios-1: launch routing on Brad's shape", [](TestCase &t)
+               {
+            using ps2_savestate::AutoResumeDecision;
+            const uint64_t garibaldiWall = 1760886267u; // iphone .info save_utc 15:44:27Z
+            const uint64_t laterWall = 1760899500u;     // a later session's background
+            const uint64_t threshold = 600u;           // AUTORESUME_S default
+            auto route = [&](bool markerOk, uint64_t markerWall, uint64_t savedWall, uint64_t now) {
+                const bool lastSaveMissing = markerOk && autosaveSlotStale(markerWall, savedWall);
+                const bool silent =
+                    !lastSaveMissing &&
+                    ps2_savestate::autoResumeDecision(savedWall, now, threshold) ==
+                        AutoResumeDecision::Silent;
+                return std::make_pair(lastSaveMissing, silent);
+            };
+            {
+                uint64_t mw = 0u, mt = 0u;
+                t.IsTrue(parseAutosaveIntent(formatAutosaveIntent(laterWall, 20000u), mw, mt),
+                         "marker parses");
+                const auto r = route(true, mw, garibaldiWall, laterWall + 60u);
+                t.IsTrue(r.first, "Brad shape: last save missing");
+                t.IsTrue(!r.second, "Brad shape: never silent");
+            }
+            // Crux: a YOUNG stale slot would silent-resume without the fix;
+            // with the marker it routes to ask-stale.
+            {
+                const auto r = route(true, 1300u, 1000u, 1200u);
+                t.IsTrue(r.first, "young stale: missing");
+                t.IsTrue(!r.second, "young stale: silent suppressed");
+            }
+            // Controls: legacy behavior untouched without a marker.
+            {
+                const auto r = route(false, 0u, 1000u, 1200u);
+                t.IsTrue(!r.first && r.second, "young fresh: silent preserved");
+            }
+            {
+                const auto r = route(false, 0u, 1000u, 2000u);
+                t.IsTrue(!r.first && !r.second, "old fresh: ask preserved");
+            }
+            // A torn marker is untrusted -> legacy routing.
+            {
+                uint64_t mw = 0u, mt = 0u;
+                const bool ok = parseAutosaveIntent("wall=1300\n", mw, mt);
+                const auto r = route(ok, mw, 1000u, 1200u);
+                t.IsTrue(!ok && !r.first && r.second, "torn marker: legacy silent");
+            }
         }); });
 }
