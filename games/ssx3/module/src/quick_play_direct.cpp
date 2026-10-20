@@ -88,9 +88,23 @@ void continuation(uint8_t *ram, R5900Context *c, PS2Runtime *r) {
         call(ram,c,rd(ram,vt+12),8,state.config+adjust); break;
     }
     case 8: call(ram,c,0x1a86e8,9,1); break;
-    case 9:
+    case 9: {
+        // Stock network-config accept starts the net manager ([gp-0x238])
+        // through 0x255f50; its state machine then reaches state 5, the only
+        // state whose update services game-link slot 0 (gmut/comp after
+        // +ses). Start it the same way, then run netw/star now rather than
+        // on its next update so the session connect below keeps its order.
+        const auto net=rd(ram,getRegU32(c,28)-0x238);
+        if (!object(net,0x34)) { fail(ram,c,r,"net-manager-unavailable"); break; }
+        call(ram,c,0x255f50,40,net,0); break;
+    }
+    case 40:
         std::memcpy(ram+f+0x2c0,"mc0:Broadband#0",15);
-        call(ram,c,0x3f3c50,10,f+0x2c0); break;
+        call(ram,c,0x3f3c50,41,f+0x2c0); break;
+    case 41:
+        // The stock state-2 handler's store after its own netw/star.
+        wr(ram,rd(ram,getRegU32(c,28)-0x238)+0x20,3);
+        [[fallthrough]];
     case 10:
         if (!object(auth,0x300) || !ps2_net::qpCopyIdentity(ram,f+0x240)) {
             fail(ram,c,r,"identity-or-auth-unavailable"); break;
@@ -155,13 +169,25 @@ template<uint32_t Pc> void closeHook(uint8_t *ram, R5900Context *c, PS2Runtime *
     // The UI's accept animation independently closes its owning FE state.
     // 0x39ce78 sets lifecycle 6 without the delete bit; with no successor
     // it then reopens Main Menu, whose initializer destroys the session.
-    // Defer that close for this one pending transaction. The normal queue
-    // operation retires Main before the authenticated root initializes.
+    // Defer only that owner phase store for this one pending transaction;
+    // the normal queue operation retires Main before the authenticated root
+    // initializes. The rest of each callback still runs: skipping it left
+    // Main's widgets live, and their teardown then called freed vtables.
+    // 0x39ce48 = 0x398638(screen+0x40,0) (disable the widget group), then
+    // phase 6: tail-call that routine with the caller's ra. 0x39ce98 (leaf)
+    // = clear the animation record's pending bit, then phase 7.
     const auto screen=getRegU32(c,4);
     if (object(screen,0xd4) && rd(ram,screen+0xd0)==state.menu &&
         (state.stage==Stage::Connect || state.stage==Stage::Auth || state.stage==Stage::Persona)) {
         log(r,Pc==0x39ce48?"deferred-menu-close":"deferred-menu-closed",getRegU32(c,31));
-        c->pc=getRegU32(c,31); return;
+        if constexpr (Pc==0x39ce48) {
+            reg(c,4,screen+0x40); reg(c,5,0); c->pc=0x398638;
+        } else {
+            const auto record=getRegU32(c,7);
+            if (object(record,0x14)) wr(ram,record+0x10,rd(ram,record+0x10)&0xfeffffffu);
+            c->pc=getRegU32(c,31);
+        }
+        return;
     }
     closeOriginal<Pc>(ram,c,r);
 }
@@ -229,7 +255,7 @@ void apply(PS2Runtime &r) {
     }
     mainOriginal=r.lookupFunction(kMain); padOriginal=r.lookupFunction(kPad); returnOriginal=r.lookupFunction(kReturn);
     const uint32_t calls[]={0x1a86e8,0x14dc80,0x14dd58,0x145108,0x255860,0x25b650,0x260f80,0x266ca0,
-                           0x3f3c50,0x3184e8,0x25b6d8,0x25c610,0x25cd28,0x317d70,0x1bfbb8,0x1c0f40,0x39f400,0x39f290,0x39ad38};
+                           0x255f50,0x398638,0x3f3c50,0x3184e8,0x25b6d8,0x25c610,0x25cd28,0x317d70,0x1bfbb8,0x1c0f40,0x39f400,0x39f290,0x39ad38};
     if (!mainOriginal || !padOriginal || !returnOriginal) { std::fprintf(stderr,"[qp-direct] refused: hook unavailable\n"); return; }
     for (const auto pc:calls) if (!r.lookupFunction(pc)) {
         std::fprintf(stderr,"[qp-direct] refused: guest function unavailable pc=%x\n",pc); return;
