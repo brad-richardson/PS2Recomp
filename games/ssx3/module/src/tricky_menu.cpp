@@ -427,8 +427,32 @@ namespace
         if (ps2_ssx3_course::appUpdateFn(rdram) == ps2_ssx3_course::kGameUpdate)
         {
             s.mapController = 0u;
+            s.wasGame = true;
             return;
         }
+        // tk-card-1: event-exit teardown. Quitting/restarting lands on peak
+        // select, loading or title without a main-menu build, so the build
+        // hook never tears the mode down. Attempt it on the game->frontend
+        // edge (or a pending retry); menu navigation mid-drive is frontend
+        // without an edge and stays untouched. A refusal (loader busy) skips
+        // the record restore too and retries on later frontend frames.
+        if (eventExitStep(s.wasGame, false, s.tricky, s.teardownPending) == EventExitAction::Attempt)
+        {
+            std::string msg;
+            const bool modeRet = modeSet(rdram, false, msg);
+            const bool refused = !modeRet && !msg.empty();
+            bool restoreOk = true;
+            if (!refused)
+                restoreOk = ps2_ssx3_tricky_list::restoreAllCourseMaps(rdram, PS2_RAM_SIZE);
+            const EventExitResult r = eventExitApplied(refused, restoreOk);
+            s.tricky = r.tricky;
+            s.teardownPending = r.pending;
+            if (refused)
+                tkLog(runtime, std::string("event exit: teardown deferred (") + msg + ")");
+            else
+                tkLog(runtime, msg.empty() ? "event exit: Tricky off (no menu build)" : msg);
+        }
+        s.wasGame = false;
         if (!armed || s.redirect || !s.mapController ||
             (std::memcmp(rows, rdram + ps2_ssx3_course::kEventBase, kRowsBytes) == 0 &&
              std::memcmp(rows + kRowsBytes, rdram + ps2_ssx3_course::kTopoBase, kTopoBytes) == 0))

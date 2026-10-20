@@ -302,5 +302,28 @@ void register_ps2_ssx3_tricky_menu_tests()
             t.Equals(str(kEventBase + 68), std::string("BAM"), "stock archive");
             t.Equals(str(0x47BDB0), std::string("data/ui/courspic.big"), "poke undone");
             ms = Modes{}; });
+        tc.Run("tk-card-1: event-exit teardown attempts only on the game->frontend edge or a pending retry",
+               [](TestCase &t)
+               {
+            using ps2_ssx3_tricky::EventExitAction;
+            using ps2_ssx3_tricky::eventExitApplied;
+            using ps2_ssx3_tricky::eventExitStep;
+            // wasGame, inGame, tricky, pending
+            t.IsTrue(eventExitStep(false, false, true, false) == EventExitAction::None, "mid-drive menu: none");
+            t.IsTrue(eventExitStep(false, true, true, false) == EventExitAction::None, "in game: none");
+            t.IsTrue(eventExitStep(true, false, false, false) == EventExitAction::None, "knob-off edge: none");
+            t.IsTrue(eventExitStep(false, false, false, true) == EventExitAction::None, "pending but clean: none");
+            t.IsTrue(eventExitStep(true, false, true, false) == EventExitAction::Attempt, "quit edge: attempt");
+            t.IsTrue(eventExitStep(false, false, true, true) == EventExitAction::Attempt, "pending retry: attempt");
+            t.IsTrue(eventExitStep(true, true, true, true) == EventExitAction::None, "game wins: none");
+            auto r = eventExitApplied(false, true);
+            t.IsTrue(!r.tricky && !r.pending, "clean teardown clears");
+            r = eventExitApplied(true, true);
+            t.IsTrue(r.tricky && r.pending, "loader refusal stays pending");
+            r = eventExitApplied(false, false);
+            t.IsTrue(r.tricky && r.pending, "restore failure stays pending");
+            r = eventExitApplied(true, false);
+            t.IsTrue(r.tricky && r.pending, "both bad stays pending");
+        });
     });
 }

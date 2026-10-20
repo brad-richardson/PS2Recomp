@@ -353,6 +353,15 @@ struct State
     bool on = false; // knob
     bool tricky = false;
     bool directActive = false; // direct launch queued (bypasses Map): overlay stays shut so the pad reaches the briefing
+    // tk-card-1: event-exit teardown. Quitting/restarting an event returns to
+    // the frontend (peak select, loading, title) without a main-menu build,
+    // so the menu-build teardown never fires and the mode, its CD aliases +
+    // file-table ownership, and mapped records stay armed into the next load
+    // (stale Tricky music after quit; wedged reloads). The pad glue sees
+    // every frame: wasGame tracks the game side of the edge, teardownPending
+    // retries a switch the loader blocked until it succeeds.
+    bool wasGame = false;
+    bool teardownPending = false;
     uint32_t mapController = 0u; // 0x200DE8's a0 since the last main-menu build / event
     uint32_t cmnamer = 0u;       // patched CMNAMER copy
     bool labelDone = false;
@@ -377,6 +386,39 @@ inline bool knob()
 {
     const char *v = std::getenv("PS2X_SSX3_TRICKY_MENU");
     return v && std::strcmp(v, "1") == 0;
+}
+
+// Event-exit teardown decision (tk-card-1). Pure: the pad glue calls this
+// on every frontend frame with the tracked edge. A game -> frontend edge (or
+// a pending retry) with Tricky armed means attempt teardown; any other
+// frontend frame (menu navigation mid-drive) means nothing.
+enum class EventExitAction
+{
+    None,
+    Attempt
+};
+inline EventExitAction eventExitStep(bool wasGame, bool inGame, bool tricky, bool pending)
+{
+    if (!tricky || inGame)
+        return EventExitAction::None;
+    if (wasGame || pending)
+        return EventExitAction::Attempt;
+    return EventExitAction::None;
+}
+// Applying an attempt's outcome. modeRefused = modeSet(false) returned false
+// with a reason (the loader blocks switches while loading); restoreOk = the
+// record restore wrote cleanly. A refusal stays pending for the next frontend
+// frame; anything else clears Tricky for good.
+struct EventExitResult
+{
+    bool tricky;
+    bool pending;
+};
+inline EventExitResult eventExitApplied(bool modeRefused, bool restoreOk)
+{
+    if (!modeRefused && restoreOk)
+        return {false, false};
+    return {true, true};
 }
 
 // Accept on a main-menu row: returns the state to store in item+0x18 before
