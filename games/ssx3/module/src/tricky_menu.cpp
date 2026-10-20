@@ -169,6 +169,35 @@ namespace
             tkLog(runtime, std::string("direct defers ") + c.name + " to the navigator (no Race cell yet)");
             return false;
         }
+        using namespace ps2_ssx3_tricky;
+        // Tap-path loader repair (tricky-direct-2 RE): the menu walk leaves
+        // the load-select row for [0x5305B0] at -1 (the walk's 0x1819ec
+        // accept handler stores the [s6+20] byte, 0xFF, at row+12), while a
+        // clean chain has BSS 0 there. The loading writer (0x1298e0 family)
+        // scales it (s0<<2) into the event-data base [0x4A28A0], so -1 reads
+        // the neighbour word ([g0+12008], a small int) into the load record
+        // instead of the object at [g0+12012]; the record's virtual call then
+        // dies on a JALR-null (0x125ba0, a1=0x2). Restore the no-history
+        // value when (and only when) the row still holds the stale -1.
+        {
+            uint32_t idx = 0u;
+            std::memcpy(&idx, ram + 0x5305B0u, sizeof(idx));
+            if (idx <= 64u)
+            {
+                const uint32_t row = 0x534FE0u + idx * 28u + 12u;
+                uint32_t sel = 0u;
+                std::memcpy(&sel, ram + row, sizeof(sel));
+                if (sel == 0xFFFFFFFFu)
+                {
+                    const uint32_t zero = 0u;
+                    std::memcpy(ram + row, &zero, sizeof(zero));
+                    char fix[96];
+                    std::snprintf(fix, sizeof(fix),
+                                  "direct load-select repair row=%u -1 -> 0", idx);
+                    tkLog(runtime, fix);
+                }
+            }
+        }
         const uint32_t sp = getRegU32(ctx, 29);
         if (sp < kDirectFrame || sp > PS2_RAM_SIZE) return false;
         // Pin the donor world (also marks the ride for the records guard).
