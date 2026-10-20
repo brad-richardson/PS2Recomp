@@ -677,7 +677,7 @@ void register_ps2_ssx3_tricky_list_tests()
             std::vector<uint16_t> presses;
             uint16_t prevMask = 0;
             uint64_t tick = 0;
-            for (int i = 0; i < 2500 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            for (int i = 0; i < 6000 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, v, tick, false, false);
                 if (o.mask != 0 && prevMask == 0)

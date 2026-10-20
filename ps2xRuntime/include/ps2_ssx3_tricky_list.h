@@ -610,7 +610,7 @@ inline void navBackOut(NavState &n, uint64_t tick)
 // is still parked. A walk that still misses leaves the ask parked; the
 // serve timeout disarms it and the overlay re-arms.
 inline constexpr int kTrickyAcceptPresses = 11;
-inline constexpr uint64_t kTrickySettleTicks = 150;
+inline constexpr uint64_t kTrickySettleTicks = 2500;
 inline void navToTricky(NavState &n, uint64_t tick)
 {
     n = NavState{};
