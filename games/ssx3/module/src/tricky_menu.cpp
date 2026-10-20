@@ -211,7 +211,11 @@ namespace
     bool tkDirectServe(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
     {
         namespace tkl = ps2_ssx3_tricky_list;
-        if (!tkl::directKnob() || !ps2_ssx3_tricky::state().tricky)
+        // No state().tricky gate: BackOut lands on the main menu, whose
+        // build clears tricky, but the parked ask still needs serving.
+        // The ask only ever parks from the Tricky overlay, and the
+        // mid-race + selector guards below cover the rest.
+        if (!tkl::directKnob())
             return false;
         tkl::ListState list;
         bool backout = false, walked = false;
