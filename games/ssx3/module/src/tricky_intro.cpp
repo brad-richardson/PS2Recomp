@@ -10,7 +10,7 @@
 // card still waits for the player's X, so countdown/GO timing is unchanged.
 #include "Ssx3TrickyIntro.h"
 #include "ps2_runtime.h"
-#include "ps2_ssx3_course_manifest.h"
+#include "ps2_ssx3_tricky_list.h"
 #include "runtime/ps2_memory.h"
 
 #include <cstdlib>
@@ -36,8 +36,11 @@ uint32_t read32(const uint8_t *ram, uint32_t address)
 
 void skipTrickyFlyover(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const auto &modes = ps2_ssx3_course::courseModes();
-    if (ram && modes.armed && ps2_ssx3_course::modeCurrent(modes, ram) != 0u)
+    // A mapped donor world means a Tricky ride is loading (direct launch and
+    // the navigator both pin the course world here; stock never maps). The
+    // manifest mode reader cannot be used: the launch overwrites the donor
+    // event's mode row, so it reports Stock on most courses.
+    if (ram && ps2_ssx3_tricky_list::mapState().activeEvent >= 0)
     {
         const uint32_t race = read32(ram, read32(ram, 0x004a28a8u) + 0x84u);
         if (read32(ram, race + 0x214u) == 1u && inRam(race + 0x210u, 4u))
