@@ -433,6 +433,33 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
                 seen = seen || st.resolved[i][j] == q;
             if (seen)
                 continue;
+            // Cross-gem ownership: one live address has one owner. A second
+            // gem claiming an address another gem already owns fails closed
+            // (a reused slot must not double-bind: one instance spinning for
+            // two rids). First claimant keeps it; the duplicate is
+            // quarantined via ambig, so spin/hide skip it.
+            size_t owner = gems.size();
+            for (size_t k = 0u; k < gems.size() && k < kMaxGems && owner == gems.size(); ++k)
+            {
+                if (k == i)
+                    continue;
+                for (uint8_t m = 0u; m < st.nres[k]; ++m)
+                    if (st.resolved[k][m] == q)
+                    {
+                        owner = k;
+                        break;
+                    }
+            }
+            if (owner != gems.size())
+            {
+                std::fprintf(stderr,
+                             "[tk45c] tick=%llu %s rid=%u AMBIG-DUP at=%08x owned by rid=%u, hide off\n",
+                             (unsigned long long)tick, gems[i].course, gems[i].rid, q,
+                             gems[owner].rid);
+                st.ambig[i] = true; // fail closed: never hide an ambiguous gem
+                st.nres[i] = 0u;
+                continue;
+            }
             if (st.nres[i] >= kMaxRes)
             {
                 std::fprintf(stderr, "[tk45c] tick=%llu %s rid=%u AMBIGUOUS (%u+ instances), hide off\n",

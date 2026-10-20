@@ -111,6 +111,16 @@ bool parse2(std::vector<Gem> &gems)
     return ps2_tk45c::parseTableText(kTable2, gems, err);
 }
 
+const char *kTableDup = "# two rows sharing one spot (stale-slot double-bind model)\n"
+                        "TEST 10 1000 0 0 100 2 Gem_Yellow_Test\n"
+                        "TEST 20 1000 0 0 100 3 Gem_Orange_Test2\n";
+
+bool parseDup(std::vector<Gem> &gems)
+{
+    std::string err;
+    return ps2_tk45c::parseTableText(kTableDup, gems, err);
+}
+
 } // namespace
 
 void register_ps2_ssx3_tricky_gems_tests();
@@ -545,6 +555,47 @@ MiniTest::Case("Ps2Ssx3TrickyGemsSpin", [](TestCase &tc)
                 t.IsTrue(rf(r4, kT + 0x1c4u) == 2.0f && (r32(r4, kInst0 + 8u) & 0xffu) == 0x05u,
                          "pickup x2 + hide unchanged");
             }
+        }); });
+
+MiniTest::Case("Ps2Ssx3TrickyGemsDupOwner", [](TestCase &tc)
+               {
+        tc.Run("second claimant of one address fails closed", [](TestCase &t)
+               {
+            std::vector<Gem> gems;
+            t.IsTrue(parseDup(gems), "dup table parses");
+            std::vector<uint8_t> ram(3u * ps2_tk45c::kScanChunk, 0);
+            fakeInstance(ram, kInst0, 1000, 0, 0);
+            fakeMatrix(ram, kInst0, kGemR0, kGemR1, kGemR2);
+            State st;
+            for (int i = 0; i < 8 && !st.scanDone; ++i)
+                ps2_tk45c::scanChunk(st, gems, ram.data(), ram.size(), 3000, 100);
+            t.IsTrue(st.scanDone, "scan completes");
+            t.IsTrue(st.nres[0] == 1u && st.resolved[0][0] == kInst0, "first owner keeps the instance");
+            t.IsTrue(st.ambig[1], "second claimant is ambiguous");
+            t.IsTrue(st.nres[1] == 0u, "second claimant resolves nothing");
+            t.IsTrue(ps2_tk45c::spinGems(st, gems, ram.data(), ram.size(), 3001, 101) == 1u,
+                     "one address spins once");
+        });
+        tc.Run("race boundary clears every ownership claim", [](TestCase &t)
+               {
+            std::vector<Gem> gems;
+            t.IsTrue(parseDup(gems), "dup table parses");
+            std::vector<uint8_t> ram(kRamSize, 0);
+            fakeInstance(ram, kInst0, 1000, 0, 0);
+            State st;
+            for (int i = 0; i < 40 && !st.scanDone; ++i)
+                ps2_tk45c::scanChunk(st, gems, ram.data(), ram.size(), 3000, 100);
+            t.IsTrue(st.scanDone && st.nres[0] == 1u, "race 1 resolved");
+            // Race 2, same session: the clock rewinds -> per-race reset.
+            fakeRace(ram, 0, 0, 0, 100);
+            ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 4000, kR, true);
+            fakeRace(ram, 0, 0, 0, 101);
+            ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 4001, kR, true);
+            fakeRace(ram, 0, 0, 0, 50);
+            ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 4002, kR, true);
+            t.IsTrue(!st.scanDone && st.scanCursor <= ps2_tk45c::kScanChunk, "boundary re-arms the scan");
+            t.IsTrue(st.nres[0] == 0u && st.nres[1] == 0u, "boundary clears ownership");
+            t.IsTrue(!st.ambig[0] && !st.ambig[1], "boundary clears ambiguity");
         }); });
 
 MiniTest::Case("Ps2Ssx3TrickyGemsScan", [](TestCase &tc)
