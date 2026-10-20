@@ -891,107 +891,21 @@ namespace ps2_stubs
             {"wait-crea", 0, 48381, 0, QG_NETW_CREA, 0, 0, 900},
             {"cfg-1", kPadBtnCross, 52000, 250, QG_NETW_LIST, 0, 0, 1500},
             {"cfg-2", kPadBtnCross, 53000, 250, QG_TICK, 0, 0, 900},
-            {"cfg-3", kPadBtnCross, 54000, 250, QG_TICK, 0, 0, 900},
-            {"cfg-ok", kPadBtnCross, 65500, 250, QG_NETW_STAR, 0, 0, 1800},
+            // v0 option-0: timeout 900 -> 1500 (the link modal arrives on
+            // game timing ~900 ticks after cfg-2; the old value won the
+            // race by ~14 ticks in R1 and lost it on jitter).
+            {"cfg-3", kPadBtnCross, 54000, 250, QG_TICK, 0, 0, 1500},
+            // v0 option-0: collapsed floor (was R1 human 11.5 s pause).
+            {"cfg-ok", kPadBtnCross, 54500, 250, QG_NETW_STAR, 0, 0, 1800},
             {"wait-star", 0, 65500, 0, QG_NETW_STAR, 0, 0, 900},
-            {"login-down-1", kPadBtnDown, 68000, 150, QG_TICK, 0, 0, 1800},
-            {"login-down-2", kPadBtnDown, 68500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-1", kPadBtnRight, 69000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-2", kPadBtnRight, 69500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-3", kPadBtnRight, 70000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-4", kPadBtnRight, 70500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-5", kPadBtnRight, 71000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-6", kPadBtnRight, 71500, 150, QG_TICK, 0, 0, 900},
-            {"login-char-1", kPadBtnCross, 72000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-1", kPadBtnLeft, 72500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-2", kPadBtnLeft, 73000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-3", kPadBtnLeft, 73500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-4", kPadBtnLeft, 74000, 150, QG_TICK, 0, 0, 900},
-            {"login-char-2", kPadBtnCross, 74500, 150, QG_TICK, 0, 0, 900},
-            {"login-up-1", kPadBtnUp, 75000, 150, QG_TICK, 0, 0, 900},
-            {"login-up-2", kPadBtnUp, 75500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-7", kPadBtnRight, 76000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-8", kPadBtnRight, 76500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-9", kPadBtnRight, 77000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-10", kPadBtnRight, 77500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-11", kPadBtnRight, 78000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-12", kPadBtnRight, 78500, 150, QG_TICK, 0, 0, 900},
-            {"login-char-3", kPadBtnCross, 79000, 150, QG_TICK, 0, 0, 900},
-            {"login-up-3", kPadBtnUp, 79500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-5", kPadBtnLeft, 80000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-6", kPadBtnLeft, 80500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-7", kPadBtnLeft, 81000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-8", kPadBtnLeft, 81500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-9", kPadBtnLeft, 82000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-10", kPadBtnLeft, 82500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-11", kPadBtnLeft, 83000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-12", kPadBtnLeft, 83500, 150, QG_TICK, 0, 0, 900},
-            {"login-char-4", kPadBtnCross, 84000, 150, QG_TICK, 0, 0, 900},
-            {"login-down-3", kPadBtnDown, 84500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-13", kPadBtnRight, 85000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-14", kPadBtnRight, 85500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-15", kPadBtnRight, 86000, 150, QG_TICK, 0, 0, 900},
-            {"login-char-5", kPadBtnCross, 86500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-16", kPadBtnRight, 87000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-17", kPadBtnRight, 87500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-18", kPadBtnRight, 88000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-19", kPadBtnRight, 88500, 150, QG_TICK, 0, 0, 900},
-            {"login-char-6", kPadBtnCross, 89000, 150, QG_TICK, 0, 0, 900},
-            {"login-down-4", kPadBtnDown, 89500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-13", kPadBtnLeft, 90000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-14", kPadBtnLeft, 90500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-15", kPadBtnLeft, 91000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-16", kPadBtnLeft, 91500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-17", kPadBtnLeft, 92000, 150, QG_TICK, 0, 0, 900},
-            {"login-char-7", kPadBtnCross, 92500, 150, QG_TICK, 0, 0, 900},
-            {"login-up-4", kPadBtnUp, 93000, 150, QG_TICK, 0, 0, 900},
-            {"login-char-8", kPadBtnCross, 93500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-20", kPadBtnRight, 94000, 150, QG_TICK, 0, 0, 900},
-            {"login-char-9", kPadBtnCross, 94500, 150, QG_TICK, 0, 0, 900},
-            {"login-up-5", kPadBtnUp, 95000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-18", kPadBtnLeft, 95500, 150, QG_TICK, 0, 0, 900},
-            {"login-left-19", kPadBtnLeft, 96000, 150, QG_TICK, 0, 0, 900},
-            {"login-left-20", kPadBtnLeft, 96500, 150, QG_TICK, 0, 0, 900},
-            {"login-char-10", kPadBtnCross, 97000, 150, QG_TICK, 0, 0, 900},
-            {"login-down-5", kPadBtnDown, 97500, 150, QG_TICK, 0, 0, 900},
-            {"login-down-6", kPadBtnDown, 98000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-21", kPadBtnRight, 98500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-22", kPadBtnRight, 99000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-23", kPadBtnRight, 99500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-24", kPadBtnRight, 100000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-25", kPadBtnRight, 100500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-26", kPadBtnRight, 101000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-27", kPadBtnRight, 101500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-28", kPadBtnRight, 102000, 150, QG_TICK, 0, 0, 900},
-            {"login-right-29", kPadBtnRight, 102500, 150, QG_TICK, 0, 0, 900},
-            {"login-right-30", kPadBtnRight, 103000, 150, QG_TICK, 0, 0, 900},
-            {"login-char-11", kPadBtnCross, 103500, 150, QG_TICK, 0, 0, 900},
-            {"login-next-down", kPadBtnDown, 106000, 150, QG_TICK, 0, 0, 1200},
-            {"login-next-ok", kPadBtnCross, 106500, 250, QG_TICK, 0, 0, 900},
-            {"pw-down", kPadBtnDown, 108000, 150, QG_TICK, 0, 0, 1200},
-            {"pw-char-1", kPadBtnCross, 108500, 150, QG_TICK, 0, 0, 900},
-            {"pw-char-2", kPadBtnCross, 109000, 150, QG_TICK, 0, 0, 900},
-            {"pw-char-3", kPadBtnCross, 109500, 150, QG_TICK, 0, 0, 900},
-            {"pw-char-4", kPadBtnCross, 110000, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-1", kPadBtnRight, 110500, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-2", kPadBtnRight, 111000, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-3", kPadBtnRight, 111500, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-4", kPadBtnRight, 112000, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-5", kPadBtnRight, 112500, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-6", kPadBtnRight, 113000, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-7", kPadBtnRight, 113500, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-8", kPadBtnRight, 114000, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-9", kPadBtnRight, 114500, 150, QG_TICK, 0, 0, 900},
-            {"pw-right-10", kPadBtnRight, 115000, 150, QG_TICK, 0, 0, 900},
-            {"pw-char-5", kPadBtnCross, 115500, 150, QG_TICK, 0, 0, 900},
-            {"submit-down-1", kPadBtnDown, 117000, 150, QG_TICK, 0, 0, 1200},
-            {"submit-down-2", kPadBtnDown, 117500, 150, QG_TICK, 0, 0, 900},
-            {"submit-down-3", kPadBtnDown, 118000, 150, QG_TICK, 0, 0, 900},
-            {"submit-ok", kPadBtnCross, 118500, 250, QG_TICK, 0, 0, 900},
+            // v0 option-0: typing cluster removed (login-down-1..login-char-4):
+            // on-the-fly identity auto-auths; no sign-in screens ever show.
+            // v0 option-0: typing cluster removed (login-down-3..pw-char-4).
+            // v0 option-0: typing + submit + save-answer removed
+            // (pw-right-1..save-no-cross). The game auto-auths; the
+            // waits below observe it.
             {"wait-conn", 0, 118500, 0, QG_SESS_CONN, 0, 0, 1500},
             {"wait-auth", 0, 118500, 0, QG_GAME_AUTH, 0, 0, 900},
-            {"save-no-down", kPadBtnDown, 120000, 150, QG_TICK, 0, 0, 1200},
-            {"save-no-cross", kPadBtnCross, 120500, 250, QG_TICK, 0, 0, 900},
             {"persona-pick", kPadBtnCross, 126800, 250, QG_TICK, 0, 0, 1800},
             {"wait-pers", 0, 126800, 0, QG_PERS, 0, 0, 1200},
             {"qm-entry", kPadBtnCross, 130200, 250, QG_TICK, 0, 0, 1800},
@@ -1026,8 +940,7 @@ namespace ps2_stubs
             // hosts cfg-3/cfg-ok. cfg-ok still skips when login is up.
             {"cfg-1", "cfg-2", 4u, 0u, false},
             {"cfg-3", "cfg-ok", 3u, 0u, false},
-            {"login-down-1", "submit-ok", 3u, 0u, false},
-            {"save-no-down", "save-no-cross", 3u, 4u, false},
+            // v0 option-0: typing + save phases removed with their steps.
             {"persona-pick", "persona-pick", 4u, 2u, false},
             {"qm-entry", "qm-entry", 4u, 4u, true},
             {"filter-stop", "filter-stop", 7u, 0x16u, false},
@@ -1228,7 +1141,7 @@ namespace ps2_stubs
             bool onlineMode = false;
             uint64_t seenCreaCount = 0u;
             // ONL11 addendum: card-path shortcut indices.
-            size_t submitOkIdx = 0u;
+            size_t autoAuthToIdx = 0u;
             size_t personaPickIdx = 0u;
             // online-card-1: outrun catch-up target (guest reached the
             // filter on its own; completes through the done path).
@@ -1256,11 +1169,11 @@ namespace ps2_stubs
             // is net-silent deterministic UI (D1: first guest net call
             // is netw/crea @2900), so these steps chain relatively with
             // guardrails instead of per-screen ids (peak/mode/event ids
-            // unprobed). waitCrea/loginDown1 are jump targets.
+            // unprobed). waitCrea/autoAuthFrom are jump targets.
             size_t danceFrom = kQpNavSteps;
             size_t danceTo = kQpNavSteps;
             size_t waitCreaIdx = kQpNavSteps;
-            size_t loginDown1Idx = kQpNavSteps;
+            size_t autoAuthFromIdx = kQpNavSteps;
         };
 
         size_t qpNavFindStep(const char *name)
@@ -1346,16 +1259,16 @@ namespace ps2_stubs
             g_qpNav.danceFrom = qpNavFindStep("char-2");
             g_qpNav.danceTo = qpNavFindStep("online-entry");
             g_qpNav.waitCreaIdx = qpNavFindStep("wait-crea");
-            g_qpNav.loginDown1Idx = qpNavFindStep("login-down-1");
-            // ONL11 addendum: card-path shortcut (gameAuth before our
-            // submit) jumps to persona-pick, skipping typing + save.
-            g_qpNav.submitOkIdx = qpNavFindStep("submit-ok");
+            // v0 option-0: the auto-auth window (gameAuth lands here, no
+            // typing/submit steps exist). Jumps land on persona-pick.
+            g_qpNav.autoAuthFromIdx = qpNavFindStep("wait-star");
+            g_qpNav.autoAuthToIdx = qpNavFindStep("wait-auth");
             g_qpNav.personaPickIdx = qpNavFindStep("persona-pick");
             // online-card-1: outrun catch-up target (see above).
             g_qpNav.filterStopIdx = qpNavFindStep("filter-stop");
             if (g_qpNav.danceFrom >= g_qpNav.danceTo || g_qpNav.danceTo >= kQpNavSteps ||
-                g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.loginDown1Idx >= kQpNavSteps ||
-                g_qpNav.submitOkIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps ||
+                g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.autoAuthFromIdx >= kQpNavSteps ||
+                g_qpNav.autoAuthToIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps ||
                 g_qpNav.filterStopIdx >= kQpNavSteps)
             {
                 std::fprintf(stderr, "[qpnav] dance/jump targets unresolved: disarmed\n");
@@ -1631,7 +1544,7 @@ namespace ps2_stubs
             // instead of timing out. Ranges keep the config cluster and
             // the targets themselves on the normal path.
             if (ps2_net_protocol::qpNavPersonaShowing(menuMain, menuSub) &&
-                g_qpNav.idx >= g_qpNav.loginDown1Idx && g_qpNav.idx < g_qpNav.personaPickIdx)
+                g_qpNav.idx >= g_qpNav.autoAuthFromIdx && g_qpNav.idx < g_qpNav.personaPickIdx)
             {
                 std::fprintf(stderr, "[qpnav] jump %s -> persona-pick (outrun catch-up @%llu)\n",
                              s.name, static_cast<unsigned long long>(guestVsyncTick));
@@ -1642,7 +1555,7 @@ namespace ps2_stubs
                 return;
             }
             if (ps2_net_protocol::qpNavFilterShowing(menuMain, menuSub) &&
-                g_qpNav.idx >= g_qpNav.loginDown1Idx && g_qpNav.idx < g_qpNav.filterStopIdx)
+                g_qpNav.idx >= g_qpNav.autoAuthFromIdx && g_qpNav.idx < g_qpNav.filterStopIdx)
             {
                 std::fprintf(stderr, "[qpnav] jump %s -> filter-stop (outrun catch-up @%llu)\n",
                              s.name, static_cast<unsigned long long>(guestVsyncTick));
@@ -1660,30 +1573,24 @@ namespace ps2_stubs
             {
                 return;
             }
-            // cfg-ok skip: the login dialog (3/0x16) already up means the
-            // config flow advanced without this press (its purpose is
-            // fulfilled); pressing Cross into the login dialog would be
-            // wrong, so jump to the login cluster instead of firing.
+            // v0 option-0: cfg-ok skip lands on wait-star (login up means
+            // the config flow advanced without this press).
             if (std::strcmp(s.name, "cfg-ok") == 0 && menuMain == 3u && menuSub == 0x16u)
             {
-                std::fprintf(stderr, "[qpnav] jump cfg-ok -> login-down-1 (login up)\n");
-                g_qpNav.idx = g_qpNav.loginDown1Idx;
+                std::fprintf(stderr, "[qpnav] jump cfg-ok -> wait-star (login up)\n");
+                g_qpNav.idx = g_qpNav.autoAuthFromIdx;
                 g_qpNav.stepStart = guestVsyncTick;
                 g_qpNav.lastFire = guestVsyncTick;
                 return;
             }
-            // ONL11 addendum: card-path shortcut (f2: the game
-            // auto-submits the saved EA login with zero typing, and shows
-            // no save prompt). GAME AUTH before our submit fired means the
-            // login came from the card: skip the typing + save clusters
-            // and wait at persona-pick, whose phase gate fires the pick
-            // when 4/2 is up. Typing-path auth lands past submit-ok, so
-            // this never fires there.
+            // v0 option-0: GAME AUTH inside the auto-auth window means the
+            // on-the-fly identity authed: wait at persona-pick, whose phase
+            // gate fires the pick when 4/2 is up.
             // online-card-1: the menu-gated catch-up above usually rejoins
             // first — this arm covers a gameAuth that lands without
             // readable persona words.
-            if (m.gameAuth != 0u && g_qpNav.idx >= g_qpNav.loginDown1Idx &&
-                g_qpNav.idx <= g_qpNav.submitOkIdx)
+            if (m.gameAuth != 0u && g_qpNav.idx >= g_qpNav.autoAuthFromIdx &&
+                g_qpNav.idx <= g_qpNav.autoAuthToIdx)
             {
                 std::fprintf(stderr, "[qpnav] jump %s -> persona-pick (early auth @%llu)\n",
                              s.name, static_cast<unsigned long long>(m.gameAuth));
@@ -1693,19 +1600,8 @@ namespace ps2_stubs
                 g_qpNav.holdMask = 0u;
                 return;
             }
-            // ONL11 addendum: the Save EA Login answer, online mode only
-            // (launch mode keeps No). Yes (skip the Down) only when the
-            // card holds no save: the game's own Yes path then writes it
-            // (fYes). A card save present means preserve it: answer No.
-            if (std::strcmp(s.name, "save-no-down") == 0 && g_qpNav.onlineMode &&
-                !ps2_net::qpCardHasEaLogin())
-            {
-                std::fprintf(stderr, "[qpnav] skip save-no-down (no card save: Yes)\n");
-                g_qpNav.lastFire = guestVsyncTick;
-                g_qpNav.idx++;
-                g_qpNav.stepStart = guestVsyncTick;
-                return;
-            }
+            // v0 option-0: no save prompt exists (faked login), so the
+            // save-answer steps are gone with the typing cluster.
             if (s.gate == QG_FILTER_STOP)
             {
                 g_qpNav.done = true;
@@ -4244,19 +4140,11 @@ namespace ps2_stubs
         return (value && value[0] != '\0') ? value : "unset";
     }
 
-    // online-card-1: Quick Play walk overlay state (draw-only host
-    // overlay in ps2_runtime.cpp). True while the online-mode walk is
-    // driving (armed at Online entry, until filter/abort/cancel).
-    // Knob-off: always false (the navigator never arms).
+    // v0 option-0: no overlay (Brad: no Connecting screen over the walk).
+    // The walk runs visibly; any real user pad input still cancels it.
     bool qpNavOverlayShowing()
     {
-        if (!g_qpNavArmed.load(std::memory_order_relaxed))
-        {
-            return false;
-        }
-        std::lock_guard<std::mutex> lock(g_qpNav.mutex);
-        return g_qpNav.onlineMode && g_qpNav.armed && !g_qpNav.done && !g_qpNav.aborted &&
-               !g_qpNav.cancelled;
+        return false;
     }
 
     void padRecordSanitize(char *text)

@@ -219,6 +219,12 @@ namespace ps2_net
             return on;
         }
 
+        // v0 option-0: the Mc HLE served the EA Login data file from the
+        // faked presence (see MemoryCard.cpp). The login buffers then hold
+        // decode-of-zero garbage the overwrite must replace unconditionally.
+        // (Public setter/getter live at ps2_net scope below.)
+        std::atomic<bool> g_qpLoginFaked{false};
+
         // ONL11: login-file path. Explicit PS2X_NET_QUICKPLAY_FILE wins;
         // otherwise the app's non-shared data dir (F2: iOS Application
         // Support via PS2X_IOS_SUPPORT, Android internal files dir via the
@@ -425,8 +431,8 @@ namespace ps2_net
         // at boot), the first observed Online entry generates an
         // adjective-noun persona with a random password, persists it once
         // (mode 600), and arms the login path. Runs on the netw/crea
-        // handler, well before the submit, so the preload and the
-        // submit-fill carry it. The name remains stable for this install;
+        // handler, well before the auth, so the preload and the identity
+        // overwrite carry it. The name remains stable for this install;
         // the lobby adds a temporary number only on a live collision.
         void ensureQuickplayLogin(uint64_t tick)
         {
@@ -498,30 +504,9 @@ namespace ps2_net
         // "Electro" SDK format — opaque to us, never parsed), `view.ico`
         // and `icon.sys` (title "EA Login"). Writer chain (read-only):
         // sub_00265E80 -> sub_003F7F48 -> sub_003F8258 -> sub_003FA380
-        // with the "EA Login" title record (ELF vaddr 0x497390). The card
-        // path is detected (never modified) here; the navigator answers
-        // the save prompt from it. NEVER delete or overwrite: only the
-        // game's own Yes path writes, and only when no save exists.
-        bool qpCardHasEaLoginImpl()
-        {
-#if PS2_NET_HAVE_POSIX_SOCKETS
-            const char *mc = std::getenv("PS2X_MC_ROOT");
-            if (!mc || !*mc)
-            {
-                return false;
-            }
-            const std::string data =
-                std::string(mc) + "/PSCD10088slogin/PSCD10088slogin";
-            struct stat st{};
-            if (::stat(data.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-            {
-                return false;
-            }
-            return true;
-#else
-            return false;
-#endif
-        }
+        // with the "EA Login" title record (ELF vaddr 0x497390). v0
+        // option-0 hooks the load instead (MemoryCard.cpp serves a faked
+        // presence; the card is never written and real saves are ignored).
 
         void parseLoginKnob()
         {
@@ -962,9 +947,14 @@ namespace ps2_net
         return qpNavModeImpl();
     }
 
-    bool qpCardHasEaLogin()
+    void qpNoteLoginFaked()
     {
-        return qpCardHasEaLoginImpl();
+        g_qpLoginFaked.store(true, std::memory_order_relaxed);
+    }
+
+    bool qpLoginFaked()
+    {
+        return g_qpLoginFaked.load(std::memory_order_relaxed);
     }
 
     void firstRunNotice()
@@ -1293,6 +1283,91 @@ namespace ps2_net
 #endif
     }
 
+    // v0 option-0: wire-identity rewrite. The game's auto-auth path
+    // re-copies the card identity into its buffers after any HLE write
+    // (brad4: GAME AUTH carried the card name despite the struct
+    // overwrite firing), and scanAndDispatch only runs on net events, so
+    // buffer writes can't win the race. Substitution happens at the send
+    // choke point instead: every game-sent auth goes out with OUR
+    // identity. Rebuilds the message (BE total tracks the new size);
+    // withDeviceId downstream re-slices on the new len. Login-gated
+    // (all login sources share it); inert when off. No fallback: a real
+    // card save keeps validation happy via passthrough, but the wire
+    // identity is always ours.
+    void qpRewriteGameAuth(std::vector<uint8_t> &bytes, uint32_t &len)
+    {
+        parseLoginKnob();
+        if (!g_loginOn || g_loginName.empty() || len < 13u)
+        {
+            return;
+        }
+        if (!(bytes[0] == 'a' && bytes[1] == 'u' && bytes[2] == 't' && bytes[3] == 'h'))
+        {
+            return;
+        }
+        std::string body;
+        body.reserve(len);
+        for (uint32_t i = 12u; i < len; ++i)
+        {
+            const char c = static_cast<char>(bytes[i]);
+            if (c == '\0')
+            {
+                break;
+            }
+            body += c;
+        }
+        std::string out;
+        bool haveName = false;
+        bool havePass = false;
+        size_t pos = 0u;
+        while (pos <= body.size())
+        {
+            const size_t eol = body.find('\n', pos);
+            const bool last = (eol == std::string::npos);
+            const std::string line = last ? body.substr(pos) : body.substr(pos, eol - pos);
+            if (!last || !line.empty())
+            {
+                if (line.compare(0, 5, "NAME=") == 0)
+                {
+                    out += "NAME=" + g_loginName + "\n";
+                    haveName = true;
+                }
+                else if (line.compare(0, 5, "PASS=") == 0)
+                {
+                    out += "PASS=" + g_loginPass + "\n";
+                    havePass = true;
+                }
+                else
+                {
+                    out += line;
+                    out += '\n';
+                }
+            }
+            if (last)
+            {
+                break;
+            }
+            pos = eol + 1u;
+        }
+        if (!haveName)
+        {
+            out += "NAME=" + g_loginName + "\n";
+        }
+        if (!havePass)
+        {
+            out += "PASS=" + g_loginPass + "\n";
+        }
+        const uint32_t total = 12u + static_cast<uint32_t>(out.size()) + 1u;
+        bytes.resize(total);
+        for (int i = 0; i < 4; ++i)
+        {
+            bytes[8 + i] = static_cast<uint8_t>(total >> (24 - 8 * i));
+        }
+        std::memcpy(bytes.data() + 12u, out.data(), out.size());
+        bytes[total - 1u] = 0u;
+        len = total;
+    }
+
     // ONL4-P3: persona preload. The game's own auth sender
     // (sub_0025C610) reads NAME/PASS from the typed-login struct
     // at 0x54332C (name at +0, Part 2 watch target); when the
@@ -1325,6 +1400,74 @@ namespace ps2_net
     // ghost's reply is unmatched when the game never sent, so the
     // ghost is now a delayed fallback, suppressed entirely once
     // the game sends its own auth).
+    // v0 option-0: on-the-fly identity overwrite. Runs whenever the login
+    // auth struct exists — including the pre-phase-3 auto-auth window — so
+    // the game's own auth always carries our adj-noun identity, with no
+    // fallback to a card save or typing. Login-gated (all login sources
+    // share it); inert when off. Struct presence is the gate (no tick
+    // floor: the struct only exists in the login flow). Alias targets (the
+    // struct points at 0x54332C) are written in place so pre-preload
+    // auto-auth is covered too. A faked Mc login (qpLoginFaked) bypasses
+    // the name-like guard: the buffer holds known decode-of-zero garbage,
+    // always safe to replace.
+    void overwriteLoginTargets(uint8_t *rdram, uint64_t tick)
+    {
+        const size_t nameLen = g_loginName.size() + 1u;
+        const size_t passLen = g_loginPass.size() + 1u;
+        if (nameLen > 64u || passLen > 64u)
+        {
+            return;
+        }
+        const uint32_t authObj = readEeU32(rdram, 0x4A3028u);
+        if (authObj == 0u)
+        {
+            return;
+        }
+        // p3e boundary: no login-buffer writes before tick 4200. The auth
+        // struct exists almost at once (crea+16) but the flow hasn't
+        // started; early writes derail the config flow (fresh2: link modal
+        // never appeared, abort cfg-3 @4678 on menu 4/0xc).
+        if (tick < 4200u)
+        {
+            return;
+        }
+        preloadPersona(rdram, tick);
+        const bool faked = qpLoginFaked();
+        const uint32_t targets[2] = {readEeU32(rdram, authObj + 0x48u),
+                                     readEeU32(rdram, authObj + 0x4Cu)};
+        const char *wanted[2] = {g_loginName.c_str(), g_loginPass.c_str()};
+        const size_t wantLen[2] = {nameLen, passLen};
+        for (int i = 0; i < 2; ++i)
+        {
+            const uint32_t fieldAddr = 0x54332Cu + (i ? 64u : 0u);
+            if (targets[i] == 0u)
+            {
+                continue;
+            }
+            uint8_t *dst = getMemPtr(rdram, targets[i] == fieldAddr ? fieldAddr : targets[i]);
+            if (!dst)
+            {
+                continue;
+            }
+            if (!faked && targets[i] != fieldAddr && !ps2_net_protocol::canOverwriteLoginField(dst))
+            {
+                continue;
+            }
+            for (size_t k = 0u; k < wantLen[i]; ++k)
+            {
+                dst[k] = static_cast<uint8_t>(wanted[i][k]);
+            }
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::cerr << "[net] quickplay identity-overwrite target=0x" << std::hex
+                          << targets[i] << std::dec << " slot=" << (i ? "pass" : "name")
+                          << " tick=" << tick << (faked ? " (faked)" : "") << std::endl;
+            }
+        }
+    }
+
     void maybeLogin(uint8_t *rdram, uint64_t tick)
     {
         parseLoginKnob();
@@ -1341,6 +1484,9 @@ namespace ps2_net
         {
             preloadPersona(rdram, tick);
         }
+        // v0 option-0: always-on identity (covers the auto-auth window,
+        // not just the phase-3 submit).
+        overwriteLoginTargets(rdram, tick);
         if (g_loginConn == 0u)
         {
             return;
@@ -1350,66 +1496,8 @@ namespace ps2_net
         {
             return;
         }
-        const uint32_t authObj = readEeU32(rdram, 0x4A3028u);
-        if (authObj == 0u)
-        {
-            return;
-        }
-        // ONL9-P2: submit-window authoritative fill (STATE-GATED, not a
-        // tick delay). The submit copy (~tick 7104) races the
-        // traffic-driven preload: when the HLE observes phase 3, (re)fill
-        // the field AND the struct's pointed-to name/pass buffers —
-        // whichever the submit installed (alias at 0x54332C, or a dup of
-        // the dialog buffer). The game's own auth send (~7126) reads
-        // through the struct pointers, so it carries the prefill
-        // regardless of which write landed last at submit. Login-gated
-        // (all login sources share the race); inert when off. A target is
-        // only overwritten when it maps and currently holds name-like
-        // bytes (printable, NUL-terminated within 64), never blind.
-        {
-            const size_t nameLen = g_loginName.size() + 1u;
-            const size_t passLen = g_loginPass.size() + 1u;
-            if (nameLen <= 64u && passLen <= 64u)
-            {
-                preloadPersona(rdram, tick);
-                const uint32_t targets[2] = {
-                    readEeU32(rdram, authObj + 0x48u),
-                    readEeU32(rdram, authObj + 0x4Cu)};
-                const char *wanted[2] = {g_loginName.c_str(),
-                                         g_loginPass.c_str()};
-                const size_t wantLen[2] = {nameLen, passLen};
-                for (int i = 0; i < 2; ++i)
-                {
-                    const uint32_t fieldAddr = 0x54332Cu + (i ? 64u : 0u);
-                    if (targets[i] == 0u || targets[i] == fieldAddr)
-                    {
-                        continue;
-                    }
-                    uint8_t *dst = getMemPtr(rdram, targets[i]);
-                    if (!dst)
-                    {
-                        continue;
-                    }
-                    if (!ps2_net_protocol::canOverwriteLoginField(dst))
-                    {
-                        continue;
-                    }
-                    for (size_t k = 0u; k < wantLen[i]; ++k)
-                    {
-                        dst[k] = static_cast<uint8_t>(wanted[i][k]);
-                    }
-                    static bool logged = false;
-                    if (!logged)
-                    {
-                        logged = true;
-                        std::cerr << "[net] quickplay submit-fill target=0x"
-                                  << std::hex << targets[i] << std::dec
-                                  << " slot=" << (i ? "pass" : "name")
-                                  << " tick=" << tick << std::endl;
-                    }
-                }
-            }
-        }
+        // v0 option-0: the submit-window fill moved to
+        // overwriteLoginTargets (always-on, struct-gated).
         if (g_submitTick == 0u)
         {
             g_submitTick = tick;
@@ -2592,12 +2680,18 @@ namespace ps2_net
                     // sess/send: a0 = handle, a2/a3 = bytes (a3 = length;
                     // the DMA is padded). Send exactly a3, capture, echo
                     // the byte count in status.
-                    const std::vector<uint8_t> bytes = dmaBytes(w0);
-                    const uint32_t len = (w1 <= bytes.size()) ? w1 : static_cast<uint32_t>(bytes.size());
+                    // v0 option-0: mutable (wire-identity rewrite below).
+                    std::vector<uint8_t> bytes = dmaBytes(w0);
+                    uint32_t len = (w1 <= bytes.size()) ? w1 : static_cast<uint32_t>(bytes.size());
                     std::cerr << " h=" << w4 << " n=" << len;
                     status = 0u;
                     if (len > 0u)
                     {
+                        // v0 option-0: substitute our identity into a
+                        // game-sent auth BEFORE capture/send (the game
+                        // re-copies the card identity after any HLE
+                        // buffer write; the wire is the choke point).
+                        qpRewriteGameAuth(bytes, len);
                         capture("tcp-tx", hostMillis(), tick, bytes.data(), len);
                         // ONL4-P3: own-auth detector. A game-sent
                         // 'auth' message (the sub_0025C610 sender)
@@ -2607,8 +2701,45 @@ namespace ps2_net
                             bytes[2] == 't' && bytes[3] == 'h' && !g_gameAuthSeen)
                         {
                             g_gameAuthSeen = true;
+                            // v0 option-0: log the WIRE identity (post
+                            // qpRewriteGameAuth: must be ours). Framing:
+                            // type + empty sub + BE size + KEY=value\n
+                            // pairs + NUL.
+                            std::string authName = "?";
+                            const std::string needle = "NAME=";
+                            for (size_t off = 12u; off + needle.size() < len; ++off)
+                            {
+                                bool hit = true;
+                                for (size_t k = 0u; k < needle.size(); ++k)
+                                {
+                                    if (bytes[off + k] != static_cast<uint8_t>(needle[k]))
+                                    {
+                                        hit = false;
+                                        break;
+                                    }
+                                }
+                                if (hit)
+                                {
+                                    std::string name;
+                                    for (size_t k = off + needle.size();
+                                         k < len && name.size() < 64u; ++k)
+                                    {
+                                        const char c = static_cast<char>(bytes[k]);
+                                        if (c == '\n' || c == '\0')
+                                        {
+                                            break;
+                                        }
+                                        name += c;
+                                    }
+                                    if (!name.empty())
+                                    {
+                                        authName = name;
+                                    }
+                                    break;
+                                }
+                            }
                             std::cerr << " [net] login: GAME AUTH seen n=" << len
-                                      << " tick=" << tick << std::endl;
+                                      << " tick=" << tick << " name=" << authName << std::endl;
                             if (qpNavNote())
                             {
                                 qpSetFirst(g_qpGameAuth, tick);

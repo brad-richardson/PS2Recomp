@@ -2,6 +2,9 @@
 #include "ps2_e41_trace.h"
 #include "ps2_rpl3_nv.h" // RPL3: recorded card dates (padrec v3)
 #include "MemoryCard.h"
+#include "ps2_net_dirtysock.h" // v0 option-0: qpNoteLoginFaked
+#include <cstdio>
+#include <cstring>
 
 namespace ps2_stubs
 {
@@ -737,6 +740,31 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    // v0 option-0: on-the-fly EA Login identity (Quick Play only).
+    // PS2X_NET_QUICKPLAY=1 gates everything: knob off = zero behavior
+    // change. The game believes a PSCD10088slogin save exists; reads
+    // of its data file are served 58 zero bytes from a tmpfile (the
+    // card is never written) and the net HLE overwrites the login
+    // buffers with our adj-noun identity. A real card save is ignored
+    // for Quick Play (reads served the same way), never modified.
+    constexpr char kQpLoginDir[] = "PSCD10088slogin";
+    constexpr size_t kQpLoginDataBytes = 58u;
+    bool qpLoginHookOn()
+    {
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_NET_QUICKPLAY");
+            return env && std::string(env) == "1";
+        }();
+        return on;
+    }
+    bool qpLoginDataPath(const std::string &guestPath)
+    {
+        const std::string lower = toLowerAscii(guestPath);
+        const std::string want = "pscd10088slogin/pscd10088slogin";
+        return lower.size() >= want.size() &&
+               lower.compare(lower.size() - want.size(), want.size(), want) == 0;
+    }
+
     void sceMcGetDir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const int32_t port = static_cast<int32_t>(getRegU32(ctx, 4));
@@ -804,8 +832,16 @@ namespace ps2_stubs
                     hostDir = hostDir.lexically_normal();
 
                     std::error_code ec;
-                    if (std::filesystem::exists(hostDir, ec) && !ec &&
-                        std::filesystem::is_directory(hostDir, ec))
+                    // v0 option-0: serve the faked login dir even though it
+                    // has no host directory (real iteration below then
+                    // yields nothing; the inject appends the file entry).
+                    const bool qpFakeInner =
+                        port == 0 && qpLoginHookOn() &&
+                        toLowerAscii(parentRel.filename().string()) == "pscd10088slogin" &&
+                        wildcardMatch(pattern, kQpLoginDir);
+                    if ((std::filesystem::exists(hostDir, ec) && !ec &&
+                         std::filesystem::is_directory(hostDir, ec)) ||
+                        qpFakeInner)
                     {
                         const std::time_t now = std::time(nullptr);
                         auto appendSpecial = [&](const std::string &name)
@@ -862,6 +898,43 @@ namespace ps2_stubs
                                                 sizeBytes,
                                                 entryEc ? now : modifiedTime);
                             entries.push_back(tableEntry);
+                        }
+
+                        // v0 option-0: fake the EA Login presence (mc0, Quick
+                        // Play only). ONLY exact probes for the login dir
+                        // gain the dir entry: wildcard/parent listings
+                        // (root scans by browsers) stay pristine — a
+                        // phantom dir there poisoned the config select
+                        // (brad2: modal never came, abort cfg-3 @6454 on
+                        // 4/0xc with a real SET0001 present). Listings of
+                        // the login dir itself gain its 58-byte data file.
+                        // Never overrides a real entry.
+                        if (port == 0 && qpLoginHookOn() &&
+                            (toLowerAscii(pattern) == "pscd10088slogin" ||
+                             toLowerAscii(parentRel.filename().string()) ==
+                                 "pscd10088slogin"))
+                        {
+                            bool haveLogin = false;
+                            for (const SceMcTblGetDir &built : entries)
+                            {
+                                if (std::strncmp(built.EntryName, kQpLoginDir,
+                                                 sizeof(built.EntryName)) == 0)
+                                {
+                                    haveLogin = true;
+                                    break;
+                                }
+                            }
+                            if (!haveLogin)
+                            {
+                                const bool inner =
+                                    toLowerAscii(parentRel.filename().string()) ==
+                                    "pscd10088slogin";
+                                SceMcTblGetDir fake{};
+                                fillMcDirTableEntry(fake, kQpLoginDir, !inner,
+                                                    inner ? static_cast<uint32_t>(kQpLoginDataBytes) : 0u,
+                                                    now);
+                                entries.push_back(fake);
+                            }
                         }
 
                         // RPL3: note every built entry in order (create then
@@ -1078,7 +1151,48 @@ namespace ps2_stubs
                     std::error_code ec;
                     const bool create = (flags & PS2_FIO_O_CREAT) != 0u;
                     const bool exists = std::filesystem::exists(hostPath, ec) && !ec;
-                    if (guestPath == "/")
+                    // v0 option-0: serve the EA Login data file faked (card
+                    // never written; a real save is ignored for Quick Play
+                    // IDENTITY, never modified). A real file present passes
+                    // through untouched (its bytes keep the game's own
+                    // decode/validation intact; the net HLE still
+                    // overwrites the login buffers with our identity). Only
+                    // an absent file is served 58 zero bytes from a
+                    // tmpfile: brad3 proved zeros wedge the config select
+                    // (abort cfg-3 @6454 with SET0001 present), so zeros
+                    // are a last resort, not the default.
+                    if (port == 0 && qpLoginHookOn() && qpLoginDataPath(guestPath) &&
+                        !std::filesystem::exists(hostPath, ec))
+                    {
+                        FILE *fake = std::tmpfile();
+                        bool served = false;
+                        if (fake)
+                        {
+                            static const char zeros[kQpLoginDataBytes] = {};
+                            served = std::fwrite(zeros, 1u, kQpLoginDataBytes, fake) ==
+                                     kQpLoginDataBytes;
+                            std::rewind(fake);
+                            if (served)
+                            {
+                                result = allocateMcFdLocked(fake, port, hostPath);
+                                served = result >= 0;
+                            }
+                            if (served)
+                            {
+                                ps2_net::qpNoteLoginFaked();
+                                RUNTIME_LOG("[MC] QP login data served faked (58 zeros)");
+                            }
+                            else
+                            {
+                                std::fclose(fake);
+                            }
+                        }
+                        if (!served && result != kMcResultUpLimitHandle)
+                        {
+                            result = kMcResultNoEntry;
+                        }
+                    }
+                    else if (guestPath == "/")
                     {
                         result = kMcResultDeniedPermit;
                     }

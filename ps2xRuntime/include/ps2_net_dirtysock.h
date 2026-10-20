@@ -94,10 +94,12 @@ namespace ps2_net
     bool qpNavQuickplayOn();
     bool qpNavWanted();
     int qpNavMode();
-    // ONL11 addendum: true when the card holds the game's own EA Login
-    // save (PSCD10088slogin); called by the navigator to answer the save
-    // prompt (Yes only when no save exists). Read-only: never writes.
-    bool qpCardHasEaLogin();
+    // v0 option-0: on-the-fly identity. Set by the Mc HLE when it serves
+    // the EA Login data file from the faked presence (card never written);
+    // the login overwrite then replaces the decode bytes unconditionally
+    // (they are known faked-input garbage, not a real save).
+    void qpNoteLoginFaked();
+    bool qpLoginFaked();
     // online-v0-1: the G6 first-run privacy card, once per install (flag
     // beside the Quick Play login path); Quick Play netplay posts it on its
     // first entry since its menu never reaches the DirtySock path.
