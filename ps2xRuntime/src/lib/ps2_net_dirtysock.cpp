@@ -955,6 +955,22 @@ namespace ps2_net
 
     // ONL10: navigator milestone snapshot + knob reads (see the header).
     // ONL11: qpNavMode 0/1/2 (off/launch/online); wanted = mode != 0.
+    static std::atomic<uint64_t> g_qpSyntheticPresses{0};
+    void qpNoteSyntheticPress() { g_qpSyntheticPresses.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t qpSyntheticPresses() { return g_qpSyntheticPresses.load(std::memory_order_relaxed); }
+
+    bool qpCopyIdentity(uint8_t *rdram, uint32_t scratch)
+    {
+        parseLoginKnob();
+        if (!rdram || scratch > 0x02000000u - 128u || !quickplayOn() ||
+            !g_loginOn || g_loginName.empty() || g_loginName.size() >= 64 || g_loginPass.size() >= 64)
+            return false;
+        std::memset(rdram + scratch, 0, 128);
+        std::memcpy(rdram + scratch, g_loginName.c_str(), g_loginName.size() + 1);
+        std::memcpy(rdram + scratch + 64, g_loginPass.c_str(), g_loginPass.size() + 1);
+        return true;
+    }
+
     bool qpNavQuickplayOn()
     {
         return quickplayOn();

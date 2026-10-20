@@ -12,6 +12,7 @@
 #include "Ssx3StockMeter.h"
 #include "Ssx3TrickyLayer.h"
 #include "Ssx3TrickyMenu.h"
+#include "Ssx3QuickPlayDirect.h"
 #include "Ssx3TrickyRecordsPatch.h"
 #include "Ssx3TrickyIntro.h"
 #include "Ssx3TrickySong.h"
@@ -45,6 +46,7 @@ namespace
          &ps2_ssx3_tricky_records_patch::applyTrickyRecordsPatch},
         {"ssx3-tricky-fixed-intro", "SLUS_207.72", kSsx3Entry, 0u,
          &ps2_ssx3_tricky_intro::applyTrickyFixedIntro},
+        {"ssx3-quick-play-direct", "SLUS_207.72", kSsx3Entry, 0u, &ps2_quick_play_direct::apply},
     };
 
     // K1: the copied GetEntryAddress/TLB payload (Ssx3CopiedPayload.h). Both

@@ -77,6 +77,8 @@ namespace
             t.Equals(ps2_net_protocol::navMode("1", nullptr), 0, "nav unset");
             t.Equals(ps2_net_protocol::navMode("1", "1"), 1, "launch mode");
             t.Equals(ps2_net_protocol::navMode("1", "online"), 2, "online mode");
+            t.Equals(ps2_net_protocol::navMode("1", "direct"), 3, "direct guest mode");
+            t.Equals(ps2_net_protocol::navMode("0", "direct"), 0, "direct requires quickplay");
             t.Equals(ps2_net_protocol::navMode("0", "online"), 0, "quickplay disabled");
             int mode = 2;
             bool armed = false;

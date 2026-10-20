@@ -17,6 +17,7 @@ add_library(ssx3_game_module STATIC
     src/widescreen_default.cpp
     src/tricky_savestate.cpp
     src/movie.cpp
+    src/quick_play_direct.cpp
     src/tricky_menu.cpp
     src/tricky_records_patch.cpp
     src/stock_meter.cpp

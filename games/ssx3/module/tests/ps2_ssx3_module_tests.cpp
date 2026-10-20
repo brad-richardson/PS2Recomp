@@ -88,7 +88,7 @@ void register_ps2_ssx3_module_tests()
                                        "ssx3-tricky-stock-meter", "ssx3-lod-scale",
                                        "ssx3-input2", "ssx3-input-marker",
                                        "ssx3-widescreen-default", "ssx3-tricky-records-patch",
-                                       "ssx3-tricky-fixed-intro"};
+                                       "ssx3-tricky-fixed-intro", "ssx3-quick-play-direct"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {

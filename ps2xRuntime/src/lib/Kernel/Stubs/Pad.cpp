@@ -1219,7 +1219,7 @@ namespace ps2_stubs
                 g_qpNav.armed = false;
                 return;
             }
-            g_qpNav.onlineMode = (navMode == 2);
+            g_qpNav.onlineMode = (navMode == 2 || navMode == 3);
             g_qpNav.armed = !g_qpNav.onlineMode;
             uint64_t prevMs = 0u;
             for (size_t i = 0u; i < kQpNavSteps; ++i)
@@ -1404,6 +1404,8 @@ namespace ps2_stubs
                     }
                 }
             }
+            // Direct mode keeps the label, but cannot enter any injection path.
+            if (ps2_net::qpNavMode() == 3) return;
             if (!g_qpNavArmed.load(std::memory_order_relaxed))
             {
                 return;
@@ -1549,6 +1551,7 @@ namespace ps2_stubs
             if (g_qpNav.idx > 0u && g_qpNav.idx < g_qpNav.waitCreaIdx && s.press != 0u && rdram &&
                 ps2_net_protocol::qpNavTitleShowing(menuMain, menuSub))
             {
+                ps2_net::qpNoteSyntheticPress();
                 state.buttons = static_cast<uint16_t>(state.buttons & ~kPadBtnStart);
                 g_qpNav.holdMask = kPadBtnStart;
                 g_qpNav.holdUntil = guestVsyncTick + g_qpNav.holds[g_qpNav.idx];
@@ -1693,6 +1696,7 @@ namespace ps2_stubs
             }
             if (s.press != 0u)
             {
+                ps2_net::qpNoteSyntheticPress();
                 state.buttons = static_cast<uint16_t>(state.buttons & ~s.press);
                 g_qpNav.holdMask = s.press;
                 g_qpNav.holdUntil = guestVsyncTick + g_qpNav.holds[g_qpNav.idx];

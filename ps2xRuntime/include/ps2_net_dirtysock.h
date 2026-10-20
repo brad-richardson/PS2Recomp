@@ -94,6 +94,11 @@ namespace ps2_net
     bool qpNavQuickplayOn();
     bool qpNavWanted();
     int qpNavMode();
+    // astra-qp-direct-1: copy the existing identity into caller-owned guest
+    // scratch (two 64-byte strings); never log it or change the memory card.
+    bool qpCopyIdentity(uint8_t *rdram, uint32_t scratch);
+    void qpNoteSyntheticPress();
+    uint64_t qpSyntheticPresses();
     // v0 option-0: on-the-fly identity. Set by the Mc HLE when it serves
     // the EA Login data file from the faked presence (card never written);
     // the login overwrite then replaces the decode bytes unconditionally

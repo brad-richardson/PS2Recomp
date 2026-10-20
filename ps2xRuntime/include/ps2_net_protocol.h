@@ -16,6 +16,8 @@ namespace ps2_net_protocol
             return 1;
         if (std::string(nav) == "online")
             return 2;
+        if (std::string(nav) == "direct")
+            return 3; // astra-qp-direct-1: guest calls, no pad navigator
         return 0;
     }
 
