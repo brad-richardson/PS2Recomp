@@ -45,7 +45,7 @@ MOVIE_PREFIX_SECTORS = 512  # 1 MiB; observed reads end by sector 272.
 # Support-bundle ARMSX2 source: the same tree prebuilt.py VENDOR names.
 # Keep them equal (test_prebuilt.py VendorAgreementTest enforces it).
 ANDROID_GE1_VENDOR_REPO = 'https://github.com/brad-richardson/armsx2.git'
-ANDROID_GE1_VENDOR_PIN = 'e8ed655ec66eeba12ae3029cc26b45927964b476'
+ANDROID_GE1_VENDOR_PIN = '4b75f70677dd8089c3c6c0d4771d11a7b0a98d18'
 
 
 NDK_VERSION = '28.2.13676358'
