@@ -37,9 +37,8 @@ jobs:
           path: ssx3-120
           persist-credentials: false
           fetch-depth: 1
-          # Fine-grained PAT (contents:read on brad-richardson/ssx3-120),
-          # stored as this secret; the default token cannot read it.
-          token: ${{ secrets.SSX3_120_READ_TOKEN }}
+          # Public repo: the default github.token reads it; no secret needed.
+          token: ${{ github.token }}
       - name: Check release identity
         shell: bash
         run: |
