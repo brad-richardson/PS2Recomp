@@ -467,6 +467,10 @@ def _contract_paths():
 
 
 def _ls_entries(paths):
+    needs_module = any(p.startswith(MODULE_PREFIX) for p in paths)
+    if needs_module and not MODULE_DIR.is_dir():
+        raise ValueError('contract module dir missing: %s '
+                         '(set SSX3_MODULE_DIR to the product games/ssx3/module)' % MODULE_DIR)
     by_repo = {}
     for p in paths:
         by_repo.setdefault(p.startswith(MODULE_PREFIX), []).append(p)
