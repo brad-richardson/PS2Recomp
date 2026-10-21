@@ -132,10 +132,11 @@ inline constexpr uint32_t kCourseCount = 10u;
 // The guest chain (config + shared loader, no menu walk) rides proven-clean
 // donor shells: ev0 for the Race cells (null nav nodes, resolved as race
 // type/rules), ev1 for Snowdream Race (its native shell), ev11 (Pipe's own
-// freestyle shell) for the Showoff cells with measured args. Donor ev14
-// dies in loading on an unhandled-exception loop (0x80000080, probe path),
-// so no direct cell uses it; the world pin still loads the course's own
-// archive+name.
+// freestyle shell) for the Showoff cells with measured args; the carrier
+// table below re-homes most cells onto their converted location's own
+// event. (The old "ev14 dies in loading" note was a lab env without the
+// Tricky guards; tk-three-opus-1.) The world pin still loads the course's
+// own archive+name.
 // Donor bound for direct goals. Mirrors kMapDonorMax (map section below;
 // a static_assert there keeps the two in sync).
 inline constexpr int kDirectDonorMax = 22;
@@ -212,8 +213,13 @@ inline int directDonorFor(int type, int row, int stockEvent)
 // tk-racedonor-1: screened carrier donors. Each fixed cell rides its
 // converted location's own stock event shell with measured accept args
 // (guest-verified on rel3: location streams, GO reached, no missing-target
-// on fresh cards). Keyed by course event + mode. RED cells (Elys/Aloha/
-// Untrack) keep the legacy shells: no removal, no crash.
+// on fresh cards). Keyed by course event + mode.
+// tk-three-opus-1: Elys/Aloha/Untrack ride their carriers too (ev16 EBC3,
+// ev14 ABC1, ev7 ESS3). Their earlier aborts (walker ra 0x3637f8, patch
+// cache ra 0x374964) were lab boots without the Tricky guards that the
+// shipped env arms (PATCH_CACHE_GUARD=1, DRAWTABLE_GUARD=2, PATCH_CACHE_GROW,
+// SPATIAL_LIST_GUARD); with them these cells run clean, so they depend on
+// that env like every other Tricky course.
 struct CarrierCell
 {
     int8_t courseEvent; // c.event: carrier = the course's own stock event
@@ -234,9 +240,14 @@ inline constexpr CarrierCell kCarrierCells[] = {
     {15, 1, 15, 6, 5}, // Mega Showoff: P2 Freestyle row3 args
     {0, 1, 0, 6, 5},   // Garibaldi Showoff: ARA1 under Jam rules
     {1, 1, 1, 6, 5},   // Snowdream Showoff: BRA2 under Jam rules
+    {16, 0, 16, 0, 0}, // Elysium Race: EBC3 under Race rules
+    {16, 1, 16, 6, 5}, // Elysium Showoff
+    {14, 0, 14, 0, 0}, // Aloha Race: ABC1 under Race rules
+    {14, 1, 14, 6, 5}, // Aloha Showoff
+    {7, 0, 7, 0, 0},   // Untracked Race: ESS3 under Race rules
+    {7, 1, 7, 1, 1},   // Untracked Showoff: own freestyle args
     // NOTE: Pipedream Showoff stays ev7+(3,2) (legacy): ev11+PIPE SIGABRTs
-    // on Brad's card (0x80000080 @9400, fresh-clean). RED Race/Showoff cells
-    // (Elys ev16, Aloha ev14, Untrack ev7) keep legacy shells (BLOCKED).
+    // on Brad's card (0x80000080 @9400, fresh-clean).
 };
 
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)

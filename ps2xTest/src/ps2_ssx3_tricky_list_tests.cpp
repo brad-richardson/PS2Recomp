@@ -402,12 +402,12 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsFalse(overlayTarget(true, 2, -1, false, 0, 0, false), "dead Event widget stays shut");
             t.IsFalse(overlayTarget(false, 0, -1, false, 0, 0, false), "non-Map words stay shut"); });
 
-        tc.Run("refinement: every cell direct on clean donors, no ev14", [](TestCase &t)
+        tc.Run("refinement: every cell direct on its carrier shell", [](TestCase &t)
                {
             // tk-racedonor-1: fixed cells ride their converted location's own
-            // stock event shell (screened carriers, rel3). RED cells
-            // (Elys/Aloha/Untrack) keep the legacy shells: no removal,
-            // no crash. Both options of every course stay directable.
+            // stock event shell (screened carriers, rel3). tk-three-opus-1:
+            // Elys/Aloha/Untrack join (ev16/ev14/ev7, guarded env). Both
+            // options of every course stay directable.
             for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
             {
                 const Course &c = kCourses[i];
@@ -421,7 +421,7 @@ void register_ps2_ssx3_tricky_list_tests()
                     if (goal.ok)
                     {
                         t.IsTrue(goal.mapped, "world pinned for the records guard");
-                        t.IsTrue(goal.event != 14, "no direct cell rides ev14");
+                        t.IsTrue(goal.event != 14 || c.event == 14, "only Aloha rides ev14");
                     }
                 }
             }
@@ -464,10 +464,12 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(directCellArgs(1, 2, pta, pra) && pta == 3 && pra == 2, "showoff pipe args (3,2)");
             const Course &aloha = kCourses[5];
             const DirectGoal ar = directGoalFor(aloha, aloha.opts[0]);
-            t.IsTrue(ar.ok && ar.event == 0, "Aloha Race donor ev0 (world ALOHA)");
+            t.IsTrue(ar.ok && ar.event == 14 && ar.typeArg == 0 && ar.rulesArg == 0,
+                     "Aloha Race donor ev14 (ABC1 carrier, Race rules)");
             t.Equals(std::string(ar.map.archive), std::string("ALOHA"), "Aloha world pin");
             const DirectGoal asl = directGoalFor(aloha, aloha.opts[1]);
-            t.IsTrue(asl.ok && asl.event == 11, "Aloha Showoff donor ev11");
+            t.IsTrue(asl.ok && asl.event == 14 && asl.typeArg == 6 && asl.rulesArg == 5,
+                     "Aloha Showoff donor ev14");
             int ata = -1, ara = -1;
             t.IsTrue(directCellArgs(0, 2, ata, ara) && ata == 5 && ara == 4, "aloha race args (5,4)");
             int sta = -1, sra = -1;
@@ -481,12 +483,20 @@ void register_ps2_ssx3_tricky_list_tests()
                      "Megaplex Showoff donor ev15");
             const Course &elys = kCourses[2];
             const DirectGoal e = directGoalFor(elys, elys.opts[0]);
-            t.IsTrue(e.ok && e.event == 0, "Elysium Race keeps legacy ev0 (BLOCKED)");
+            t.IsTrue(e.ok && e.event == 16 && e.typeArg == 0 && e.rulesArg == 0,
+                     "Elysium Race donor ev16 (EBC3 carrier, Race rules)");
+            t.Equals(std::string(e.map.archive), std::string("ELYS"), "Elysium world pin");
             const DirectGoal esl = directGoalFor(elys, elys.opts[1]);
-            t.IsTrue(esl.ok && esl.event == 11, "Elysium Showoff keeps legacy ev11 (BLOCKED)");
+            t.IsTrue(esl.ok && esl.event == 16 && esl.typeArg == 6 && esl.rulesArg == 5,
+                     "Elysium Showoff donor ev16");
             const Course &untrack = kCourses[7];
-            t.IsTrue(directGoalFor(untrack, untrack.opts[0]).ok, "Untracked Race directable (donor ev0)");
-            t.IsTrue(directGoalFor(untrack, untrack.opts[1]).ok, "Untracked Showoff keeps legacy ev11 (BLOCKED)");
+            const DirectGoal ur = directGoalFor(untrack, untrack.opts[0]);
+            t.IsTrue(ur.ok && ur.event == 7 && ur.typeArg == 0 && ur.rulesArg == 0,
+                     "Untracked Race donor ev7 (ESS3 carrier, Race rules)");
+            t.Equals(std::string(ur.map.archive), std::string("UNTRACK"), "Untracked world pin");
+            const DirectGoal usl = directGoalFor(untrack, untrack.opts[1]);
+            t.IsTrue(usl.ok && usl.event == 7 && usl.typeArg == 1 && usl.rulesArg == 1,
+                     "Untracked Showoff donor ev7 (own freestyle args)");
             const Course &alaska = kCourses[9];
             const DirectGoal ak = directGoalFor(alaska, alaska.opts[0]);
             t.IsTrue(ak.ok && ak.event == 6 && ak.typeArg == 0 && ak.rulesArg == 0,
