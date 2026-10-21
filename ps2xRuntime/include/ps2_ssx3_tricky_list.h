@@ -201,10 +201,8 @@ inline int directDonorFor(int type, int row, int stockEvent)
     if (type == 0)
         return 0; // every Race cell rides the ev0 race shell + own world pin
     if (type == 1 && row == 2)
-        return 7; // TRIAL (pipe-show-brad): Pipedream Showoff on Untracked's
-                  // ev7 slopestyle shell — ev11+PIPE world dies in loading
-                  // on Brad's card (0x80000080 loop, tick ~9416, 2/2 runs)
-                  // while the same cell is clean on a fresh card
+        return 7; // legacy Pipedream Showoff shell; the carrier table
+                  // below re-homes it to ev11 (tk-three-opus-1)
     if (type == 1)
         return 11; // every other Showoff cell rides Pipe's ev11 shell + own world pin
     return stockEvent;
@@ -246,8 +244,8 @@ inline constexpr CarrierCell kCarrierCells[] = {
     {14, 1, 14, 6, 5}, // Aloha Showoff
     {7, 0, 7, 0, 0},   // Untracked Race: ESS3 under Race rules
     {7, 1, 7, 1, 1},   // Untracked Showoff: own freestyle args
-    // NOTE: Pipedream Showoff stays ev7+(3,2) (legacy): ev11+PIPE SIGABRTs
-    // on Brad's card (0x80000080 @9400, fresh-clean).
+    {11, 1, 11, 3, 2}, // Pipedream Showoff: BHP1 under its own args (the
+                       // Brad-card abort @9400 was the same guard-less env)
 };
 
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
