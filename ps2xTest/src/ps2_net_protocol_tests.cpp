@@ -346,6 +346,22 @@ namespace
             ::unsetenv("PS2X_NET");
             ::unsetenv("PS2X_NET_SERVER");
         });
+        tc.Run("qp-failclosed-1: direct auth refuses only without a login", [](TestCase &t)
+               {
+            using ps2_net_protocol::shouldRefuseDirectAuthSend;
+            t.IsTrue(shouldRefuseDirectAuthSend(true, 3, false),
+                     "direct auth with no login refuses");
+            t.IsFalse(shouldRefuseDirectAuthSend(true, 3, true),
+                      "direct auth with a login sends");
+            t.IsFalse(shouldRefuseDirectAuthSend(false, 3, false),
+                      "direct non-auth never carries identity");
+            t.IsFalse(shouldRefuseDirectAuthSend(true, 2, false),
+                      "walk path keeps its behavior");
+            t.IsFalse(shouldRefuseDirectAuthSend(true, 0, false),
+                      "quickplay off keeps its behavior");
+            t.IsFalse(shouldRefuseDirectAuthSend(false, 0, true),
+                      "idle non-auth sends"); });
+
         tc.Run("resume-ios-1 Part 2: session active only while paired or racing",
                [](TestCase &t)
                {

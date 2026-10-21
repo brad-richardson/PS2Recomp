@@ -28,6 +28,12 @@ namespace ps2x::ui
 // toast-audit-1: diagnostic toasts hide unless PS2X_DEV_TOASTS=1. Default 0,
 // even in --dev builds (Brad runs a --dev build). Player-facing toasts use
 // toast()/notice() directly and always show. Output-only: host display only.
+//
+// qp-failclosed-1: exact player-facing copy for a refused direct Quick Play
+// entry when no usable per-install login exists. Single source for the
+// direct module and the keep-set test below.
+inline constexpr char kQpLoginMissingToast[] = "Quick Play unavailable: login file missing";
+
 inline bool devToastsEnabled()
 {
     const char *v = std::getenv("PS2X_DEV_TOASTS");

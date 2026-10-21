@@ -65,5 +65,17 @@ void register_ps2_ui_toast_tests()
             std::string msg;
             t.IsTrue(ps2x::ui::pollNotice(msg) && msg == "Quick Play result\n1st  You  2:31.40",
                      "notice shows by default");
-            ps2x::ui::clearNoticeForTest(); }); });
+            ps2x::ui::clearNoticeForTest(); });
+
+        tc.Run("qp-failclosed-1: refused direct entry toasts exact player copy", [](TestCase &t)
+               {
+            t.Equals(std::string(ps2x::ui::kQpLoginMissingToast),
+                     std::string("Quick Play unavailable: login file missing"), "exact copy");
+            ::unsetenv("PS2X_DEV_TOASTS");
+            ps2x::ui::clearToastForTest();
+            ps2x::ui::toast(ps2x::ui::kQpLoginMissingToast, 60.0f);
+            std::string msg;
+            t.IsTrue(ps2x::ui::pollToast(msg) && msg == ps2x::ui::kQpLoginMissingToast,
+                     "refused-entry toast shows by default (not dev-gated)");
+            ps2x::ui::clearToastForTest(); }); });
 }

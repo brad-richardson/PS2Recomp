@@ -975,6 +975,12 @@ namespace ps2_net
         return true;
     }
 
+    bool qpLoginUsable()
+    {
+        parseLoginKnob();
+        return g_loginOn && !g_loginName.empty();
+    }
+
     bool qpNavQuickplayOn()
     {
         return quickplayOn();
@@ -2902,6 +2908,21 @@ namespace ps2_net
                     uint32_t len = (w1 <= bytes.size()) ? w1 : static_cast<uint32_t>(bytes.size());
                     std::cerr << " h=" << w4 << " n=" << len;
                     status = 0u;
+                    // qp-failclosed-1 (NAV=direct only): without a usable
+                    // login the rewrite below is a no-op and these bytes
+                    // still carry the Mc-served bootstrap identity. Refuse
+                    // the send (nothing captured, nothing sent) instead of
+                    // failing open. Other message types and other NAV modes
+                    // are unaffected.
+                    if (ps2_net_protocol::shouldRefuseDirectAuthSend(
+                            len >= 12u && bytes[0] == 'a' && bytes[1] == 'u' &&
+                                bytes[2] == 't' && bytes[3] == 'h',
+                            qpNavMode(), qpLoginUsable()))
+                    {
+                        std::cerr << " [net] quickplay direct auth refused: login unavailable"
+                                  << std::endl;
+                        len = 0u;
+                    }
                     if (len > 0u)
                     {
                         // v0 option-0: substitute our identity into a
