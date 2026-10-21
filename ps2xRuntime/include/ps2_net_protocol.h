@@ -376,4 +376,16 @@ namespace ps2_net_protocol
             return false;
         return fromIp == pinnedIp && fromPort == pinnedPort;
     }
+
+    // qp-failclosed-1: NAV=direct fail-closed send decision. Without a
+    // usable login the wire-identity rewrite is a no-op and a game-sent
+    // auth would still carry the Mc-served bootstrap identity, so the
+    // direct path refuses the send (drops it, sends nothing) instead of
+    // failing open. Only auth messages carry the identity; every other
+    // type is unaffected. Other NAV modes keep their existing behavior
+    // (the walk-path B2(b) recovery stays out of scope).
+    inline bool shouldRefuseDirectAuthSend(bool isAuth, int navModeValue, bool loginUsable)
+    {
+        return isAuth && navModeValue == 3 && !loginUsable;
+    }
 }

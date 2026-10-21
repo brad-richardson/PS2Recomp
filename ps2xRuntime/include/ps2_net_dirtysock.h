@@ -97,6 +97,10 @@ namespace ps2_net
     // astra-qp-direct-1: copy the existing identity into caller-owned guest
     // scratch (two 64-byte strings); never log it or change the memory card.
     bool qpCopyIdentity(uint8_t *rdram, uint32_t scratch);
+    // qp-failclosed-1: true when a usable login identity is loaded (any
+    // configured source: per-install file or explicit knob). The direct
+    // entry and send gates use this; it never logs identity values.
+    bool qpLoginUsable();
     void qpNoteSyntheticPress();
     uint64_t qpSyntheticPresses();
     // v0 option-0: on-the-fly identity. Set by the Mc HLE when it serves
