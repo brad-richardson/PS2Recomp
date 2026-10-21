@@ -421,10 +421,22 @@ class ContractInputsTests(unittest.TestCase):
         self.assertIn('ps2xRuntime/src/runner', prebuilt.CONTRACT_GLOB_DIRS)
 
     def test_explicit_inputs_all_tracked(self):
-        out = subprocess.check_output(
-            ['git', '-C', str(prebuilt.ROOT), 'ls-files', '--',
-             *prebuilt.CONTRACT_EXPLICIT], text=True).splitlines()
-        self.assertEqual(len(out), len(prebuilt.CONTRACT_EXPLICIT))
+        # split-p1-prep-1: module rows live under SSX3_MODULE_DIR (the
+        # product checkout once the move lands); the count assertion is
+        # unchanged, only the checkout differs.
+        by_repo = {}
+        for p in prebuilt.CONTRACT_EXPLICIT:
+            is_module = p.startswith(prebuilt.MODULE_PREFIX)
+            repo = (prebuilt.MODULE_DIR if is_module else prebuilt.ROOT)
+            rel = prebuilt._module_rel(p) if is_module else p
+            by_repo.setdefault(str(repo), []).append(rel)
+        total = 0
+        for repo, rels in by_repo.items():
+            out = subprocess.check_output(
+                ['git', '-C', repo, 'ls-files', '--full-name', '--', *rels],
+                text=True).splitlines()
+            total += len(out)
+        self.assertEqual(total, len(prebuilt.CONTRACT_EXPLICIT))
 
     # Historical engine revisions the narrowed-stamp contract is measured
     # against (f1180764 = prebuilt-release-1, 902a7645 = ci-flake-1).

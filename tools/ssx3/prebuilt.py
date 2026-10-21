@@ -431,13 +431,23 @@ def _is_junk(path):
     return name.startswith('._') or name.endswith('~') or name in JUNK_NAMES
 
 
-def _contract_paths():
-    return [*CONTRACT_FILES, *CONTRACT_EXPLICIT, *CONTRACT_GLOB_DIRS]
+# split-p1-prep-1: the SSX 3 game module is product-owned (ssx3-120
+# games/ssx3/module). Contract rows keep their engine-relative spellings;
+# module rows resolve under SSX3_MODULE_DIR (default: the pre-split in-tree
+# path, so this change is behavior-identical until the move lands).
+MODULE_DIR = Path(os.environ.get('SSX3_MODULE_DIR', str(ROOT / 'games/ssx3/module')))
+MODULE_PREFIX = 'games/ssx3/module/'
 
 
-def _ls_entries(paths):
+def _module_rel(rel):
+    return rel[len(MODULE_PREFIX):]
+
+
+def _ls_repo_entries(repo, rels, shorten):
+    if shorten:
+        rels = [_module_rel(r) for r in rels]
     out = subprocess.check_output(
-        ['git', '-C', str(ROOT), 'ls-files', '-s', '--', *paths],
+        ['git', '-C', str(repo), 'ls-files', '-s', '--full-name', '--', *rels],
         stderr=subprocess.DEVNULL, text=True)
     entries = []
     for line in out.splitlines():
@@ -449,6 +459,23 @@ def _ls_entries(paths):
         if mode == '120000' or path == RELEASES_FILE or Path(path).name.startswith('._'):
             continue  # symlinks, the release-pin file and AppleDouble were never hashed
         entries.append((path, blob))
+    return entries
+
+
+def _contract_paths():
+    return [*CONTRACT_FILES, *CONTRACT_EXPLICIT, *CONTRACT_GLOB_DIRS]
+
+
+def _ls_entries(paths):
+    by_repo = {}
+    for p in paths:
+        by_repo.setdefault(p.startswith(MODULE_PREFIX), []).append(p)
+    entries = []
+    for is_module, rels in by_repo.items():
+        # --full-name keeps the engine-relative spellings when MODULE_DIR
+        # is a subdirectory of the product checkout (or the in-tree path).
+        entries += _ls_repo_entries(MODULE_DIR if is_module else ROOT,
+                                    rels, is_module)
     return sorted(entries)
 
 
@@ -457,9 +484,18 @@ def _tracked_entries():
     if not (ROOT / '.git').exists():
         return None
     try:
-        return _ls_entries(_contract_paths())
+        entries = _ls_entries(_contract_paths())
     except (OSError, subprocess.CalledProcessError):
         return None
+    # Fail closed: every explicit contract input must resolve. A silent drop
+    # (e.g. the moved module with SSX3_MODULE_DIR unset) would mint a wrong
+    # support stamp instead of erroring.
+    got = {p for p, _ in entries}
+    missing = [p for p in CONTRACT_EXPLICIT if p not in got]
+    if missing:
+        raise ValueError('contract inputs untracked: %s '
+                         '(set SSX3_MODULE_DIR for the moved module)' % ', '.join(missing))
+    return entries
 
 
 def contract_paths():
@@ -469,17 +505,21 @@ def contract_paths():
 
 
 def _walked_entries():
-    paths = set()
+    by_rel = {}
     for name in (*CONTRACT_FILES, *CONTRACT_EXPLICIT):
-        p = ROOT / name
+        # Module rows resolve under the product-owned module dir but keep
+        # their engine-relative stamp keys.
+        p = (MODULE_DIR / _module_rel(name) if name.startswith(MODULE_PREFIX)
+             else ROOT / name)
         if p.is_file() and not p.is_symlink() and not _is_junk(p):
-            paths.add(p)
+            by_rel[name] = p
     for name in CONTRACT_GLOB_DIRS:
-        paths.update(p for p in (ROOT / name).rglob('*') if p.is_file()
-                     and not p.is_symlink() and not _is_junk(p))
-    paths = [p for p in paths if p.relative_to(ROOT).as_posix() != RELEASES_FILE]
-    return sorted((p.relative_to(ROOT).as_posix(), digest(p))
-                  for p in set(paths))
+        for p in (ROOT / name).rglob('*'):
+            if not p.is_file() or p.is_symlink() or _is_junk(p):
+                continue
+            by_rel[p.relative_to(ROOT).as_posix()] = p
+    return sorted((rel, digest(p)) for rel, p in by_rel.items()
+                  if rel != RELEASES_FILE)
 
 
 def contract():
@@ -512,23 +552,31 @@ def contract_drift():
     with these paths named. Junk droppings and gitignored outputs are
     ignored. Returns [] when git is unavailable.
     """
-    try:
-        out = subprocess.check_output(
-            ['git', '-C', str(ROOT), 'status', '--porcelain',
-             '--untracked-files=all', '--',
-             *_contract_paths()],
-            stderr=subprocess.DEVNULL, text=True)
-    except (OSError, subprocess.CalledProcessError):
-        return []
+    by_repo = {}
+    for p in _contract_paths():
+        is_module = p.startswith(MODULE_PREFIX)
+        # Status pathspecs are CWD-relative; module rows shorten to the
+        # module dir. Porcelain still prints repo-root-relative spellings.
+        by_repo.setdefault(is_module, []).append(
+            _module_rel(p) if is_module else p)
     drift = []
-    for line in out.splitlines():
-        if len(line) < 4:
-            continue
-        # "XY <path>[ -> <new>]" — renames report the new path.
-        path = line[3:].split(' -> ')[-1].strip('"')
-        if line[:2] == '??' and _is_junk(Path(path)):
-            continue
-        drift.append(path)
+    for is_module, rels in by_repo.items():
+        try:
+            out = subprocess.check_output(
+                ['git', '-C', str(MODULE_DIR if is_module else ROOT),
+                 'status', '--porcelain', '--untracked-files=all', '--',
+                 *rels],
+                stderr=subprocess.DEVNULL, text=True)
+        except (OSError, subprocess.CalledProcessError):
+            return []
+        for line in out.splitlines():
+            if len(line) < 4:
+                continue
+            # "XY <path>[ -> <new>]" — renames report the new path.
+            path = line[3:].split(' -> ')[-1].strip('"')
+            if line[:2] == '??' and _is_junk(Path(path)):
+                continue
+            drift.append(path)
     return drift
 
 
@@ -736,6 +784,7 @@ def build(a):
              '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-29', '-DANDROID_STL=c++_static',
              '-DPS2X_PREBUILT_EXPORT=ON', '-DPS2X_PREBUILT_STAMP=' + stamp,
              '-DPS2X_GAME_CODEGEN_DIR=', '-DPS2X_VU0_RECOMP_DIR=', '-DPS2X_PGO_DATA=',
+             '-DPS2X_GAME_MODULE_DIR=' + str(MODULE_DIR),
              '-DPS2X_DEFAULT_BOOT_ELF=/storage/emulated/0/Android/data/com.ssx3.recomp/files/SLUS_207.72',
              '-DPS2X_ANDROID_MARCH=armv8.2-a+fp16+dotprod', '-DPS2X_GAME_IPO=ON',
              '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG', '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG']
