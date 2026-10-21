@@ -1006,12 +1006,12 @@ namespace ps2_stubs
         uint32_t g_qpLabelGhosts[8] = {};
         uint32_t g_qpLabelGhostCount = 0u;
         constexpr uint32_t kQpLabelStockLen = 7u;
-        // online-stock-2 (Brad 10-17): "Quick Play (Alpha)". The handle
-        // slots sit 0x100 apart, so the +8 slack spans 248 bytes; the 38
-        // used here are verified zero before every write (as before) and
-        // stayed zero across the menu in the lane's survey boot.
-        constexpr uint32_t kQpLabelNewLen = 19u; // "Quick Play (Alpha)" + NUL
-        constexpr uint32_t kQpLabelBytes = 38u;
+        // qp-freeze-1 (Brad 10-21): "Online (Alpha)". The handle slots
+        // sit 0x100 apart, so the +8 slack spans 248 bytes; the 30 used
+        // here are verified zero before every write (as before) and stayed
+        // zero across the menu in the lane's survey boot.
+        constexpr uint32_t kQpLabelNewLen = 15u; // "Online (Alpha)" + NUL
+        constexpr uint32_t kQpLabelBytes = 30u;
         bool qpNavReadBytes(uint8_t *rdram, uint32_t addr, uint8_t *out, uint32_t n)
         {
             if (!rdram || !out || addr == 0u || (addr & PS2_RAM_MASK) + n > PS2_RAM_SIZE)
@@ -1105,8 +1105,8 @@ namespace ps2_stubs
             static const uint8_t kStockText[14] = {'O', 0, 'n', 0, 'l', 0, 'i', 0,
                                                   'n', 0, 'e', 0, 0,   0};
             static const uint8_t kNewText[kQpLabelBytes] = {
-                'Q', 0, 'u', 0, 'i', 0, 'c', 0, 'k', 0, ' ', 0, 'P', 0, 'l', 0, 'a', 0, 'y', 0,
-                ' ', 0, '(', 0, 'A', 0, 'l', 0, 'p', 0, 'h', 0, 'a', 0, ')', 0, 0,   0};
+                'O', 0, 'n', 0, 'l', 0, 'i', 0, 'n', 0, 'e', 0, ' ', 0, '(', 0, 'A', 0, 'l', 0,
+                'p', 0, 'h', 0, 'a', 0, ')', 0, 0,   0};
             // qp-label-2: rescan on every menu sight. The old intact
             // shortcut latched a title slot across the main-menu rebuild
             // (same pool bytes, different screen). Short-circuit only for
@@ -1356,7 +1356,7 @@ namespace ps2_stubs
             {
                 char patched[160];
                 std::snprintf(patched, sizeof(patched),
-                              "main-menu Online -> Quick Play (Alpha) at slot=0x%x%s%s",
+                              "main-menu Online -> Online (Alpha) at slot=0x%x%s%s",
                               slot, textFallback ? " (text fallback)" : "",
                     redirectBuf != 0u ? " (redirect)" : "");
                 qpNavLabelNote(patched, tick);

@@ -303,6 +303,24 @@ namespace ps2_net_protocol
         return nowMs - resolveStartMs >= kDnsGiveUpMs;
     }
 
+    // qp-freeze-1: pre-dial reachability probe kinds. Pure mapping to the
+    // player-facing copy (same words as the HLE dial-failure toasts);
+    // unit-tested in ps2_net_protocol_tests.cpp.
+    enum class ProbeFail { Dns, Timeout, Refused };
+    inline const char *probeFailCopy(ProbeFail f)
+    {
+        switch (f)
+        {
+        case ProbeFail::Dns:
+            return "Online unavailable (address lookup failed). Offline play works - check connection.";
+        case ProbeFail::Timeout:
+            return "Online unavailable (no answer). Offline play works - retry from the Online menu.";
+        case ProbeFail::Refused:
+            return "Online unavailable (server refused). Offline play works - retry from the Online menu.";
+        }
+        return "Online unavailable. Offline play works - retry from the Online menu.";
+    }
+
     // netsec-fix-1 F1: DirtySock TCP frame admission. The 12-byte header
     // carries a big-endian total size (header included). Valid sizes are
     // 12..65536; anything else is a corrupt frame: Reject (drop the frame

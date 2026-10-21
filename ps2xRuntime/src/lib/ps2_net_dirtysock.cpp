@@ -628,13 +628,9 @@ namespace ps2_net
 
         // Toast copy for a failed real attempt (<=120 chars: the overlay
         // draw truncates). The game's own error dialog carries the
-        // back-out buttons; this line says it in plain words.
-        constexpr char kToastConnRefused[] =
-            "Online unavailable (server refused). Offline play works - retry from the Online menu.";
-        constexpr char kToastConnTimeout[] =
-            "Online unavailable (no answer). Offline play works - retry from the Online menu.";
-        constexpr char kToastConnDns[] =
-            "Online unavailable (address lookup failed). Offline play works - check connection.";
+        // back-out buttons; this line says it in plain words. Single
+        // source: ps2_net_protocol::probeFailCopy (shared with the
+        // qp-freeze-1 pre-dial probe).
 
         // G6 privacy notice (online-default-1): short first-run card of
         // what is logged, per the plan's logging section. Posted once per
@@ -973,6 +969,102 @@ namespace ps2_net
         std::memcpy(rdram + scratch, g_loginName.c_str(), g_loginName.size() + 1);
         std::memcpy(rdram + scratch + 64, g_loginPass.c_str(), g_loginPass.size() + 1);
         return true;
+    }
+
+    // qp-freeze-1: one-shot lobby reachability probe for the direct Quick
+    // Play tap. The stock entry parks forever when the lobby never answers
+    // (silent SYN drop: no reply, no error, guest waits on @dir), so refuse
+    // up front instead: null when a dial succeeds, else the player copy.
+    // Bounded (DNS head-start + dial share timeoutMs), game thread only,
+    // never touches the HLE backoff/dial state, always closes its socket.
+    // lobbyAddress is defined later in this file.
+    uint32_t lobbyAddress();
+    const char *qpProbeLobby(uint64_t timeoutMs)
+    {
+        using ps2_net_protocol::ProbeFail;
+        using ps2_net_protocol::probeFailCopy;
+#if !PS2_NET_HAVE_POSIX_SOCKETS
+        (void)timeoutMs;
+        return probeFailCopy(ProbeFail::Dns);
+#else
+        using clock = std::chrono::steady_clock;
+        const auto start = clock::now();
+        const uint64_t dnsWaitMs = timeoutMs < 2000u ? timeoutMs : 2000u;
+        uint32_t addr = 0u;
+        const auto dnsDeadline = start + std::chrono::milliseconds(dnsWaitMs);
+        while (clock::now() < dnsDeadline)
+        {
+            addr = lobbyAddress();
+            if (addr != 0u)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        addr = lobbyAddress();
+        if (addr == 0u)
+        {
+            std::cerr << "[qp-probe] no lobby address (DNS)" << std::endl;
+            return probeFailCopy(ProbeFail::Dns);
+        }
+        // The game's fixed lobby dial (login TCP).
+        constexpr uint16_t kLoginPort = 11000u;
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+        {
+            std::cerr << "[qp-probe] socket failed" << std::endl;
+            return probeFailCopy(ProbeFail::Refused);
+        }
+        struct sockaddr_in sin;
+        std::memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+        sin.sin_port = htons(kLoginPort);
+        sin.sin_addr.s_addr = htonl(addr);
+        const int fl = ::fcntl(fd, F_GETFL, 0);
+        bool connected = false;
+        bool timedOut = false;
+        if (fl >= 0 && ::fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0)
+        {
+            const int rc = ::connect(fd, reinterpret_cast<struct sockaddr *>(&sin), sizeof(sin));
+            if (rc == 0)
+            {
+                connected = true;
+            }
+            else if (errno == EINPROGRESS)
+            {
+                const auto now = clock::now();
+                uint64_t leftMs = 0u;
+                if (now < start + std::chrono::milliseconds(timeoutMs))
+                    leftMs = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            start + std::chrono::milliseconds(timeoutMs) - now)
+                            .count());
+                struct timeval tv;
+                tv.tv_sec = static_cast<long>(leftMs / 1000u);
+                tv.tv_usec = static_cast<long>((leftMs % 1000u) * 1000u);
+                fd_set wfds;
+                FD_ZERO(&wfds);
+                FD_SET(fd, &wfds);
+                const int n = ::select(fd + 1, nullptr, &wfds, nullptr, &tv);
+                if (n > 0)
+                {
+                    int soErr = 0;
+                    socklen_t soLen = sizeof(soErr);
+                    connected = ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &soLen) == 0 && soErr == 0;
+                }
+                else if (n == 0)
+                {
+                    timedOut = true;
+                }
+            }
+        }
+        const auto ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - start).count());
+        ::close(fd);
+        if (connected)
+            return nullptr;
+        std::cerr << "[qp-probe] unreachable (" << (timedOut ? "timeout" : "refused") << ") ms=" << ms
+                  << std::endl;
+        return probeFailCopy(timedOut ? ProbeFail::Timeout : ProbeFail::Refused);
+#endif
     }
 
     bool qpLoginUsable()
@@ -2869,9 +2961,14 @@ namespace ps2_net
                         // the silent/blackhole case; anything fast is a
                         // refusal (down/full/rate-limited all RST or
                         // reset here). Backed-off attempts stay silent.
-                        const char *toast = (addr == 0u) ? kToastConnDns
-                                            : (failKind == 2) ? kToastConnTimeout
-                                                              : kToastConnRefused;
+                        const char *toast = (addr == 0u)
+                                            ? ps2_net_protocol::probeFailCopy(
+                                                  ps2_net_protocol::ProbeFail::Dns)
+                                            : (failKind == 2)
+                                                  ? ps2_net_protocol::probeFailCopy(
+                                                        ps2_net_protocol::ProbeFail::Timeout)
+                                                  : ps2_net_protocol::probeFailCopy(
+                                                        ps2_net_protocol::ProbeFail::Refused);
                         std::cerr << ((failKind == 2) ? " CONNECT-TIMEOUT" : " CONNECT-FAILED");
                         ps2x::ui::toast(toast, 8.0f);
                         status = 1u;

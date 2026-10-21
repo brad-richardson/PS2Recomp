@@ -120,6 +120,10 @@ namespace ps2_net
     // beside the Quick Play login path); Quick Play netplay posts it on its
     // first entry since its menu never reaches the DirtySock path.
     void firstRunNotice();
+    // qp-freeze-1: one-shot lobby reachability probe for the direct tap.
+    // Null when a dial succeeds, else the player-facing copy. Bounded,
+    // game thread only, no HLE dial state touched.
+    const char *qpProbeLobby(uint64_t timeoutMs);
 
     // online-stock-2: HLE-only side channel on the P2P race socket ("O5KA"
     // keep-alives carrying "ST" + payload; never delivered to the guest). stateSend returns false

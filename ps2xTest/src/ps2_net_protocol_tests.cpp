@@ -258,6 +258,24 @@ namespace
             t.IsFalse(ps2_net_protocol::dnsGiveUp(5000, 1000, false), "clock ran back");
         });
 
+        tc.Run("qp-freeze-1: probe failure kinds map to the player copy", [](TestCase &t)
+        {
+            using ps2_net_protocol::ProbeFail;
+            using ps2_net_protocol::probeFailCopy;
+            t.Equals(std::string(probeFailCopy(ProbeFail::Dns)),
+                     std::string("Online unavailable (address lookup failed). Offline play works - check "
+                                 "connection."),
+                     "dns copy");
+            t.Equals(std::string(probeFailCopy(ProbeFail::Timeout)),
+                     std::string("Online unavailable (no answer). Offline play works - retry from the Online "
+                                 "menu."),
+                     "timeout copy");
+            t.Equals(std::string(probeFailCopy(ProbeFail::Refused)),
+                     std::string("Online unavailable (server refused). Offline play works - retry from the "
+                                 "Online menu."),
+                     "refused copy");
+        });
+
         tc.Run("netsec-fix-1 F1: invalid TCP frame sizes reject, valid hold or deliver",
                [](TestCase &t)
                {
