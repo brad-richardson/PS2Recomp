@@ -19,7 +19,6 @@
 #include "ps2_netsync.h" // online-v0-1: Quick Play menus + START barrier (default off)
 #include "ps2_net_stock120.h" // online-stock-2: autopilot own-rider mode (PS2X_TK12_AP_PTR=own)
 #include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
-#include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
 #include <algorithm>
 #include <cmath>
@@ -4098,12 +4097,9 @@ namespace ps2_stubs
                     pickerStatus))
                 ps2_savestate::noteQuickStatus(pickerStatus); // status line + Android toast (UX1)
         }
-        // BTS1: boot turbo yields on any pad button press (active-low bytes;
-        // sticks ignored so rest jitter cannot end the turbo). One bool check
-        // when the knob is off.
-        if (data[2] != 0xFFu || data[3] != 0xFFu)
-            ps2_turbo_boot::notePadInput(
-                runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u);
+        // BTS1 (Brad 10-21): boot turbo never yields on input — before the
+        // title nothing takes input, so only the title-screen signal (plus
+        // the hard cap) ends the turbo. Pad reads below cannot end it.
         if (ps2_savestate::canonicalEnabled())
             ps2_savestate::canonicalRecordPad(
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u,

@@ -1999,6 +1999,18 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue(ps2_turbo_boot::pathIsFrontendLui("host:Data/Ui/fe.lui"), "lower path");
             t.IsTrue(!ps2_turbo_boot::pathIsFrontendLui("cdrom0:\\DATA\\UI\\FE.LU;1"), "prefix rejected");
             t.IsTrue(!ps2_turbo_boot::pathIsFrontendLui(nullptr), "null path rejected");
+            // Brad 10-21: no input yield — pad/vpad/stick input never ends
+            // the turbo. evalTick only ever returns signal/cap/none across
+            // the whole boot window, whatever the signal tick.
+            for (uint64_t signal : {0u, 1u, 199u, 200u, 661u, 2000u, 2500u})
+            {
+                for (uint64_t tick = 0u; tick <= 3000u; ++tick)
+                {
+                    const auto r = ps2_turbo_boot::evalTick(tick, signal);
+                    t.IsTrue(r == Yield::None || r == Yield::Signal || r == Yield::Cap,
+                             "yield is signal/cap/none only");
+                }
+            }
         });
     });
 }

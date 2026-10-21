@@ -32,7 +32,8 @@ enum class Yield : uint8_t
 {
     None = 0,
     Signal = 1,
-    Input = 2,
+    // Brad 10-21: no Input yield — before the title nothing takes input.
+    // Turbo ends on the title-screen signal (or the hard cap) only.
     Cap = 3,
 };
 
@@ -157,7 +158,7 @@ inline void arm()
 inline void emitYieldLine(uint64_t tick, Yield reason)
 {
     const State &s = state();
-    const char *name = reason == Yield::Signal ? "signal" : reason == Yield::Input ? "input" : "cap";
+    const char *name = reason == Yield::Signal ? "signal" : "cap";
     std::fprintf(stderr, "[turbo-boot] yield tick=%llu reason=%s latch06=%llu latchFE=%llu lookups=%llu [",
                  static_cast<unsigned long long>(tick), name,
                  static_cast<unsigned long long>(s.latch06),
@@ -221,14 +222,6 @@ inline void noteFileOpen(const char *path, uint64_t tick)
         return;
     if (s.latchFE == 0u && latchable(tick) && pathIsFrontendLui(path))
         s.latchFE = tick;
-}
-
-inline void notePadInput(uint64_t tick)
-{
-    State &s = state();
-    if (!s.armed.load(std::memory_order_relaxed) || s.done.load(std::memory_order_relaxed))
-        return;
-    tryYield(tick, Yield::Input);
 }
 
 inline void noteSavestateLoad()
