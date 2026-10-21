@@ -164,10 +164,19 @@ endif()
 # module-seam-1: the SSX 3 game module (games/ssx3/module), attached to the
 # runner here and to the product suite in ps2xTest. "none" builds the
 # generic runtime with no game module.
+# split-p1-prep-1: the module is product-owned (ssx3-120 games/ssx3/module).
+# PS2X_GAME_MODULE_DIR selects its root; the default is the pre-split
+# in-tree path. The engine also records its own source dir so the external
+# module can anchor its ps2xRuntime references without CMAKE_SOURCE_DIR.
 set(PS2X_GAME_MODULE "ssx3" CACHE STRING "Game module linked into the runner and ps2x_tests (ssx3|none)")
 set_property(CACHE PS2X_GAME_MODULE PROPERTY STRINGS ssx3 none)
+set(PS2X_GAME_MODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/games/ssx3/module" CACHE PATH "SSX 3 game module root (product-owned since the repo split)")
+set(PS2X_ENGINE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "Engine source root handed to the external game module")
 if(PS2X_BUILD_RUNTIME AND PS2X_GAME_MODULE STREQUAL "ssx3")
-    add_subdirectory("games/ssx3/module")
+    if(NOT EXISTS "${PS2X_GAME_MODULE_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "PS2X_GAME_MODULE=ssx3 but no module at PS2X_GAME_MODULE_DIR=${PS2X_GAME_MODULE_DIR}; set -DPS2X_GAME_MODULE_DIR=<ssx3-120>/games/ssx3/module or use -DPS2X_GAME_MODULE=none")
+    endif()
+    add_subdirectory("${PS2X_GAME_MODULE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/games/ssx3/module")
     ps2x_attach_game_module(ps2EntryRunner ssx3_game_module)
 elseif(NOT PS2X_GAME_MODULE STREQUAL "none")
     message(FATAL_ERROR "PS2X_GAME_MODULE=${PS2X_GAME_MODULE}: want ssx3 or none")
