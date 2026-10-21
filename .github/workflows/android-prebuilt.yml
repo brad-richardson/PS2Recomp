@@ -20,11 +20,26 @@ jobs:
       NDK_VERSION: '28.2.13676358'
       PS2X_GAME_CODEGEN_DIR: ''
       PS2X_VU0_RECOMP_DIR: ''
+      # Post-split module home (identity, contract test and export build all
+      # resolve the module rows/configure through this; the tag==stamp check
+      # stays the fail-closed pairing gate against product-main skew).
+      SSX3_MODULE_DIR: ${{ github.workspace }}/ssx3-120/games/ssx3/module
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Check out the product module (post-split home of games/ssx3/module)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: brad-richardson/ssx3-120
+          ref: main
+          path: ssx3-120
+          persist-credentials: false
+          fetch-depth: 1
+          # Fine-grained PAT (contents:read on brad-richardson/ssx3-120),
+          # stored as this secret; the default token cannot read it.
+          token: ${{ secrets.SSX3_120_READ_TOKEN }}
       - name: Check release identity
         shell: bash
         run: |
