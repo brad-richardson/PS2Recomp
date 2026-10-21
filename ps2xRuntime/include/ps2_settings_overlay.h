@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "ps2_public_tier.h" // resTierDefault runs the public device-tier rule
+#include "ps2_virtual_pad.h" // stickPadMask maps stick bits onto the pad mask
 
 namespace ps2x::set2
 {
@@ -1269,6 +1270,26 @@ inline uint8_t stickNavEdges(StickNav &st, uint8_t held)
     const uint8_t edges = static_cast<uint8_t>(held & ~st.prev);
     st.prev = held;
     return edges;
+}
+
+// Tricky picker/mode-screen stick nav (tk-pad-stick-1, Brad 10-21): held
+// stick directions as host pad mask bits, so the picker can OR them into
+// its held union and treat a deflection exactly like a d-pad press (the
+// union edge sampler fires fresh bits only, so held never re-fires).
+// Right stick never reaches here (callers sample left sticks only); the
+// 0.5 deadzone in stickDirBits means a resting stick contributes nothing.
+inline uint16_t stickPadMask(uint8_t dirs)
+{
+    uint16_t out = 0u;
+    if ((dirs & kStickUp) != 0u)
+        out |= ps2x::vpad::kUp;
+    if ((dirs & kStickDown) != 0u)
+        out |= ps2x::vpad::kDown;
+    if ((dirs & kStickLeft) != 0u)
+        out |= ps2x::vpad::kLeft;
+    if ((dirs & kStickRight) != 0u)
+        out |= ps2x::vpad::kRight;
+    return out;
 }
 
 // Resume prompt selection (pure; the prompt loop owns draw/input).

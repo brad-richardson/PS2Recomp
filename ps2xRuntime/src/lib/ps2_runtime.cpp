@@ -8358,6 +8358,7 @@ void PS2Runtime::run()
     bool tkLatchedOn = false; // re-arm on a new Map entry or completed Tricky exit
     uint64_t tkLatchGen = 0;
     uint16_t tkPrevUnion = 0; // list nav edge detect (every pad slot + vpad)
+    ps2x::vpad::StickVec tkStickPrev; // last sampled vpad stick (one host frame behind, like the vpad mask in ds1TrueRaw)
     // tricky-picker-2: the in-flight ride label ("Riding <course>…"). Set
     // wherever a ride arms, cleared wherever its drive disarms; draw-only.
     std::string tkRideName, tkRideMode;
@@ -9373,7 +9374,25 @@ void PS2Runtime::run()
                 if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_THUMB))
                     tkSlotHeld |= ps2x::vpad::kR3;
             }
-            const uint16_t tkHeld = static_cast<uint16_t>(ds1TrueRaw | tkSlotHeld);
+            // tk-pad-stick-1 (Brad 10-21: the analog stick moves the
+            // picker): left sticks (every slot, like the buttons above;
+            // right stick ignored) plus the virtual pad's stick drive like
+            // the d-pad, with the same repeat behavior (the union edge
+            // below fires fresh bits only, so held never re-fires). The
+            // vpad stick is last frame's (sampled after nav, one host frame
+            // behind — same precedent as the vpad mask in ds1TrueRaw).
+            uint8_t tkStickDirs = ps2x::set2::stickDirBits(
+                tkStickPrev.active ? tkStickPrev.x : 0.0f, tkStickPrev.active ? tkStickPrev.y : 0.0f);
+            for (int tkStickRi = 0; tkStickRi < 8; ++tkStickRi)
+            {
+                if (!IsGamepadAvailable(tkStickRi))
+                    continue;
+                tkStickDirs |= ps2x::set2::stickDirBits(
+                    GetGamepadAxisMovement(tkStickRi, GAMEPAD_AXIS_LEFT_X),
+                    GetGamepadAxisMovement(tkStickRi, GAMEPAD_AXIS_LEFT_Y));
+            }
+            const uint16_t tkHeld =
+                static_cast<uint16_t>(ds1TrueRaw | tkSlotHeld | ps2x::set2::stickPadMask(tkStickDirs));
             if (tkOpen)
             {
                 tkPublishOwn = true; // zeros (driving edges merge on the game thread)
@@ -9585,6 +9604,7 @@ void PS2Runtime::run()
             // track the union so no stale edges fire, and close the list
             // (its drive disarms; the guest is paused under the panel).
             tkPrevUnion = ds1TrueRaw;
+            tkStickPrev = ps2x::vpad::StickVec{}; // no stale deflection across the panel
             if (tkOpen)
             {
                 tkOpen = false;
@@ -9655,8 +9675,11 @@ void PS2Runtime::run()
                     ps2x::vpad::updatePad(vpadPad, tkVpadLayout, tkVpadTouches, tkVpadN, vpadShoulderBand);
                 tkVpadPressed = tkVpadFrame.pressed;
                 tkVpadStick = tkVpadFrame.stick;
+                tkStickPrev = tkVpadFrame.stick;
                 vpadPressedPrev = tkVpadPressed;
             }
+            else
+                tkStickPrev = ps2x::vpad::StickVec{}; // pad hidden: no stale deflection
             publishPad(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             if (!skipGl)

@@ -1006,6 +1006,39 @@ void register_ps2_settings_overlay_tests()
             t.Equals(ps2x::set2::stickNavEdges(st, ps2x::set2::kStickDown), ps2x::set2::kStickDown,
                      "re-press edges again"); }); });
 
+    // tk-pad-stick-1 (Brad 10-21): the picker ORs held stick directions
+    // into its nav union, so a deflection reads exactly like a d-pad press.
+    MiniTest::Case("Set2StickPadMask", [](TestCase &tc)
+                   {
+        tc.Run("stick directions map onto the pad mask", [](TestCase &t)
+               {
+            using ps2x::set2::stickPadMask;
+            t.Equals(stickPadMask(0u), static_cast<uint16_t>(0), "centred: nothing held");
+            t.Equals(stickPadMask(ps2x::set2::kStickUp), ps2x::vpad::kUp, "up");
+            t.Equals(stickPadMask(ps2x::set2::kStickDown), ps2x::vpad::kDown, "down");
+            t.Equals(stickPadMask(ps2x::set2::kStickLeft), ps2x::vpad::kLeft, "left");
+            t.Equals(stickPadMask(ps2x::set2::kStickRight), ps2x::vpad::kRight, "right");
+            t.Equals(stickPadMask(static_cast<uint8_t>(ps2x::set2::kStickUp | ps2x::set2::kStickLeft)),
+                     static_cast<uint16_t>(ps2x::vpad::kUp | ps2x::vpad::kLeft), "diagonal");
+            t.Equals(stickPadMask(static_cast<uint8_t>(ps2x::set2::kStickUp | ps2x::set2::kStickDown |
+                                                       ps2x::set2::kStickLeft | ps2x::set2::kStickRight)),
+                     static_cast<uint16_t>(ps2x::vpad::kUp | ps2x::vpad::kDown | ps2x::vpad::kLeft |
+                                           ps2x::vpad::kRight),
+                     "all four"); });
+
+        tc.Run("a deflected physical stick and a dragged vpad stick agree", [](TestCase &t)
+               {
+            // Left stick down-right at 0.6 plus a vpad stick drag up-left:
+            // every source lands on the same pad bits the d-pad sets.
+            uint8_t dirs = static_cast<uint8_t>(
+                ps2x::set2::stickDirBits(0.6f, 0.6f) | ps2x::set2::stickDirBits(-0.7f, -0.7f));
+            t.Equals(ps2x::set2::stickPadMask(dirs),
+                     static_cast<uint16_t>(ps2x::vpad::kUp | ps2x::vpad::kDown | ps2x::vpad::kLeft |
+                                           ps2x::vpad::kRight),
+                     "physical + vpad union");
+            t.Equals(ps2x::set2::stickPadMask(ps2x::set2::stickDirBits(0.1f, -0.2f)),
+                     static_cast<uint16_t>(0), "rest (inside deadzone) holds nothing"); }); });
+
     MiniTest::Case("Set2ResumeNav", [](TestCase &tc)
                    {
         tc.Run("fresh slot defaults to Resume; up/left select it, down/right select Start fresh", [](TestCase &t)
