@@ -1413,15 +1413,27 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(std::strncmp(readFilecode(ram.data(), 0x2000000u, 0), "ARA1", 4), 0,
                      "code bytes match"); });
 
-        tc.Run("geometry hits rows and legends, no toggle", [](TestCase &t)
+        tc.Run("geometry lays out rows and pane, no hit test", [](TestCase &t)
                {
-            ListGeom g = listLayout(640.0f, 480.0f);
-            t.Equals(listHit(g, g.rowX + 4, g.rowY[3] + 2), 3, "row tap");
-            t.Equals(listHit(g, g.rowX - 4, g.rowY[3] + 2), -1, "miss left");
-            t.Equals(listHit(g, g.selectX + 2, g.selectY + 2), 11, "select legend");
-            t.Equals(listHit(g, g.backX + 2, g.backY + 2), 12, "back legend");
-            // The old toggle sat on the pane header: now a miss (Brad 10-19).
-            t.Equals(listHit(g, g.paneX + g.paneW * 0.79f, g.paneY + 4), -1, "no toggle");
+            // Controller-only (Brad 10-21, tk-pad-ui-1): listHit and the
+            // touch Select/Back buttons are gone — the pad (physical slots,
+            // keyboard, virtual pad) drives both screens. The layout still
+            // owns title, rows and pane inside the screen.
+            for (float h : {480.0f, 820.0f})
+            {
+                const float w = h * 4.0f / 3.0f;
+                ListGeom g = listLayout(w, h);
+                t.IsTrue(g.titleX >= 0 && g.titleX + g.titleW <= w, "title inside screen");
+                t.IsTrue(g.titleY >= 0 && g.titleY + g.titleH <= h, "title band inside screen");
+                t.IsTrue(g.rowX >= 0 && g.rowX + g.rowW <= w, "rows inside screen");
+                for (int i = 0; i < 10; ++i)
+                    t.IsTrue(g.rowY[i] >= g.titleY + g.titleH && g.rowY[i] + g.rowH <= h,
+                             "row inside screen");
+                t.IsTrue(g.paneX >= 0 && g.paneX + g.paneW <= w, "pane inside screen");
+                t.IsTrue(g.paneY >= 0 && g.paneY + g.paneH <= h, "pane band inside screen");
+                const float rowsEnd = g.rowY[9] + g.rowH;
+                t.IsTrue(rowsEnd <= h, "rows end inside screen");
+            }
             // One-tap rule: multi-mode courses open the mode screen,
             // single-mode courses ride straight away.
             t.IsTrue(listCourseOpensModes(0), "Garibaldi opens modes");
@@ -1433,27 +1445,20 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(listTriangleClosesNow(0), "step0 closes");
             t.IsFalse(listTriangleClosesNow(1), "step1 returns to list"); });
 
-        tc.Run("help-bar buttons label the 11/12 zones per step", [](TestCase &t)
+        tc.Run("help bar carries the pad-key legend, no buttons", [](TestCase &t)
                {
-            t.IsTrue(std::strcmp(listButtonLabel(0, 11), "Select") == 0, "step0 ride");
-            t.IsTrue(std::strcmp(listButtonLabel(0, 12), "Previous") == 0, "step0 back");
-            t.IsTrue(std::strcmp(listButtonLabel(1, 11), "Ride") == 0, "step1 ride");
-            t.IsTrue(std::strcmp(listButtonLabel(1, 12), "Courses") == 0, "step1 back");
-            t.IsNull(listButtonLabel(0, 10), "toggle has no button");
-            t.IsNull(listButtonLabel(0, 3), "row has no button");
-            t.IsNull(listButtonLabel(0, -1), "miss has no button");
-            // The drawn buttons sit on the help bar: below the last course
-            // row, inside the screen, select left of back, no row overlap.
+            // Controller-only (Brad 10-21, tk-pad-ui-1): listButtonLabel is
+            // gone with the touch Select/Back buttons. The help-bar band
+            // stays clear of the rows and inside the screen, so the pad-key
+            // legend ("X Select   Triangle Previous …") never overlaps them.
             for (float h : {480.0f, 820.0f})
             {
                 const float w = h * 4.0f / 3.0f;
                 ListGeom g = listLayout(w, h);
                 const float rowsEnd = g.rowY[9] + g.rowH;
-                t.IsTrue(g.selectY >= rowsEnd, "select below rows");
-                t.IsTrue(g.backY >= rowsEnd, "back below rows");
-                t.IsTrue(g.selectX + g.selectW <= g.backX, "select left of back");
-                t.IsTrue(g.backX + g.backW <= w, "back inside screen");
-                t.IsTrue(g.selectY + g.selectH <= h, "bar inside screen");
+                const float barY = h * 0.905f;
+                t.IsTrue(barY >= rowsEnd, "legend below rows");
+                t.IsTrue(barY + h * 0.06f <= h, "legend inside screen");
             } });
 
         tc.Run("one-tap ride default is Race, toggle cycles dual courses", [](TestCase &t)

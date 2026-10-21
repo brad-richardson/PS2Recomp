@@ -8357,8 +8357,7 @@ void PS2Runtime::run()
     int tkShutDeb = 0;  // consecutive off-target frames (close at 12)
     bool tkLatchedOn = false; // re-arm on a new Map entry or completed Tricky exit
     uint64_t tkLatchGen = 0;
-    uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
-    std::vector<int64_t> tkDown; // touch ids currently on the list
+    uint16_t tkPrevUnion = 0; // list nav edge detect (every pad slot + vpad)
     // tricky-picker-2: the in-flight ride label ("Riding <course>…"). Set
     // wherever a ride arms, cleared wherever its drive disarms; draw-only.
     std::string tkRideName, tkRideMode;
@@ -9323,7 +9322,6 @@ void PS2Runtime::run()
                         tkl::driveDisarm();
                         tkRideName.clear();
                         tkRideMode.clear();
-                        tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
                         std::fprintf(stderr, "[tklist] tick=%llu close\n",
@@ -9331,14 +9329,59 @@ void PS2Runtime::run()
                     }
                 }
             }
+            // tk-pad-ui-1 (Brad 10-21, controller-only): nav/confirm/back
+            // from every physical pad slot (resume-prompt precedent: any pad
+            // switches — pad 1 alone misses a second controller), sampled
+            // this frame. ds1TrueRaw above already unions pad 1, the
+            // keyboard, the test spans and last frame's vpad mask; the vpad
+            // d-pad joins through that merge (one host frame behind).
+            uint16_t tkSlotHeld = 0u;
+            for (int tkRi = 0; tkRi < 8; ++tkRi)
+            {
+                if (!IsGamepadAvailable(tkRi))
+                    continue;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_FACE_UP))
+                    tkSlotHeld |= ps2x::vpad::kUp;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+                    tkSlotHeld |= ps2x::vpad::kDown;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+                    tkSlotHeld |= ps2x::vpad::kLeft;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+                    tkSlotHeld |= ps2x::vpad::kRight;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+                    tkSlotHeld |= ps2x::vpad::kCross;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+                    tkSlotHeld |= ps2x::vpad::kCircle;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
+                    tkSlotHeld |= ps2x::vpad::kSquare;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_FACE_UP))
+                    tkSlotHeld |= ps2x::vpad::kTriangle;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
+                    tkSlotHeld |= ps2x::vpad::kL1;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
+                    tkSlotHeld |= ps2x::vpad::kR1;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
+                    tkSlotHeld |= ps2x::vpad::kL2;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
+                    tkSlotHeld |= ps2x::vpad::kR2;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+                    tkSlotHeld |= ps2x::vpad::kStart;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_MIDDLE_LEFT))
+                    tkSlotHeld |= ps2x::vpad::kSelect;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_LEFT_THUMB))
+                    tkSlotHeld |= ps2x::vpad::kL3;
+                if (IsGamepadButtonDown(tkRi, GAMEPAD_BUTTON_RIGHT_THUMB))
+                    tkSlotHeld |= ps2x::vpad::kR3;
+            }
+            const uint16_t tkHeld = static_cast<uint16_t>(ds1TrueRaw | tkSlotHeld);
             if (tkOpen)
             {
                 tkPublishOwn = true; // zeros (driving edges merge on the game thread)
                 const tkl::DriveProgress prog = tkl::driveProgress();
-                // tricky-picker-2: ride actions shared by the pad, browse
-                // taps and drive-time retarget taps (one definition, used by
-                // the driving/browsing branches below). tkRideName/tkRideMode
-                // feed the "Riding …" draw state; cleared at every disarm.
+                // tk-pad-ui-1: ride actions shared by the pad (one
+                // definition, used by the driving/browsing branches below).
+                // tkRideName/tkRideMode feed the "Riding …" draw state;
+                // cleared at every disarm.
                 const auto tkNoteRide = [&](const tkl::Course &c, const char *modeName) {
                     tkRideName = c.name ? c.name : "?";
                     tkRideMode = modeName ? modeName : "?";
@@ -9366,7 +9409,6 @@ void PS2Runtime::run()
                         // owns configuration, teardown and loading.
                         tkl::driveDisarm();
                         tkOpen = false;
-                        tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
                         ps2_ssx3_tricky::state().directActive = true;
@@ -9384,20 +9426,6 @@ void PS2Runtime::run()
                                  static_cast<unsigned long long>(tkTick), c.name,
                                  c.modeName[tkList.step == 1 ? tkList.mode : 0], tkGoal.peak,
                                  tkGoal.type, tkGoal.row, tkEv);
-                };
-                // One-tap ride (touch): the course's default mode (Race where
-                // offered) rides immediately, skipping the mode step. The
-                // touch toggle cycles the default; the pad path is untouched.
-                const auto tkRideDefault = [&] {
-                    const uint8_t oldStep = tkList.step, oldMode = tkList.mode;
-                    tkList.mode = tkl::listDefMode(tkList);
-                    tkList.step = 1;
-                    tkArmRide();
-                    if (!tkl::directKnob())
-                    {
-                        tkList.step = oldStep;
-                        tkList.mode = oldMode;
-                    }
                 };
                 const auto tkCross = [&] {
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
@@ -9430,52 +9458,10 @@ void PS2Runtime::run()
                         // park can be in flight here (a park closes at once
                         // via Cross-arm), so nothing legit is orphaned.
                         tkl::pickerSessionBump();
-                        tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
                         std::fprintf(stderr, "[tklist] tick=%llu triangle back (list closed at once)\n",
                                      static_cast<unsigned long long>(tkTick));
-                    }
-                };
-                // One browse tap: step 0 highlights, then one-tap rides the
-                // default; the toggle cycles it. Step 1 is unchanged.
-                const auto tkBrowseTap = [&](int hit) {
-                    if (tkList.step == 0)
-                    {
-                        if (hit >= 0 && hit <= 9)
-                        {
-                            if (tkList.sel == static_cast<uint8_t>(hit))
-                                tkRideDefault();
-                            else
-                                tkList.sel = static_cast<uint8_t>(hit);
-                        }
-                        else if (hit == 10)
-                        {
-                            const uint8_t def = tkl::listCycleMode(tkList);
-                            std::fprintf(stderr, "[tklist] tick=%llu mode %s -> %s\n",
-                                         static_cast<unsigned long long>(tkTick),
-                                         tkl::kCourses[tkList.sel].name,
-                                         tkl::kCourses[tkList.sel].modeName[def]);
-                        }
-                        else if (hit == 11)
-                            tkRideDefault();
-                        else if (hit == 12)
-                            tkTriangle();
-                    }
-                    else
-                    {
-                        const int nModes = tkl::kCourses[tkList.sel].nOpts;
-                        if (hit >= 0 && hit < nModes)
-                        {
-                            if (tkList.mode == hit)
-                                tkArmRide();
-                            else
-                                tkList.mode = static_cast<uint8_t>(hit);
-                        }
-                        else if (hit == 11)
-                            tkArmRide();
-                        else if (hit == 12)
-                            tkTriangle();
                     }
                 };
                 if (prog.done)
@@ -9492,7 +9478,6 @@ void PS2Runtime::run()
                         // path parks no mailbox request; nothing legit
                         // is orphaned).
                         tkl::pickerSessionBump();
-                        tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
                         std::fprintf(stderr, "[tklist] tick=%llu close (%s)\n",
@@ -9516,36 +9501,12 @@ void PS2Runtime::run()
                 else if (prog.driving)
                 {
                     // Any fresh press cancels the drive (the user takes over).
-                    // Diagnostic: name the edge source (script span, tap echo,
-                    // or walker) offline from tick + bits + list state. A real
-                    // player's Back press must never be swallowed: no guard
-                    // here, logging only.
-                    const uint16_t tkFresh = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
-                    // Touch parity (Brad 10-19): a fresh tap cancels too —
-                    // the browsing sampler below never runs while driving,
-                    // so without this a touch-only player's Previous tap
-                    // dies silently mid-drive.
-                    bool tkTapFresh = false;
-                    {
-                        ps2x::vpad::TouchPoint tkcts[8];
-                        const int tkcn = set2SampleTouches(tkcts);
-                        std::vector<int64_t> tkStill;
-                        for (int i = 0; i < tkcn; ++i)
-                        {
-                            tkStill.push_back(tkcts[i].id);
-                            if (std::find(tkDown.begin(), tkDown.end(), tkcts[i].id) == tkDown.end())
-                            {
-                                tkDown.push_back(tkcts[i].id);
-                                tkTapFresh = true;
-                            }
-                        }
-                        std::vector<int64_t> tkLeft;
-                        for (int64_t id : tkDown)
-                            if (std::find(tkStill.begin(), tkStill.end(), id) != tkStill.end())
-                                tkLeft.push_back(id);
-                        tkDown = tkLeft;
-                    }
-                    if (tkFresh != 0u || tkTapFresh)
+                    // A real player's Back press must never be swallowed: no
+                    // guard here, logging only. Touch players cancel with the
+                    // virtual pad below (its mask joins tkHeld through the
+                    // merge, one host frame behind).
+                    const uint16_t tkFresh = static_cast<uint16_t>(tkHeld & ~tkPrevUnion);
+                    if (tkFresh != 0u)
                     {
                         tkl::driveDisarm();
                         tkClearRide();
@@ -9562,65 +9523,13 @@ void PS2Runtime::run()
                         }
                         const tkl::CourseOption &tkCancelGoal = tkl::listGoal(tkList);
                         std::fprintf(stderr,
-                                     "[tklist] tick=%llu cancel %s fresh=0x%04x prev=0x%04x "
+                                     "[tklist] tick=%llu cancel edge fresh=0x%04x prev=0x%04x "
                                      "goal=(%u,%u,%u evmap=%d) list(step%d sel%d mode%d)\n",
                                      static_cast<unsigned long long>(tkTick),
-                                     tkTapFresh ? "tap" : "edge", tkFresh, tkPrevUnion,
+                                     tkFresh, tkPrevUnion,
                                      tkCancelGoal.peak, tkCancelGoal.type, tkCancelGoal.row,
                                      tkCancelGoal.map.event, tkList.step, tkList.sel, tkList.mode);
                     }
-                    // tricky-picker-2: touches queue during the drive, never
-                    // drop silently. Previous cancels (the visible cancel);
-                    // a course/Select/toggle tap cancels AND retargets
-                    // (disarm, then the normal browse tap, which may arm a
-                    // new drive); anything else toasts "Still riding …".
-                    // One fresh tap acts per frame; the rest only register.
-                    const tkl::ListGeom tkDriveGeom = tkl::listLayout(screenWidth, screenHeight);
-                    ps2x::vpad::TouchPoint tkDriveTs[8];
-                    const int tkDriveN = set2SampleTouches(tkDriveTs);
-                    std::vector<int64_t> tkDriveStill;
-                    // A physical cancel in the same frame does not eat the
-                    // tap: disarm is idempotent, and a fresh tap still acts.
-                    bool tkDriveHandled = false;
-                    for (int i = 0; i < tkDriveN; ++i)
-                    {
-                        tkDriveStill.push_back(tkDriveTs[i].id);
-                        if (std::find(tkDown.begin(), tkDown.end(), tkDriveTs[i].id) != tkDown.end())
-                            continue;
-                        tkDown.push_back(tkDriveTs[i].id);
-                        if (tkDriveHandled)
-                            continue;
-                        tkDriveHandled = true;
-                        const int hit = tkl::listHit(tkDriveGeom, tkDriveTs[i].x, tkDriveTs[i].y);
-                        if (hit == 12)
-                        {
-                            tkl::driveDisarm();
-                            tkClearRide();
-                            std::fprintf(stderr, "[tklist] tick=%llu cancel tap (Previous)\n",
-                                         static_cast<unsigned long long>(tkTick));
-                            ps2x::ui::toast("Tricky list: ride cancelled", 2.0f);
-                        }
-                        else if (hit == 10 || (hit >= 0 && hit <= 9) || hit == 11)
-                        {
-                            tkl::driveDisarm();
-                            tkClearRide();
-                            std::fprintf(stderr, "[tklist] tick=%llu retarget tap hit=%d\n",
-                                         static_cast<unsigned long long>(tkTick), hit);
-                            tkBrowseTap(hit);
-                        }
-                        else
-                        {
-                            std::string msg("Still riding ");
-                            msg += tkRideName.empty() ? "..." : tkRideName;
-                            msg += " ...";
-                            ps2x::ui::toast(msg.c_str(), 2.0f);
-                        }
-                    }
-                    std::vector<int64_t> tkDriveLeft;
-                    for (int64_t id : tkDown)
-                        if (std::find(tkDriveStill.begin(), tkDriveStill.end(), id) != tkDriveStill.end())
-                            tkDriveLeft.push_back(id);
-                    tkDown = tkDriveLeft;
                 }
                 else if (tkTarget)
                 {
@@ -9629,12 +9538,12 @@ void PS2Runtime::run()
                     // opens its mode list (single-mode courses ride
                     // directly); pad Cross on a mode rides; Triangle steps
                     // back (out of the overlay on step 0). Left/Right do
-                    // nothing. Touch taps act on one press (picker-3: a
-                    // course tap opens its mode screen, else rides; a mode
-                    // tap rides); tkBrowseTap still serves driving retargets.
+                    // nothing. Controller-only (Brad 10-21): the edges join
+                    // every physical slot, the keyboard and the virtual pad;
+                    // no direct touch handling remains on either screen.
                     // tricky-direct: tkArmRide itself takes the direct path
                     // when PS2X_SSX3_TRICKY_DIRECT covers this cell.
-                    const uint16_t tkEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
+                    const uint16_t tkEdge = static_cast<uint16_t>(tkHeld & ~tkPrevUnion);
                     if (tkEdge & ps2x::vpad::kUp)
                         tkl::listMove(tkList, true);
                     else if (tkEdge & ps2x::vpad::kDown)
@@ -9643,23 +9552,19 @@ void PS2Runtime::run()
                         tkTriangle();
                     else if (tkEdge & ps2x::vpad::kCross)
                         tkCross();
-                    // Controller-only (Brad: touch handling removed from the
-                    // picker and mode screen). Pad keys above own the
-                    // two-step flow; touches never reach the list, so no
-                    // render-thread touch-to-request hand-off remains.
                 }
-                tkPrevUnion = ds1TrueRaw;
+                tkPrevUnion = tkHeld;
             }
             else
             {
-                // F05: after the picker closes, a fresh Triangle/Previous
+                // F05: after the picker closes, a fresh Triangle
                 // may withdraw a request only until the FE boundary takes
                 // it. Consumption and cancellation share one mailbox lock.
                 // With no pending request, input stays with the guest.
-                // Controller-only (Brad): the closed-picker Previous tap is
-                // gone with touch handling; a fresh Triangle withdraws a
-                // request only until the FE boundary takes it.
-                const uint16_t tkClosedEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
+                // Controller-only (Brad 10-21): a fresh Triangle from any
+                // slot, the keyboard or the virtual pad withdraws a request
+                // only until the FE boundary takes it.
+                const uint16_t tkClosedEdge = static_cast<uint16_t>(tkHeld & ~tkPrevUnion);
                 if ((tkClosedEdge & ps2x::vpad::kTriangle) != 0u)
                 {
                     if (ps2_ssx3_fe_launch::cancelPending(tkTick))
@@ -9671,7 +9576,7 @@ void PS2Runtime::run()
                                      static_cast<unsigned long long>(tkTick));
                     }
                 }
-                tkPrevUnion = ds1TrueRaw;
+                tkPrevUnion = tkHeld;
             }
         }
         else if (tkListOn)
@@ -9689,7 +9594,6 @@ void PS2Runtime::run()
                 ps2_ssx3_tricky_list::driveDisarm();
                 tkRideName.clear();
                 tkRideMode.clear();
-                tkDown.clear();
             }
         }
         // SET2: no vpad path this frame (Odin play, desktop, or a controller
@@ -9729,16 +9633,19 @@ void PS2Runtime::run()
             // tk-menu-1: the list owns the pad. The guest gets zeros (the
             // navigator's presses merge on the game thread); the overlay
             // draws full-screen over the presented frame, never into it.
-            // tk-fe-2: the vpad draw/publish chain below is skipped while
-            // the list owns the pad, which starved the host edge sampler
-            // of overlay presses (the picker was unreachable from the
-            // virtual controller). Process touches here for the merge
-            // only: same ownership state and hit test, no panel/menu side
-            // effects (the list owns those while open), publish stays zero.
-            if (vpadWanted && !vpadPadConnected && !set2Open)
+            // tk-pad-ui-1 (Brad 10-21, controller-only): the virtual pad
+            // stays visible and working on the picker + mode screen (touch
+            // players' only controller there); hidden while a physical
+            // controller is connected, like the game branch below. The pad
+            // is processed here for the host merge (same ownership state
+            // and hit test; the list owns the pad while open, publish stays
+            // zero) and drawn after the list further below.
+            const bool tkVpadShow = vpadWanted && !vpadPadConnected && !set2Open;
+            ps2x::vpad::Layout tkVpadLayout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
+            uint16_t tkVpadPressed = 0u;
+            ps2x::vpad::StickVec tkVpadStick;
+            if (tkVpadShow)
             {
-                const ps2x::vpad::Layout tkVpadLayout =
-                    ps2x::vpad::makeLayout(screenWidth, screenHeight);
                 ps2x::vpad::TouchPoint tkVpadTouches[8];
                 int tkVpadN = virtualPadTouches(tkVpadTouches, 8, screenWidth, screenHeight);
                 tkVpadN = ps2x::vpad::activeTestTouchesWithIds(
@@ -9746,7 +9653,9 @@ void PS2Runtime::run()
                     tkVpadN, 8);
                 const ps2x::vpad::PadFrame tkVpadFrame =
                     ps2x::vpad::updatePad(vpadPad, tkVpadLayout, tkVpadTouches, tkVpadN, vpadShoulderBand);
-                vpadPressedPrev = tkVpadFrame.pressed;
+                tkVpadPressed = tkVpadFrame.pressed;
+                tkVpadStick = tkVpadFrame.stick;
+                vpadPressedPrev = tkVpadPressed;
             }
             publishPad(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
@@ -10185,7 +10094,7 @@ void PS2Runtime::run()
                         tkRideLine += tkRideMode;
                         tkRideLine += "]";
                     }
-                    tkRideLine += " ... Previous cancels";
+                    tkRideLine += " ... any button cancels";
                     tkDraw(tkRideLine.c_str(), tkg.titleX, screenHeight * 0.905f, static_cast<float>(tkSmall),
                            RAYWHITE, false);
                 }
@@ -10193,30 +10102,16 @@ void PS2Runtime::run()
                     tkDraw(tkList.step == 1 ? "X Ride   Triangle Courses   Up/Down pick mode"
                                             : "X Select   Triangle Previous   Up/Down pick course",
                            tkg.titleX, screenHeight * 0.905f, static_cast<float>(tkSmall), RAYWHITE, false);
-                // Help-bar buttons (tricky-back-1): hits 11/12 are real,
-                // visible buttons over the select/back rects — not just the
-                // legend text at the left, which taps miss. The touch
-                // overlay is hidden while the list owns the pad, so a
-                // touch-only player needs a tappable way out; labels come
-                // from the header per step, geometry is the hit rects.
-                for (int tkHit = 11; tkHit <= 12; ++tkHit)
-                {
-                    const char *tkLabel = tkl::listButtonLabel(tkList.step, tkHit);
-                    if (!tkLabel)
-                        continue;
-                    const float tkBx = (tkHit == 11) ? tkg.selectX : tkg.backX;
-                    const float tkBy = (tkHit == 11) ? tkg.selectY : tkg.backY;
-                    const float tkBw = (tkHit == 11) ? tkg.selectW : tkg.backW;
-                    const float tkBh = (tkHit == 11) ? tkg.selectH : tkg.backH;
-                    DrawRectangle(static_cast<int>(tkBx), static_cast<int>(tkBy), static_cast<int>(tkBw),
-                                  static_cast<int>(tkBh), Color{24, 36, 62, 255});
-                    DrawRectangleLines(static_cast<int>(tkBx), static_cast<int>(tkBy), static_cast<int>(tkBw),
-                                       static_cast<int>(tkBh), Color{154, 62, 2, 255});
-                    const float tkLh = static_cast<float>(tkSmall) * 1.1f;
-                    const float tkLw = tkW(tkLabel, tkLh);
-                    tkDraw(tkLabel, tkBx + (tkBw - tkLw) * 0.5f, tkBy + (tkBh - tkLh) * 0.5f, tkLh,
-                           Color{250, 248, 244, 255}, false);
-                }
+                // tk-pad-ui-1 (Brad 10-21, controller-only): the touch
+                // Select/Back buttons are gone — touch players drive the
+                // list with the virtual pad drawn below. The step legend
+                // above still names the pad keys (X/Triangle/Up/Down).
+                // The virtual pad draws on top of the list (inside the list
+                // texture on Mac so host captures show it, direct on iOS),
+                // visible exactly when the merge above sampled it: wanted
+                // and no physical controller connected.
+                if (tkVpadShow)
+                    drawVirtualPad(tkVpadLayout, tkVpadPressed, tkVpadStick);
                 // picker-3: no toggle button (the mode screen owns modes).
                 if (!tkDirect)
                 {

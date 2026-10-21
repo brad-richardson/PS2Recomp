@@ -1312,23 +1312,20 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
     }
 }
 
-// ---- Overlay geometry + hit test (SET2 precedent: pure, render loop draws)
+// ---- Overlay geometry (SET2 precedent: pure, render loop draws) ----------
 //
 // Full-screen list: title bar, 10 course rows (Tricky order) on the left,
-// the preview/event pane on the right, the help bar with X/Select and
-// Triangle/Previous legends at the foot, drawn as real buttons over hits
-// 11/12 (tricky-back-1). One-tap rule (Brad 10-19): a course tap acts at
-// once (multi-mode opens the mode screen, single-mode rides); a mode tap
-// rides at once. No toggle (removed 10-19). Hit values: 0..9 = course row,
-// 11 = the Select button, 12 = the Previous button (back), -1 = miss.
+// the preview/event pane on the right, the help bar with the X/Triangle
+// pad-key legend at the foot. Controller-only (Brad 10-21, tk-pad-ui-1):
+// the touch Select/Back buttons and their hit tests are gone — touch
+// players drive the list with the virtual pad, which the render loop draws
+// on top. No toggle (removed 10-19).
 struct ListGeom
 {
     float titleX = 0, titleY = 0, titleW = 0, titleH = 0;
     float rowX = 0, rowW = 0, rowH = 0;
     float rowY[10] = {};
     float paneX = 0, paneY = 0, paneW = 0, paneH = 0;
-    float selectX = 0, selectY = 0, selectW = 0, selectH = 0;
-    float backX = 0, backY = 0, backW = 0, backH = 0;
 };
 
 inline ListGeom listLayout(float w, float h)
@@ -1352,46 +1349,7 @@ inline ListGeom listLayout(float w, float h)
     g.paneW = w * 0.32f;
     g.paneY = rowsTop;
     g.paneH = g.rowH * 6.0f;
-    // Legends on the help bar (the toggle is gone: Brad 10-19).
-    g.selectX = w * 0.60f;
-    g.selectW = w * 0.18f;
-    g.backX = w * 0.80f;
-    g.backW = w * 0.14f;
-    g.selectY = g.backY = h * 0.905f;
-    g.selectH = g.backH = h * 0.06f;
     return g;
-}
-
-inline int listHit(const ListGeom &g, float x, float y)
-{
-    if (x >= g.selectX && x < g.selectX + g.selectW && y >= g.selectY && y < g.selectY + g.selectH)
-        return 11;
-    if (x >= g.backX && x < g.backX + g.backW && y >= g.backY && y < g.backY + g.backH)
-        return 12;
-    if (x < g.rowX || x >= g.rowX + g.rowW)
-        return -1;
-    for (int i = 0; i < 10; ++i)
-    {
-        if (y >= g.rowY[i] && y < g.rowY[i] + g.rowH)
-            return i;
-    }
-    return -1;
-}
-
-// ---- Help-bar buttons (tricky-back-1) --------------------------------------
-//
-// Hits 11/12 are drawn as real buttons over the select/back rects, with the
-// step's own action words (the controller hint line keeps the longer help).
-// The touch overlay is hidden while the list owns the pad, so a touch-only
-// player needs a visible, tappable way out; tapping the drawn legend text
-// (left side) is a miss. Pure data for the render loop; unit-tested below.
-inline const char *listButtonLabel(uint8_t step, int hit)
-{
-    if (hit == 11)
-        return step == 1 ? "Ride" : "Select";
-    if (hit == 12)
-        return step == 1 ? "Courses" : "Previous";
-    return nullptr;
 }
 
 // ---- Launch-time world mapping (Part 3) -----------------------------------
