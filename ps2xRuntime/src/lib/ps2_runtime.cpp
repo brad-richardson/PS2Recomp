@@ -8796,8 +8796,15 @@ void PS2Runtime::run()
             ++set2HostFrame;
         const uint16_t set2Inject =
             set2On ? set2TestMask(set2Test, set2HostFrame) : static_cast<uint16_t>(0u);
-        const uint16_t ds1TrueRaw =
-            static_cast<uint16_t>(ps2xSampleRaylibPad().pressed | set2Inject);
+        // tk-fe-2 (Brad controller-only): the virtual controller drives the
+        // picker/mode screens like a real pad. Overlay touches publish pad
+        // bits for the guest latch; OR last frame's mask in here too (one
+        // host frame behind, same as the set2Union precedent) so the host
+        // edge sampler (picker nav, closed-picker cancel, DS1 chord) sees
+        // the same presses. Overlay off (desktop default) keeps this 0, so
+        // det-identical.
+        const uint16_t ds1TrueRaw = static_cast<uint16_t>(ps2xSampleRaylibPad().pressed | set2Inject |
+                                                         (vpadWanted ? vpadPressedPrev : 0u));
         // ctrl-harden-1: pad 2 follows the second controller only (no
         // touch, no keyboard, no test-span inject, no DS1/SET2 chords —
         // those stay on pad 1, whose controller owns the settings chord).
@@ -9309,6 +9316,10 @@ void PS2Runtime::run()
                     if (tkOpen && ++tkShutDeb >= 12)
                     {
                         tkOpen = false;
+                        // tk-fe-2: leaving MAP closes the session. A request
+                        // parked here that never launched goes stale and the
+                        // FE boundary drops it (Brad: clear on close).
+                        tkl::pickerSessionBump();
                         tkl::driveDisarm();
                         tkRideName.clear();
                         tkRideMode.clear();
@@ -9415,6 +9426,10 @@ void PS2Runtime::run()
                         if (!tkl::directKnob())
                             tkl::driveArmBackOut(tkTick);
                         tkOpen = false;
+                        // tk-fe-2: Triangle-back closes the session too. No
+                        // park can be in flight here (a park closes at once
+                        // via Cross-arm), so nothing legit is orphaned.
+                        tkl::pickerSessionBump();
                         tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
@@ -9473,6 +9488,10 @@ void PS2Runtime::run()
                     if (tkOpen)
                     {
                         tkOpen = false;
+                        // tk-fe-2: drive-done closes the session (reference
+                        // path parks no mailbox request; nothing legit
+                        // is orphaned).
+                        tkl::pickerSessionBump();
                         tkDown.clear();
                         tkLatchedOn = true;
                         tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
@@ -9624,76 +9643,10 @@ void PS2Runtime::run()
                         tkTriangle();
                     else if (tkEdge & ps2x::vpad::kCross)
                         tkCross();
-                    // Touch: every row tap acts at once (a course tap opens
-                    // the mode screen when the course has modes, else rides;
-                    // a mode tap rides). Select/back act per step. Pad keys
-                    // keep the two-step flow above; the toggle is gone.
-                    const tkl::ListGeom tkGeom = tkl::listLayout(screenWidth, screenHeight);
-                    ps2x::vpad::TouchPoint tkts[8];
-                    const int tkn = set2SampleTouches(tkts);
-                    std::vector<int64_t> tkStill;
-                    // F06: one tap acts per frame (a second finger down in
-                    // the same frame only registers, so it cannot double-arm
-                    // or act on a list the first tap just closed); held ids
-                    // still prune below so nothing refires.
-                    bool tkActed = false;
-                    // tk-fe-2: a pad edge that acted this frame also blocks
-                    // the touch pass, so one press never fires twice.
-                    bool tkHandled = (tkEdge & (ps2x::vpad::kTriangle | ps2x::vpad::kCross)) != 0;
-                    for (int i = 0; i < tkn; ++i)
-                    {
-                        tkStill.push_back(tkts[i].id);
-                        if (std::find(tkDown.begin(), tkDown.end(), tkts[i].id) != tkDown.end())
-                            continue;
-                        tkDown.push_back(tkts[i].id);
-                        if (!tkOpen || tkHandled) continue;
-                        const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
-                        // A miss registers but never consumes the frame's
-                        // action; after one tap acts, the rest of the frame
-                        // only registers.
-                        const int tkModes = tkl::kCourses[tkList.sel].nOpts;
-                        const bool tkWillAct = (tkList.step == 0)
-                            ? ((hit >= 0 && hit <= 9) || hit == 11 || hit == 12)
-                            : ((hit >= 0 && hit < tkModes) || hit == 11 || hit == 12);
-                        if (!tkWillAct || tkActed)
-                            continue;
-                        tkActed = true;
-                        tkHandled = true;
-                        if (tkList.step == 0)
-                        {
-                            if (hit >= 0 && hit <= 9)
-                            {
-                                // One tap acts (Brad 10-19): no separate
-                                // highlight step. tkCross opens the mode
-                                // screen for multi-mode courses, else rides.
-                                tkList.sel = static_cast<uint8_t>(hit);
-                                tkCross();
-                            }
-                            else if (hit == 11)
-                                tkCross();
-                            else if (hit == 12)
-                                tkTriangle();
-                        }
-                        else
-                        {
-                            const int nModes = tkl::kCourses[tkList.sel].nOpts;
-                            if (hit >= 0 && hit < nModes)
-                            {
-                                // A mode tap launches it at once.
-                                tkList.mode = static_cast<uint8_t>(hit);
-                                tkArmRide();
-                            }
-                            else if (hit == 11)
-                                tkArmRide();
-                            else if (hit == 12)
-                                tkTriangle();
-                        }
-                    }
-                    std::vector<int64_t> tkLeft;
-                    for (int64_t id : tkDown)
-                        if (std::find(tkStill.begin(), tkStill.end(), id) != tkStill.end())
-                            tkLeft.push_back(id);
-                    tkDown = tkLeft;
+                    // Controller-only (Brad: touch handling removed from the
+                    // picker and mode screen). Pad keys above own the
+                    // two-step flow; touches never reach the list, so no
+                    // render-thread touch-to-request hand-off remains.
                 }
                 tkPrevUnion = ds1TrueRaw;
             }
@@ -9703,38 +9656,19 @@ void PS2Runtime::run()
                 // may withdraw a request only until the FE boundary takes
                 // it. Consumption and cancellation share one mailbox lock.
                 // With no pending request, input stays with the guest.
+                // Controller-only (Brad): the closed-picker Previous tap is
+                // gone with touch handling; a fresh Triangle withdraws a
+                // request only until the FE boundary takes it.
                 const uint16_t tkClosedEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
-                bool tkClosedPrevTap = false;
-                {
-                    const tkl::ListGeom tkClosedGeom = tkl::listLayout(screenWidth, screenHeight);
-                    ps2x::vpad::TouchPoint tkClosedTs[8];
-                    const int tkClosedN = set2SampleTouches(tkClosedTs);
-                    std::vector<int64_t> tkClosedStill;
-                    for (int i = 0; i < tkClosedN; ++i)
-                    {
-                        tkClosedStill.push_back(tkClosedTs[i].id);
-                        if (std::find(tkDown.begin(), tkDown.end(), tkClosedTs[i].id) != tkDown.end())
-                            continue;
-                        tkDown.push_back(tkClosedTs[i].id);
-                        if (tkl::listHit(tkClosedGeom, tkClosedTs[i].x, tkClosedTs[i].y) == 12)
-                            tkClosedPrevTap = true;
-                    }
-                    std::vector<int64_t> tkClosedLeft;
-                    for (int64_t id : tkDown)
-                        if (std::find(tkClosedStill.begin(), tkClosedStill.end(), id) != tkClosedStill.end())
-                            tkClosedLeft.push_back(id);
-                    tkDown = tkClosedLeft;
-                }
-                if ((tkClosedEdge & ps2x::vpad::kTriangle) != 0u || tkClosedPrevTap)
+                if ((tkClosedEdge & ps2x::vpad::kTriangle) != 0u)
                 {
                     if (ps2_ssx3_fe_launch::cancelPending(tkTick))
                     {
                         tkl::driveDisarm();
                         ps2_ssx3_tricky::state().directActive = false;
                         tkLatchedOn = false;
-                        std::fprintf(stderr, "[tklist] tick=%llu direct ask cancelled (%s, closed)\n",
-                                     static_cast<unsigned long long>(tkTick),
-                                     tkClosedPrevTap ? "previous tap" : "triangle");
+                        std::fprintf(stderr, "[tklist] tick=%llu direct ask cancelled (triangle, closed)\n",
+                                     static_cast<unsigned long long>(tkTick));
                     }
                 }
                 tkPrevUnion = ds1TrueRaw;
@@ -9749,6 +9683,9 @@ void PS2Runtime::run()
             if (tkOpen)
             {
                 tkOpen = false;
+                // tk-fe-2: panel takeover closes the session (Brad: clear
+                // on close without launching; the boundary drops the park).
+                ps2_ssx3_tricky_list::pickerSessionBump();
                 ps2_ssx3_tricky_list::driveDisarm();
                 tkRideName.clear();
                 tkRideMode.clear();
@@ -9792,6 +9729,25 @@ void PS2Runtime::run()
             // tk-menu-1: the list owns the pad. The guest gets zeros (the
             // navigator's presses merge on the game thread); the overlay
             // draws full-screen over the presented frame, never into it.
+            // tk-fe-2: the vpad draw/publish chain below is skipped while
+            // the list owns the pad, which starved the host edge sampler
+            // of overlay presses (the picker was unreachable from the
+            // virtual controller). Process touches here for the merge
+            // only: same ownership state and hit test, no panel/menu side
+            // effects (the list owns those while open), publish stays zero.
+            if (vpadWanted && !vpadPadConnected && !set2Open)
+            {
+                const ps2x::vpad::Layout tkVpadLayout =
+                    ps2x::vpad::makeLayout(screenWidth, screenHeight);
+                ps2x::vpad::TouchPoint tkVpadTouches[8];
+                int tkVpadN = virtualPadTouches(tkVpadTouches, 8, screenWidth, screenHeight);
+                tkVpadN = ps2x::vpad::activeTestTouchesWithIds(
+                    vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth, screenHeight, tkVpadTouches,
+                    tkVpadN, 8);
+                const ps2x::vpad::PadFrame tkVpadFrame =
+                    ps2x::vpad::updatePad(vpadPad, tkVpadLayout, tkVpadTouches, tkVpadN, vpadShoulderBand);
+                vpadPressedPrev = tkVpadFrame.pressed;
+            }
             publishPad(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             if (!skipGl)
@@ -10395,7 +10351,11 @@ void PS2Runtime::run()
             vpadPressedPrev = vpadFrame.pressed;
             // IN4: touch-source layer (transition only, zero cost off).
             ps2x::inputdiag::noteVpad(pressed, m_memory.gs().vsyncTick.load());
-            publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());
+            // tk-fe-2: this publish runs after the Tricky block's zero
+            // publish, so without the gate the guest would see picker nav.
+            // Touch-era legs were guest-blind; keep vpad nav guest-blind.
+            publishPad(tkPublishOwn ? static_cast<uint16_t>(0u) : static_cast<uint16_t>(pressed | raylibPressed),
+                       m_memory.gs().vsyncTick.load());
             ps2x::vpad::StickVec stick = vpadFrame.stick;
             uint8_t stickLX = 0x80u, stickLY = 0x80u;
             ps2x::vpad::stickBytes(stick, stickLX, stickLY);
@@ -10418,14 +10378,16 @@ void PS2Runtime::run()
         }
         else if (vpadWanted)
         {
-            publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
+            // tk-fe-2: same guest-blind gate as the shown branch above.
+            publishPad(tkPublishOwn ? static_cast<uint16_t>(0u) : raylibPressed, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             vpadPressedPrev = 0u; // set2-polish-1: overlay hidden, no touch chord
         }
         else
         {
             // Overlay off (desktop default): raylib buttons still feed the latch.
-            publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
+            // tk-fe-2: physical picker nav is guest-blind too (same gate).
+            publishPad(tkPublishOwn ? static_cast<uint16_t>(0u) : raylibPressed, m_memory.gs().vsyncTick.load());
             vpadPressedPrev = 0u; // set2-polish-1: no overlay, no touch chord
         }
         // ctrl-harden-1: pad 2's latch follows the second controller. The

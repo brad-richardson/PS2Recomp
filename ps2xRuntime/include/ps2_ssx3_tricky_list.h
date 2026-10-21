@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 
 namespace ps2_ssx3_tricky_list
@@ -450,6 +451,19 @@ inline void directDisarm()
 // Venue metadata is published with the generic request. The FE consumer
 // takes the request first, then this lock; no guest RAM is touched here.
 inline MapSpec &directVenue() { static MapSpec m; return m; }
+// tk-fe-2: picker-session generation. Bumped at every overlay CLOSE (render
+// thread) except the Cross-arm close that carries a fresh park; each mailbox
+// request is stamped so the FE consumer (game thread) drops requests from a
+// closed session instead of firing them later. Close (not open): the probe
+// parks at the main-menu accept BEFORE the first open, so an open-bump would
+// orphan every probe park; a close-bump keeps park and consume in one epoch
+// while a close-then-reopen still invalidates the stale park.
+inline std::atomic<uint64_t> &pickerSession()
+{
+    static std::atomic<uint64_t> s{0};
+    return s;
+}
+inline void pickerSessionBump() { pickerSession().fetch_add(1u, std::memory_order_acq_rel); }
 inline bool requestDirect(const ListState &list)
 {
     if (list.sel >= kCourseCount) return false;
@@ -457,7 +471,9 @@ inline bool requestDirect(const ListState &list)
     const DirectGoal goal = directGoalFor(c, listGoal(list));
     if (!goal.ok) return false;
     std::lock_guard<std::mutex> lock(directAskMu());
-    if (!ps2_ssx3_fe_launch::request(goal.event, goal.typeArg, goal.rulesArg, 1)) return false;
+    if (!ps2_ssx3_fe_launch::request(goal.event, goal.typeArg, goal.rulesArg, 1,
+                                     pickerSession().load(std::memory_order_acquire)))
+        return false;
     directVenue() = goal.map;
     return true;
 }

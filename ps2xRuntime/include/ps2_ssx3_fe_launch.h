@@ -12,6 +12,9 @@ namespace ps2_ssx3_fe_launch
 struct Request
 {
     uint32_t event = 0, type = 0, rules = 0, context = 0;
+    // tk-fe-2: picker-session generation stamped at park. The FE consumer
+    // drops requests from a closed session instead of firing them later.
+    uint64_t session = 0;
 };
 struct Mailbox
 {
@@ -24,12 +27,22 @@ struct Mailbox
 };
 inline Mailbox &mailbox() { static Mailbox m; return m; }
 
-inline bool request(uint32_t event, uint32_t type, uint32_t rules, uint32_t context)
+inline bool request(uint32_t event, uint32_t type, uint32_t rules, uint32_t context, uint64_t session)
 {
     auto &m = mailbox();
     std::lock_guard<std::mutex> lock(m.mutex);
-    if (m.active) return false;
-    m.args = {event, type, rules, context};
+    // tk-fe-2 (Brad multi-tap): a re-tap while the request is still parked
+    // (unconsumed) supersedes it — newest tap wins — so tapping Race then
+    // Showoff can never stack two launches. Once the FE boundary consumes
+    // the request the native transition owns it and a new tap is refused.
+    if (m.active && !m.pending) return false;
+    if (m.pending)
+    {
+        // logLocked is defined below; inline the supersede line here.
+        std::fprintf(stderr, "[fe-launch] id=%llu stage=superseded-before-consume event=%u type=%u rules=%u\n",
+                     static_cast<unsigned long long>(m.serial), m.args.event, m.args.type, m.args.rules);
+    }
+    m.args = {event, type, rules, context, session};
     m.active = m.pending = true;
     m.loading = m.playing = false;
     ++m.serial;
@@ -38,11 +51,26 @@ inline bool request(uint32_t event, uint32_t type, uint32_t rules, uint32_t cont
     m.requested = std::chrono::steady_clock::now();
     return true;
 }
-inline bool take(Request &out)
+// tk-fe-2: the FE boundary consumes only requests stamped with the live
+// picker session. A request parked by a closed session (tap, back out,
+// re-enter) is dropped here — never fired by a later accept — so stale
+// venue/audio words can never leak into the next launch.
+inline bool take(Request &out, uint64_t liveSession)
 {
     auto &m = mailbox();
     std::lock_guard<std::mutex> lock(m.mutex);
     if (!m.pending) return false;
+    if (m.args.session != liveSession)
+    {
+        std::fprintf(stderr,
+                     "[fe-launch] id=%llu stage=stale-session-drop event=%u type=%u rules=%u "
+                     "request_session=%llu live_session=%llu\n",
+                     static_cast<unsigned long long>(m.serial), m.args.event, m.args.type, m.args.rules,
+                     static_cast<unsigned long long>(m.args.session),
+                     static_cast<unsigned long long>(liveSession));
+        m.active = m.pending = false;
+        return false;
+    }
     out = m.args;
     m.pending = false;
     return true;

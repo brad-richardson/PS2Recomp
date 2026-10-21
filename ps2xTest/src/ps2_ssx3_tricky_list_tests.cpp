@@ -221,37 +221,56 @@ void register_ps2_ssx3_tricky_list_tests()
                {
             namespace fe = ps2_ssx3_fe_launch;
             fe::finish(0);
-            t.IsTrue(fe::request(11, 1, 2, 1), "first request accepted");
-            t.IsFalse(fe::request(0, 0, 0, 1), "double tap cannot replace request");
+            t.IsTrue(fe::request(11, 1, 2, 1, 7), "first request accepted");
+            // tk-fe-2: a re-tap while parked supersedes (newest wins).
+            t.IsTrue(fe::request(12, 0, 0, 1, 7), "re-tap supersedes parked request");
             fe::Request r;
-            t.IsTrue(fe::take(r), "guest takes request");
-            t.Equals(r.event, 11u, "event survives");
-            t.Equals(r.type, 1u, "type survives");
-            t.Equals(r.rules, 2u, "rules survive");
+            t.IsTrue(fe::take(r, 7), "guest takes request");
+            t.Equals(r.event, 12u, "superseding event survives");
+            t.Equals(r.type, 0u, "type survives");
+            t.Equals(r.rules, 0u, "rules survive");
             t.Equals(r.context, 1u, "context survives");
-            t.IsFalse(fe::take(r), "second guest take cannot replay");
+            t.IsFalse(fe::take(r, 7), "second guest take cannot replay");
             fe::injected(0x4000); fe::injected(0x4000);
             fe::injected(0); fe::injected(0x5000);
             t.Equals(fe::mailbox().injectedPresses, uint64_t(3), "counts button edges, not holds");
             t.Equals(fe::mailbox().injectedSamples, uint64_t(3), "held samples retained");
             fe::finish(0);
-            t.IsTrue(fe::request(1, 0, 0, 1), "next event allowed after exit");
+            t.IsTrue(fe::request(1, 0, 0, 1, 7), "next event allowed after exit");
             t.Equals(fe::mailbox().injectedPresses, uint64_t(0), "new request starts clean");
             fe::finish(0);
-            t.IsFalse(fe::take(r), "exit cancels pending request"); });
+            t.IsFalse(fe::take(r, 7), "exit cancels pending request"); });
         tc.Run("FE cancellation only withdraws an unconsumed request", [&](TestCase &t)
                {
             namespace fe = ps2_ssx3_fe_launch;
             fe::finish(0);
-            t.IsTrue(fe::request(7, 3, 2, 1), "pending request accepted");
+            t.IsTrue(fe::request(7, 3, 2, 1, 7), "pending request accepted");
             t.IsTrue(fe::cancelPending(0), "cancel wins before guest consume");
             fe::Request r;
-            t.IsFalse(fe::take(r), "cancelled request cannot reach guest");
-            t.IsTrue(fe::request(11, 6, 5, 1), "new request accepted after cancellation");
-            t.IsTrue(fe::take(r), "guest takes new request");
+            t.IsFalse(fe::take(r, 7), "cancelled request cannot reach guest");
+            t.IsTrue(fe::request(11, 6, 5, 1, 7), "new request accepted after cancellation");
+            t.IsTrue(fe::take(r, 7), "guest takes new request");
             t.IsFalse(fe::cancelPending(0), "cannot cancel native transition after consume");
-            t.IsFalse(fe::request(0, 0, 0, 1), "consumed request stays active until exit");
+            t.IsFalse(fe::request(0, 0, 0, 1, 7), "consumed request stays active until exit");
             fe::finish(0); });
+        tc.Run("FE boundary drops requests from a closed picker session", [&](TestCase &t)
+               {
+            // tk-fe-2 (Brad misroutes): a tap parked in session 100, then a
+            // picker close + reopen (session 101), must never fire later.
+            namespace fe = ps2_ssx3_fe_launch;
+            fe::finish(0);
+            t.IsTrue(fe::request(9, 0, 0, 1, 100), "tap parks in session 100");
+            fe::Request r;
+            t.IsFalse(fe::take(r, 101), "stale session request dropped, not fired");
+            t.IsFalse(fe::mailbox().active, "dropped request frees the mailbox");
+            t.IsFalse(fe::take(r, 100), "dropped request cannot replay in its own session");
+            t.IsTrue(fe::request(9, 0, 0, 1, 101), "fresh tap in the live session accepted");
+            t.IsTrue(fe::take(r, 101), "live session request consumed");
+            t.Equals(r.event, 9u, "live event survives");
+            fe::finish(0);
+            const uint64_t before = pickerSession().load();
+            pickerSessionBump();
+            t.Equals(pickerSession().load(), before + 1u, "overlay open starts a new session"); });
         tc.Run("course table: Tricky order, targets and dual-type defaults", [](TestCase &t)
                {
             t.Equals(kCourseCount, 10u, "ten courses");

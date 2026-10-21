@@ -222,7 +222,11 @@ namespace
                 sp >= kDirectFrame && sp <= PS2_RAM_SIZE)
             {
                 ps2_ssx3_fe_launch::Request request;
-                if (ps2_ssx3_fe_launch::take(request))
+                // tk-fe-2: consume only a request from the live picker
+                // session; a stale (closed-session) park is dropped here.
+                const uint64_t liveSession =
+                    ps2_ssx3_tricky_list::pickerSession().load(std::memory_order_acquire);
+                if (ps2_ssx3_fe_launch::take(request, liveSession))
                 {
                     const auto venue = ps2_ssx3_tricky_list::takeDirectVenue();
                     if (ps2_ssx3_tricky_list::applyCourseMap(ram, PS2_RAM_SIZE, venue))
@@ -388,23 +392,40 @@ namespace
         // select, loading or title without a main-menu build, so the build
         // hook never tears the mode down. Attempt it on the game->frontend
         // edge (or a pending retry); menu navigation mid-drive is frontend
-        // without an edge and stays untouched. A refusal (loader busy) skips
-        // the record restore too and retries on later frontend frames.
+        // without an edge and stays untouched.
+        // tk-fe-2: restore the donor records FIRST (pure RAM writes, never
+        // gated), then switch the mode off. A loader stuck on mapped
+        // records keeps the mode step refused ("location X is loading")
+        // while the mapping that blocks it stays in place — restoring
+        // first lets the loader drain so the retry can complete instead of
+        // wedging with Tricky on forever (morning-build post-race freeze).
+        // tkTeardownStuck counts consecutive refused attempts (reset on
+        // success); the watchdog logs every 60th while wedged.
+        static uint64_t tkTeardownStuck = 0;
         if (eventExitStep(s.wasGame, false, s.tricky, s.teardownPending) == EventExitAction::Attempt)
         {
+            const bool restoreOk = ps2_ssx3_tricky_list::restoreAllCourseMaps(rdram, PS2_RAM_SIZE);
             std::string msg;
             const bool modeRet = modeSet(rdram, false, msg);
             const bool refused = !modeRet && !msg.empty();
-            bool restoreOk = true;
-            if (!refused)
-                restoreOk = ps2_ssx3_tricky_list::restoreAllCourseMaps(rdram, PS2_RAM_SIZE);
             const EventExitResult r = eventExitApplied(refused, restoreOk);
             s.tricky = r.tricky;
             s.teardownPending = r.pending;
-            if (refused)
-                tkLog(runtime, std::string("event exit: teardown deferred (") + msg + ")");
+            if (r.pending)
+            {
+                // Stuck-teardown watchdog: loud, device-visible, 1/sec. A
+                // transient loader-busy clears on retry; a persistent
+                // refusal names its reason instead of wedging silently.
+                if (++tkTeardownStuck % 60u == 1u)
+                    tkLog(runtime, std::string("event exit: teardown STUCK attempts=") +
+                                      std::to_string(tkTeardownStuck) + " (" +
+                                      (refused ? msg : "map restore failed") + ")");
+            }
             else
+            {
+                tkTeardownStuck = 0;
                 tkLog(runtime, msg.empty() ? "event exit: Tricky off (no menu build)" : msg);
+            }
         }
         if (s.wasGame)
             ps2_ssx3_fe_launch::finish(runtime->memory().gs().vsyncTick.load());
