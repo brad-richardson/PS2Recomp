@@ -404,11 +404,10 @@ void register_ps2_ssx3_tricky_list_tests()
 
         tc.Run("refinement: every cell direct on clean donors, no ev14", [](TestCase &t)
                {
-            // Refinement: all 10 courses x {Race, Showoff} direct, no
-            // navigator fallback in the picker path. Race cells on ev0
-            // (Snowdream keeps native ev1), Showoff cells on ev11 (Pipe's
-            // own freestyle shell; donor ev14 dies in loading). Both
-            // options of every course are directable.
+            // tk-racedonor-1: fixed cells ride their converted location's own
+            // stock event shell (screened carriers, rel3). RED cells
+            // (Elys/Aloha/Untrack) keep the legacy shells: no removal,
+            // no crash. Both options of every course stay directable.
             for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
             {
                 const Course &c = kCourses[i];
@@ -421,9 +420,6 @@ void register_ps2_ssx3_tricky_list_tests()
                     t.Equals(goal.ok, cell, std::string("directable == known cell: ") + c.name);
                     if (goal.ok)
                     {
-                        const int stock = (c.opts[m].map.event >= 0) ? c.opts[m].map.event : c.event;
-                        t.Equals(goal.event, directDonorFor(c.opts[m].type, c.opts[m].row, stock),
-                                 "clean-shell donor");
                         t.IsTrue(goal.mapped, "world pinned for the records guard");
                         t.IsTrue(goal.event != 14, "no direct cell rides ev14");
                     }
@@ -434,17 +430,33 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(g.ok && g.event == 0, "Garibaldi donor ev0 (probe shape)");
             t.Equals(std::string(g.map.archive), std::string("GARI"), "Garibaldi archive");
             const DirectGoal gs = directGoalFor(gari, gari.opts[1]);
-            t.IsTrue(gs.ok && gs.event == 11, "Garibaldi Showoff donor ev11");
+            t.IsTrue(gs.ok && gs.event == 0 && gs.typeArg == 6 && gs.rulesArg == 5,
+                     "Garibaldi Showoff donor ev0 (ARA1 carrier)");
             const Course &mesa = kCourses[3];
             const DirectGoal m = directGoalFor(mesa, mesa.opts[0]);
-            t.IsTrue(m.ok && m.event == 0, "Mesablanca donor ev0");
+            t.IsTrue(m.ok && m.event == 2 && m.typeArg == 0 && m.rulesArg == 0,
+                     "Mesablanca Race donor ev2 (CRA3 carrier)");
             t.Equals(std::string(m.map.archive), std::string("MESA"), "Mesablanca archive");
+            const DirectGoal msl = directGoalFor(mesa, mesa.opts[1]);
+            t.IsTrue(msl.ok && msl.event == 2 && msl.typeArg == 6 && msl.rulesArg == 5,
+                     "Mesablanca Showoff donor ev2");
             const Course &snow = kCourses[1];
             const DirectGoal s = directGoalFor(snow, snow.opts[0]);
             t.IsTrue(s.ok && s.event == 1, "Snowdream native donor ev1");
+            const DirectGoal ssl = directGoalFor(snow, snow.opts[1]);
+            t.IsTrue(ssl.ok && ssl.event == 1 && ssl.typeArg == 6 && ssl.rulesArg == 5,
+                     "Snowdream Showoff donor ev1 (BRA2 carrier)");
+            const Course &merq = kCourses[4];
+            const DirectGoal q = directGoalFor(merq, merq.opts[0]);
+            t.IsTrue(q.ok && q.event == 4 && q.typeArg == 0 && q.rulesArg == 0,
+                     "Merqury City Race donor ev4 (ERA5 carrier)");
+            const DirectGoal qsl = directGoalFor(merq, merq.opts[1]);
+            t.IsTrue(qsl.ok && qsl.event == 4 && qsl.typeArg == 6 && qsl.rulesArg == 5,
+                     "Merqury City Showoff donor ev4");
             const Course &pipe = kCourses[6];
             const DirectGoal p = directGoalFor(pipe, pipe.opts[0]);
-            t.IsTrue(p.ok && p.event == 0, "Pipedream Race donor ev0 (world PIPE)");
+            t.IsTrue(p.ok && p.event == 11 && p.typeArg == 0 && p.rulesArg == 0,
+                     "Pipedream Race donor ev11 (BHP1 carrier, Race rules)");
             t.Equals(std::string(p.map.archive), std::string("PIPE"), "Pipedream world pin");
             const DirectGoal ps = directGoalFor(pipe, pipe.opts[1]);
             t.IsTrue(ps.ok && ps.event == 7, "Pipedream Showoff donor ev7 (trial: ev11 dies on Brad card)");
@@ -461,12 +473,27 @@ void register_ps2_ssx3_tricky_list_tests()
             int sta = -1, sra = -1;
             t.IsTrue(directCellArgs(1, 3, sta, sra) && sta == 6 && sra == 5, "showoff args (6,5)");
             const Course &mega = kCourses[8];
-            t.IsTrue(directGoalFor(mega, mega.opts[0]).ok, "Megaplex Race directable (donor ev0)");
-            t.IsTrue(directGoalFor(mega, mega.opts[1]).ok, "Megaplex Showoff directable (donor ev11)");
+            const DirectGoal mg = directGoalFor(mega, mega.opts[0]);
+            t.IsTrue(mg.ok && mg.event == 15 && mg.typeArg == 5 && mg.rulesArg == 4,
+                     "Megaplex Race donor ev15 (DBC2 carrier)");
+            const DirectGoal mgs = directGoalFor(mega, mega.opts[1]);
+            t.IsTrue(mgs.ok && mgs.event == 15 && mgs.typeArg == 6 && mgs.rulesArg == 5,
+                     "Megaplex Showoff donor ev15");
+            const Course &elys = kCourses[2];
+            const DirectGoal e = directGoalFor(elys, elys.opts[0]);
+            t.IsTrue(e.ok && e.event == 0, "Elysium Race keeps legacy ev0 (BLOCKED)");
+            const DirectGoal esl = directGoalFor(elys, elys.opts[1]);
+            t.IsTrue(esl.ok && esl.event == 11, "Elysium Showoff keeps legacy ev11 (BLOCKED)");
             const Course &untrack = kCourses[7];
             t.IsTrue(directGoalFor(untrack, untrack.opts[0]).ok, "Untracked Race directable (donor ev0)");
+            t.IsTrue(directGoalFor(untrack, untrack.opts[1]).ok, "Untracked Showoff keeps legacy ev11 (BLOCKED)");
             const Course &alaska = kCourses[9];
-            t.IsTrue(directGoalFor(alaska, alaska.opts[1]).ok, "Alaska Showoff directable (donor ev11)");
+            const DirectGoal ak = directGoalFor(alaska, alaska.opts[0]);
+            t.IsTrue(ak.ok && ak.event == 6 && ak.typeArg == 0 && ak.rulesArg == 0,
+                     "Alaska Race donor ev6 (DSS2 carrier)");
+            const DirectGoal aks = directGoalFor(alaska, alaska.opts[1]);
+            t.IsTrue(aks.ok && aks.event == 6 && aks.typeArg == 1 && aks.rulesArg == 1,
+                     "Alaska Showoff donor ev6 (own freestyle args)");
             t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
             t.Equals(directCourseByCode("Garibaldi"), 0, "name lookup");
             t.Equals(directCourseByCode("mesa"), 3, "archive lookup case-insensitive");

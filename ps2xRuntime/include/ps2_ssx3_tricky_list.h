@@ -209,6 +209,36 @@ inline int directDonorFor(int type, int row, int stockEvent)
     return stockEvent;
 }
 
+// tk-racedonor-1: screened carrier donors. Each fixed cell rides its
+// converted location's own stock event shell with measured accept args
+// (guest-verified on rel3: location streams, GO reached, no missing-target
+// on fresh cards). Keyed by course event + mode. RED cells (Elys/Aloha/
+// Untrack) keep the legacy shells: no removal, no crash.
+struct CarrierCell
+{
+    int8_t courseEvent; // c.event: carrier = the course's own stock event
+    int8_t showoff;     // 0 = Race cell, 1 = Showoff cell
+    int8_t donor;       // donor event to write + queue
+    int8_t typeArg;     // a1 for the 0x144df0 config call
+    int8_t rulesArg;    // a1 for the 0x1451e8 config call
+};
+inline constexpr CarrierCell kCarrierCells[] = {
+    {2, 0, 2, 0, 0},   // Mesa Race: own carrier + Race args
+    {2, 1, 2, 6, 5},   // Mesa Showoff: own carrier + Jam args
+    {4, 0, 4, 0, 0},   // Merqury City Race
+    {4, 1, 4, 6, 5},   // Merqury City Showoff
+    {11, 0, 11, 0, 0}, // Pipedream Race: BHP1 under Race rules
+    {6, 0, 6, 0, 0},   // Alaska Race
+    {6, 1, 6, 1, 1},   // Alaska Showoff: own freestyle args
+    {15, 0, 15, 5, 4}, // Mega Race: P2 Race row2 args
+    {15, 1, 15, 6, 5}, // Mega Showoff: P2 Freestyle row3 args
+    {0, 1, 0, 6, 5},   // Garibaldi Showoff: ARA1 under Jam rules
+    {1, 1, 1, 6, 5},   // Snowdream Showoff: BRA2 under Jam rules
+    // NOTE: Pipedream Showoff stays ev7+(3,2) (legacy): ev11+PIPE SIGABRTs
+    // on Brad's card (0x80000080 @9400, fresh-clean). RED Race/Showoff cells
+    // (Elys ev16, Aloha ev14, Untrack ev7) keep legacy shells (BLOCKED).
+};
+
 inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
 {
     DirectGoal d;
@@ -219,6 +249,18 @@ inline DirectGoal directGoalFor(const Course &c, const CourseOption &goal)
     // Donor shell: clean-shell override, else the table's stock donor.
     const int stock = (goal.map.event >= 0) ? goal.map.event : c.event;
     d.event = directDonorFor(goal.type, goal.row, stock);
+    // Carrier override: screened cells ride their own location's shell.
+    const bool showoff = goal.type == 1;
+    for (const CarrierCell &k : kCarrierCells)
+    {
+        if (k.courseEvent == c.event && (k.showoff != 0) == showoff)
+        {
+            d.event = k.donor;
+            d.typeArg = k.typeArg;
+            d.rulesArg = k.rulesArg;
+            break;
+        }
+    }
     // Launch-time world pin: the explicit map, else the course's own
     // archive+name on its donor (the proven Garibaldi shape). This also
     // marks the ride for the records guard, like the navigator's edge.
