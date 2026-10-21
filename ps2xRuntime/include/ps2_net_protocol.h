@@ -132,6 +132,37 @@ namespace ps2_net_protocol
         return true;
     }
 
+    // boot-seq-1 (B): rescan cadence for the Quick Play label. Scan on
+    // first sight and on menu build/change (words changed). A skip for
+    // these words stands until the words change (the title has no Online
+    // row; rescanning it every 30 ticks burned host CPU + Documents stderr
+    // on every boot). An intact patch never rescans; an intact-loss after
+    // a patch rescans (menu rebuild), backed off so a flapping pool cannot
+    // rescan every read. Pure: the caller owns the cursor.
+    struct QpLabelScanCursor
+    {
+        uint32_t main = 0u;
+        uint32_t sub = 0u;
+        uint64_t tick = 0u;
+        bool scannedOnce = false;
+        bool patched = false;
+    };
+    inline bool qpLabelShouldRescan(const QpLabelScanCursor &cursor,
+                                    uint32_t sightMain, uint32_t sightSub,
+                                    bool intact, uint64_t tick,
+                                    uint64_t refireTicks)
+    {
+        if (!cursor.scannedOnce)
+            return true;
+        if (sightMain != cursor.main || sightSub != cursor.sub)
+            return true;
+        if (intact)
+            return false;
+        if (!cursor.patched)
+            return false;
+        return tick - cursor.tick >= refireTicks;
+    }
+
     // qp-label-2: drop restored-slot ghosts from a scan's candidate
     // list. A restore zeroes the slack and points the dead slot back at
     // the stock text, so the dead slot still matches a later scan; the

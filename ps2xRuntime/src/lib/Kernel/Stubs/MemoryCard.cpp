@@ -11,6 +11,15 @@ namespace ps2_stubs
 {
     namespace
     {
+        // boot-seq-1 (B): routine card-path stderr is Documents-backed
+        // flash I/O on device. Gate it behind the debug flag (default
+        // off); genuine errors always log. Non-cached getenv: these are
+        // cold paths (a few per boot), not per-read.
+        inline bool mcTraceVerbose()
+        {
+            const char *v = std::getenv("PS2X_DEV");
+            return v != nullptr && v[0] == '1' && v[1] == '\0';
+        }
         constexpr int32_t kMcCmdGetInfo = 0x01;
         constexpr int32_t kMcCmdOpen = 0x02;
         constexpr int32_t kMcCmdClose = 0x03;
@@ -604,9 +613,11 @@ namespace ps2_stubs
 
         RUNTIME_LOG("[MC] Chdir port=" << port << " '" << requestedDir
                                        << "' -> result=" << result << " cwd='" << currentDir << "'");
-        // v0 encoder-night D2: visible chdir log.
-        std::fprintf(stderr, " [MC] chdir port=%d req='%s' res=%d cwd='%s'\n", port,
-                     requestedDir.c_str(), result, currentDir.c_str());
+        // v0 encoder-night D2: visible chdir log. boot-seq-1 (B):
+        // routine chdirs stay behind PS2X_DEV=1; failures always log.
+        if (result != 0 || mcTraceVerbose())
+            std::fprintf(stderr, " [MC] chdir port=%d req='%s' res=%d cwd='%s'\n", port,
+                         requestedDir.c_str(), result, currentDir.c_str());
         writeMcCString(rdram, currentDirAddr, currentDir);
         setReturnS32(ctx, 0);
     }
@@ -886,11 +897,13 @@ namespace ps2_stubs
                         pattern = "*";
                     }
                     // v0 encoder-night D2: visible probe log (which form
-                    // the game uses for the login check).
-                    std::fprintf(stderr,
-                                 " [MC] GetDir port=%d raw='%s' pat='%s' par='%s' wild=%d\n",
-                                 port, rawPath.c_str(), pattern.c_str(),
-                                 parentRel.string().c_str(), hasWildcard ? 1 : 0);
+                    // the game uses for the login check). boot-seq-1 (B):
+                    // behind PS2X_DEV=1 (a miss list is a normal probe).
+                    if (mcTraceVerbose())
+                        std::fprintf(stderr,
+                                     " [MC] GetDir port=%d raw='%s' pat='%s' par='%s' wild=%d\n",
+                                     port, rawPath.c_str(), pattern.c_str(),
+                                     parentRel.string().c_str(), hasWildcard ? 1 : 0);
 
                     std::filesystem::path hostDir = getMcRootPath(port);
                     if (!parentRel.empty())
@@ -995,9 +1008,11 @@ namespace ps2_stubs
                             }
                             if (!haveLogin)
                             {
-                                std::fprintf(stderr,
-                                             " [MC] QP login injected pat='%s' par='%s'\n",
-                                             pattern.c_str(), parentRel.string().c_str());
+                                // boot-seq-1 (B): routine fake path behind PS2X_DEV=1.
+                                if (mcTraceVerbose())
+                                    std::fprintf(stderr,
+                                                 " [MC] QP login injected pat='%s' par='%s'\n",
+                                                 pattern.c_str(), parentRel.string().c_str());
                                 const bool inner =
                                     toLowerAscii(parentRel.filename().string()) ==
                                     "pscd10088slogin";
@@ -1232,10 +1247,13 @@ namespace ps2_stubs
                     const bool exists = std::filesystem::exists(hostPath, ec) && !ec;
                     // v0 encoder-night D2: visible open log (all paths;
                     // opens are rare, reads/writes stay unlogged).
-                    std::fprintf(stderr,
-                                 " [MC] open port=%d guest='%s' creat=%d exists=%d\n",
-                                 port, guestPath.c_str(), create ? 1 : 0,
-                                 exists ? 1 : 0);
+                    // boot-seq-1 (B): routine opens behind PS2X_DEV=1;
+                    // host filesystem errors always log.
+                    if (ec || mcTraceVerbose())
+                        std::fprintf(stderr,
+                                     " [MC] open port=%d guest='%s' creat=%d exists=%d\n",
+                                     port, guestPath.c_str(), create ? 1 : 0,
+                                     exists ? 1 : 0);
                     // v0 encoder-night: serve the login dir's children faked
                     // (card never written). Data file: host-side cache when
                     // the dance captured one (valid bytes, auto-auth with
@@ -1268,10 +1286,17 @@ namespace ps2_stubs
                                 src = "zeros";
                             }
                         }
-                        std::fprintf(stderr,
-                                     " [MC] QP login open guest='%s' data=%d src=%s n=%zu\n",
-                                     guestPath.c_str(), isData ? 1 : 0, src, prefill.size());
+                        // boot-seq-1 (B): routine fake-open behind PS2X_DEV=1;
+                        // a tmpfile failure is a genuine error: always log.
+                        if (mcTraceVerbose())
+                            std::fprintf(stderr,
+                                         " [MC] QP login open guest='%s' data=%d src=%s n=%zu\n",
+                                         guestPath.c_str(), isData ? 1 : 0, src, prefill.size());
                         FILE *fake = std::tmpfile();
+                        if (!fake)
+                            std::fprintf(stderr,
+                                         " [MC] QP login open FAILED tmpfile guest='%s'\n",
+                                         guestPath.c_str());
                         bool served = false;
                         if (fake)
                         {
@@ -1608,10 +1633,12 @@ namespace ps2_stubs
                     {
                         const bool isData =
                             qpIsLoginDataHostPath(it->second.hostPath);
-                        std::fprintf(stderr,
-                                     " [MC] QP login write fd=%d n=%d data=%d host='%s'\n",
-                                     fd, size, isData ? 1 : 0,
-                                     it->second.hostPath.string().c_str());
+                        // boot-seq-1 (B): routine phantom write behind PS2X_DEV=1.
+                        if (mcTraceVerbose())
+                            std::fprintf(stderr,
+                                         " [MC] QP login write fd=%d n=%d data=%d host='%s'\n",
+                                         fd, size, isData ? 1 : 0,
+                                         it->second.hostPath.string().c_str());
                         if (isData)
                         {
                             ps2_net::qpNoteLoginBytes(src, static_cast<size_t>(size));

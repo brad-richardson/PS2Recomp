@@ -1062,17 +1062,19 @@ namespace ps2_stubs
             std::fprintf(stderr, "[qpnav] label: %s at tick=%llu\n", reason,
                          static_cast<unsigned long long>(tick));
         }
-        void qpNavLabelCensus(const char *reason, uint64_t tick)
+        // boot-seq-1 (B): one line per scan-outcome change. Steady-state
+        // silence is unambiguous (any change prints); no time floor.
+        // key is the outcome class (counts/addresses live in detail and
+        // print only when the class changes).
+        void qpNavLabelOutcome(const char *key, const char *detail, uint64_t tick)
         {
-            static char last[256] = {};
-            static uint64_t lastTick = 0u;
-            if (std::strcmp(last, reason) == 0 && tick - lastTick < 120u)
+            static char last[64] = {};
+            if (std::strcmp(last, key) == 0)
             {
                 return;
             }
-            std::snprintf(last, sizeof(last), "%s", reason);
-            lastTick = tick;
-            std::fprintf(stderr, "[qpnav] label: %s at tick=%llu\n", reason,
+            std::snprintf(last, sizeof(last), "%s", key);
+            std::fprintf(stderr, "[qpnav] label: %s at tick=%llu\n", detail,
                          static_cast<unsigned long long>(tick));
         }
         // qp-label-2 B8: one words line per menu transition (120-tick
@@ -1111,10 +1113,12 @@ namespace ps2_stubs
             // (same pool bytes, different screen). Short-circuit only for
             // the same words; rescan at most every 30 ticks otherwise so
             // a rebuild re-patches within half a second.
-            static uint64_t scanTick = 0u;
-            static uint32_t scanMain = 0u;
-            static uint32_t scanSub = 0u;
-            static bool scannedOnce = false;
+            // boot-seq-1 (B): scan once per menu build/change. A skip for
+            // these words stands until the words change (title skips
+            // rescanned every 30 ticks: 73 wasted arena sweeps per boot);
+            // an intact-loss after a patch still refires (rebuild).
+            static ps2_net_protocol::QpLabelScanCursor scanCursor;
+            static constexpr uint64_t kQpLabelRefireTicks = 30u;
             const uint32_t sightMain = qpNavReadMenu(rdram, kQpNavMenuMain);
             const uint32_t sightSub = qpNavReadMenu(rdram, kQpNavMenuSub);
             // qp-label-2 B10: a redirect patch is intact when the live
@@ -1138,7 +1142,8 @@ namespace ps2_stubs
                     intact = livePtr == g_qpLabelSlot + 8u && liveLen == kQpLabelNewLen;
                 }
             }
-            if (intact && scannedOnce && sightMain == scanMain && sightSub == scanSub)
+            if (intact && scanCursor.scannedOnce && sightMain == scanCursor.main &&
+                sightSub == scanCursor.sub)
             {
                 char note[96];
                 std::snprintf(note, sizeof(note),
@@ -1146,15 +1151,16 @@ namespace ps2_stubs
                 qpNavLabelNote(note, tick);
                 return;
             }
-            if (scannedOnce && sightMain == scanMain && sightSub == scanSub &&
-                tick - scanTick < 30u)
+            if (!ps2_net_protocol::qpLabelShouldRescan(scanCursor, sightMain, sightSub,
+                                                       intact, tick, kQpLabelRefireTicks))
             {
                 return;
             }
-            scanTick = tick;
-            scanMain = sightMain;
-            scanSub = sightSub;
-            scannedOnce = true;
+            scanCursor.tick = tick;
+            scanCursor.main = sightMain;
+            scanCursor.sub = sightSub;
+            scanCursor.scannedOnce = true;
+            scanCursor.patched = false;
             // The surveyed frontend pool spans this arena. Match contents
             // rather than a particular allocation; reject ambiguous matches.
             // qp-label-2: post-race rebuilds move the handle set (arena and
@@ -1201,15 +1207,12 @@ namespace ps2_stubs
                 }
                 ++nText;
             }
-            {
-                char census[256];
-                std::snprintf(census, sizeof(census),
-                              "scan census len7=%u text=%u header=%u slackok=%u (0x%x,0x%x,0x%x,0x%x)",
-                              censusLen, nText, censusHeader, censusSlack,
-                              textAddrs[0], textAddrs[1],
-                              textAddrs[2], textAddrs[3]);
-                qpNavLabelCensus(census, tick);
-            }
+            // boot-seq-1 (B): census counts ride into the single
+            // outcome-change line below; no per-scan print.
+            char censusTail[96];
+            std::snprintf(censusTail, sizeof(censusTail),
+                          "[len7=%u text=%u header=%u slackok=%u]",
+                          censusLen, nText, censusHeader, censusSlack);
             const uint32_t nGhost =
                 g_qpLabelGhostCount < 8u ? g_qpLabelGhostCount : 8u;
             // Strict: header-near + clean slack. Loose: clean slack only
@@ -1261,7 +1264,10 @@ namespace ps2_stubs
                     isGhost = isGhost || g_qpLabelGhosts[g] == textAddrs[0];
                 if (isGhost)
                 {
-                    qpNavLabelNote("skip: only ghosted match", tick);
+                    char detail[256];
+                    std::snprintf(detail, sizeof(detail), "skip: only ghosted match %s",
+                                  censusTail);
+                    qpNavLabelOutcome("skip-ghosted", detail, tick);
                     return;
                 }
                 // Dirty-slack single: fall through to the verify, which
@@ -1270,16 +1276,19 @@ namespace ps2_stubs
             }
             else if (nLooseKept == 0 && nText == 0u)
             {
-                qpNavLabelNote("skip: no stock Online text match", tick);
+                char detail[256];
+                std::snprintf(detail, sizeof(detail), "skip: no stock Online text match %s",
+                              censusTail);
+                qpNavLabelOutcome("skip-no-match", detail, tick);
                 return;
             }
             else
             {
-                char reason[160];
-                std::snprintf(reason, sizeof(reason),
-                              "skip: ambiguous %u text matches (%d loose: 0x%x,0x%x)",
-                              nText, nLooseKept, looseKept[0], looseKept[1]);
-                qpNavLabelNote(reason, tick);
+                char detail[256];
+                std::snprintf(detail, sizeof(detail),
+                              "skip: ambiguous %u text matches (%d loose) %s",
+                              nText, nLooseKept, censusTail);
+                qpNavLabelOutcome("skip-ambiguous", detail, tick);
                 return;
             }
             const uint32_t ptr = qpNavReadMenu(rdram, slot);
@@ -1289,7 +1298,10 @@ namespace ps2_stubs
                 std::memcmp(text, kStockText, sizeof(text)) != 0 ||
                 !qpNavReadBytes(rdram, slot + 8u, slack, sizeof(slack)))
             {
-                qpNavLabelNote("skip: text verify failed", tick);
+                char detail[256];
+                std::snprintf(detail, sizeof(detail), "skip: text verify failed %s",
+                              censusTail);
+                qpNavLabelOutcome("skip-verify-failed", detail, tick);
                 return;
             }
             bool slackClean = true;
@@ -1328,12 +1340,10 @@ namespace ps2_stubs
                 }
                 if (redirectBuf == 0u)
                 {
-                    char slackNote[160];
-                    std::snprintf(slackNote, sizeof(slackNote),
-                                  "skip: slack in use %02x%02x%02x%02x%02x%02x%02x%02x",
-                                  slack[0], slack[1], slack[2], slack[3],
-                                  slack[4], slack[5], slack[6], slack[7]);
-                    qpNavLabelNote(slackNote, tick);
+                    char detail[256];
+                    std::snprintf(detail, sizeof(detail), "skip: slack in use %s",
+                                  censusTail);
+                    qpNavLabelOutcome("skip-slack-in-use", detail, tick);
                     return;
                 }
             }
@@ -1352,13 +1362,16 @@ namespace ps2_stubs
             g_qpLabelSlot = slot;
             g_qpLabelStockPtr = ptr;
             g_qpLabelBuf = redirectBuf;
+            scanCursor.patched = true;
             {
-                char patched[160];
-                std::snprintf(patched, sizeof(patched),
-                              "main-menu Online -> Online (Alpha) at slot=0x%x%s%s",
+                const char *key = redirectBuf != 0u ? "patched-redirect"
+                                  : textFallback ? "patched-text-fallback" : "patched";
+                char detail[256];
+                std::snprintf(detail, sizeof(detail),
+                              "main-menu Online -> Online (Alpha) at slot=0x%x%s%s %s",
                               slot, textFallback ? " (text fallback)" : "",
-                    redirectBuf != 0u ? " (redirect)" : "");
-                qpNavLabelNote(patched, tick);
+                    redirectBuf != 0u ? " (redirect)" : "", censusTail);
+                qpNavLabelOutcome(key, detail, tick);
             }
         }
         // f3 lesson: restore stock + zero the text when the menu is left

@@ -172,6 +172,30 @@ namespace
             t.Equals(qpLabelFilterGhosts(nullptr, 0, ghosts, 1, kept, 2), 0, "empty scan");
         });
 
+        tc.Run("boot-seq-1: label rescans on build/change, never on steady skip", [](TestCase &t)
+        {
+            using ps2_net_protocol::QpLabelScanCursor;
+            using ps2_net_protocol::qpLabelShouldRescan;
+            constexpr uint64_t kRefire = 30u;
+            QpLabelScanCursor fresh;
+            t.IsTrue(qpLabelShouldRescan(fresh, 1u, 7u, false, 500u, kRefire),
+                     "first sight scans");
+            QpLabelScanCursor title{1u, 7u, 500u, true, false};
+            t.IsFalse(qpLabelShouldRescan(title, 1u, 7u, false, 2000u, kRefire),
+                      "title skip stands: same words, nothing patched");
+            t.IsTrue(qpLabelShouldRescan(title, 2u, 9u, false, 2000u, kRefire),
+                     "menu build (words changed) rescans");
+            t.IsFalse(qpLabelShouldRescan(title, 1u, 7u, true, 2000u, kRefire),
+                      "intact patch never rescans");
+            QpLabelScanCursor rebuilt{2u, 9u, 1000u, true, true};
+            t.IsFalse(qpLabelShouldRescan(rebuilt, 2u, 9u, false, 1010u, kRefire),
+                      "rebuild refire backs off inside the floor");
+            t.IsTrue(qpLabelShouldRescan(rebuilt, 2u, 9u, false, 1030u, kRefire),
+                     "rebuild refires at the floor");
+            t.IsFalse(qpLabelShouldRescan(rebuilt, 2u, 9u, true, 2000u, kRefire),
+                      "re-patched menu stays silent");
+        });
+
         tc.Run("online-stock-2: ST keep-alives are state only when STOCK120 is on", [](TestCase &t)
         {
             const uint8_t st[] = {'O', '5', 'K', 'A', 'S', 'T', 1, 2, 3};
