@@ -992,8 +992,19 @@ namespace ps2_stubs
         // Main-menu handles and text relocate after rebuilding the menu.
         // Match the Online text + nearby Main Menu header, then use only
         // verified zero slack. Remember the original handle for restoration.
+        // qp-label-2 B10: rebuilt menus on packed pools (brad card) carry
+        // dirty slack, so in-place overwrite could hit a live neighbor.
+        // Then redirect instead: the handle points at a restored ghost's
+        // zeroed text area (dead bytes by construction) and the ghost is
+        // re-ghosted on restore. g_qpLabelBuf is 0 for in-place patches.
         uint32_t g_qpLabelSlot = 0u;
         uint32_t g_qpLabelStockPtr = 0u;
+        uint32_t g_qpLabelBuf = 0u;
+        // qp-label-2: restored slots stay scan-matching (stock text back,
+        // slack zeroed), so the rebuilt menu's set plus the dead slot
+        // reads ambiguous. Remember the last few restores and skip them.
+        uint32_t g_qpLabelGhosts[8] = {};
+        uint32_t g_qpLabelGhostCount = 0u;
         constexpr uint32_t kQpLabelStockLen = 7u;
         // online-stock-2 (Brad 10-17): "Quick Play (Alpha)". The handle
         // slots sit 0x100 apart, so the +8 slack spans 248 bytes; the 38
@@ -1035,6 +1046,60 @@ namespace ps2_stubs
             }
             return false;
         }
+        // qp-label-2 B9: one line per outcome, repeats re-logged on a
+        // time floor (F6-brad/F7: pure transition dedup made steady-state
+        // silence ambiguous — "no scans" and "same skip" looked alike).
+        // Notes re-log every 600 ticks; census keeps its 120-tick floor.
+        void qpNavLabelNote(const char *reason, uint64_t tick)
+        {
+            static char last[256] = {};
+            static uint64_t lastTick = 0u;
+            if (std::strcmp(last, reason) == 0 && tick - lastTick < 600u)
+            {
+                return;
+            }
+            std::snprintf(last, sizeof(last), "%s", reason);
+            lastTick = tick;
+            std::fprintf(stderr, "[qpnav] label: %s at tick=%llu\n", reason,
+                         static_cast<unsigned long long>(tick));
+        }
+        void qpNavLabelCensus(const char *reason, uint64_t tick)
+        {
+            static char last[256] = {};
+            static uint64_t lastTick = 0u;
+            if (std::strcmp(last, reason) == 0 && tick - lastTick < 120u)
+            {
+                return;
+            }
+            std::snprintf(last, sizeof(last), "%s", reason);
+            lastTick = tick;
+            std::fprintf(stderr, "[qpnav] label: %s at tick=%llu\n", reason,
+                         static_cast<unsigned long long>(tick));
+        }
+        // qp-label-2 B8: one words line per menu transition (120-tick
+        // floor) so scan/skip decisions carry their sight context.
+        void qpNavLabelWords(uint32_t main, uint32_t sub, uint64_t tick)
+        {
+            static uint32_t lastMain = 0u;
+            static uint32_t lastSub = 0u;
+            static uint64_t lastTick = 0u;
+            static bool first = true;
+            if (!first && main == lastMain && sub == lastSub)
+            {
+                return;
+            }
+            first = false;
+            lastMain = main;
+            lastSub = sub;
+            if (tick - lastTick < 120u)
+            {
+                return;
+            }
+            lastTick = tick;
+            std::fprintf(stderr,
+                         "[qpnav] label: words main=0x%x sub=0x%x at tick=%llu\n",
+                         main, sub, static_cast<unsigned long long>(tick));
+        }
         void qpNavPatchMenuLabel(uint8_t *rdram, uint64_t tick)
         {
             static const uint8_t kStockText[14] = {'O', 0, 'n', 0, 'l', 0, 'i', 0,
@@ -1042,28 +1107,182 @@ namespace ps2_stubs
             static const uint8_t kNewText[kQpLabelBytes] = {
                 'Q', 0, 'u', 0, 'i', 0, 'c', 0, 'k', 0, ' ', 0, 'P', 0, 'l', 0, 'a', 0, 'y', 0,
                 ' ', 0, '(', 0, 'A', 0, 'l', 0, 'p', 0, 'h', 0, 'a', 0, ')', 0, 0,   0};
-            if (g_qpLabelSlot != 0u &&
-                qpNavReadMenu(rdram, g_qpLabelSlot) == g_qpLabelSlot + 8u &&
-                qpNavReadMenu(rdram, g_qpLabelSlot + 4u) == kQpLabelNewLen)
+            // qp-label-2: rescan on every menu sight. The old intact
+            // shortcut latched a title slot across the main-menu rebuild
+            // (same pool bytes, different screen). Short-circuit only for
+            // the same words; rescan at most every 30 ticks otherwise so
+            // a rebuild re-patches within half a second.
+            static uint64_t scanTick = 0u;
+            static uint32_t scanMain = 0u;
+            static uint32_t scanSub = 0u;
+            static bool scannedOnce = false;
+            const uint32_t sightMain = qpNavReadMenu(rdram, kQpNavMenuMain);
+            const uint32_t sightSub = qpNavReadMenu(rdram, kQpNavMenuSub);
+            // qp-label-2 B10: a redirect patch is intact when the live
+            // handle still aims at the ghost text area with our length and
+            // the area still reads back our text (pool reuse of either the
+            // live entry or the ghost breaks intactness and forces rescan).
+            bool intact = false;
+            if (g_qpLabelSlot != 0u)
+            {
+                const uint32_t livePtr = qpNavReadMenu(rdram, g_qpLabelSlot);
+                const uint32_t liveLen = qpNavReadMenu(rdram, g_qpLabelSlot + 4u);
+                if (g_qpLabelBuf != 0u)
+                {
+                    uint8_t bufText[kQpLabelBytes] = {};
+                    intact = livePtr == g_qpLabelBuf && liveLen == kQpLabelNewLen &&
+                             qpNavReadBytes(rdram, g_qpLabelBuf, bufText, sizeof(bufText)) &&
+                             std::memcmp(bufText, kNewText, sizeof(bufText)) == 0;
+                }
+                else
+                {
+                    intact = livePtr == g_qpLabelSlot + 8u && liveLen == kQpLabelNewLen;
+                }
+            }
+            if (intact && scannedOnce && sightMain == scanMain && sightSub == scanSub)
+            {
+                char note[96];
+                std::snprintf(note, sizeof(note),
+                              "already patched at slot=0x%x (intact)", g_qpLabelSlot);
+                qpNavLabelNote(note, tick);
                 return;
+            }
+            if (scannedOnce && sightMain == scanMain && sightSub == scanSub &&
+                tick - scanTick < 30u)
+            {
+                return;
+            }
+            scanTick = tick;
+            scanMain = sightMain;
+            scanSub = sightSub;
+            scannedOnce = true;
             // The surveyed frontend pool spans this arena. Match contents
             // rather than a particular allocation; reject ambiguous matches.
+            // qp-label-2: post-race rebuilds move the handle set (arena and
+            // header distance change), so collect text matches with their
+            // header/slack flags, prefer header-near ones, and fall back to
+            // a unique text+slack match when the header drifted.
             uint32_t slot = 0u;
-            for (uint32_t at = 0x500000u; at < 0x600000u; at += 4u)
+            uint32_t textAddrs[9] = {};
+            uint32_t textHeader[9] = {};
+            uint32_t textSlack[9] = {};
+            uint32_t nTextStored = 0u;
+            uint32_t nText = 0u;
+            uint32_t censusLen = 0u;
+            uint32_t censusHeader = 0u;
+            uint32_t censusSlack = 0u;
+            // qp-label-2: post-race rebuilds place the handle set outside
+            // the boot arena; cover the neighboring arenas too.
+            for (uint32_t at = 0x400000u; at < 0x700000u; at += 4u)
             {
                 if (qpNavReadMenu(rdram, at + 4u) != kQpLabelStockLen) continue;
+                ++censusLen;
                 const uint32_t ptr = qpNavReadMenu(rdram, at);
                 if (ptr == 0u || ptr > PS2_RAM_SIZE - sizeof(kStockText) ||
-                    std::memcmp(rdram + ptr, kStockText, sizeof(kStockText)) != 0 ||
-                    !qpNavLabelHeaderNear(rdram, at)) continue;
+                    std::memcmp(rdram + ptr, kStockText, sizeof(kStockText)) != 0)
+                    continue;
+                const bool headerNear = qpNavLabelHeaderNear(rdram, at);
                 bool zero = true;
-                for (uint32_t n = 0; n < kQpLabelBytes; ++n)
+                for (uint32_t n = 0u; n < kQpLabelBytes; ++n)
                     zero = zero && rdram[at + 8u + n] == 0u;
-                if (!zero) continue;
-                if (slot != 0u) return;
-                slot = at;
+                if (headerNear)
+                {
+                    ++censusHeader;
+                }
+                if (zero)
+                {
+                    ++censusSlack;
+                }
+                if (nTextStored < 9u)
+                {
+                    textAddrs[nTextStored] = at;
+                    textHeader[nTextStored] = headerNear ? 1u : 0u;
+                    textSlack[nTextStored] = zero ? 1u : 0u;
+                    ++nTextStored;
+                }
+                ++nText;
             }
-            if (slot == 0u) return;
+            {
+                char census[256];
+                std::snprintf(census, sizeof(census),
+                              "scan census len7=%u text=%u header=%u slackok=%u (0x%x,0x%x,0x%x,0x%x)",
+                              censusLen, nText, censusHeader, censusSlack,
+                              textAddrs[0], textAddrs[1],
+                              textAddrs[2], textAddrs[3]);
+                qpNavLabelCensus(census, tick);
+            }
+            const uint32_t nGhost =
+                g_qpLabelGhostCount < 8u ? g_qpLabelGhostCount : 8u;
+            // Strict: header-near + clean slack. Loose: clean slack only
+            // (header drifted post-race); both ghost-filtered.
+            uint32_t strictAddrs[9] = {};
+            uint32_t looseAddrs[9] = {};
+            uint32_t nStrict = 0u;
+            uint32_t nLoose = 0u;
+            for (uint32_t i = 0u; i < nTextStored; ++i)
+            {
+                if (textSlack[i] == 0u)
+                {
+                    continue;
+                }
+                looseAddrs[nLoose++] = textAddrs[i];
+                if (textHeader[i] != 0u)
+                {
+                    strictAddrs[nStrict++] = textAddrs[i];
+                }
+            }
+            uint32_t strictKept[9] = {};
+            uint32_t looseKept[9] = {};
+            const int nStrictKept = ps2_net_protocol::qpLabelFilterGhosts(
+                strictAddrs, static_cast<int>(nStrict),
+                g_qpLabelGhosts, static_cast<int>(nGhost), strictKept, 9);
+            const int nLooseKept = ps2_net_protocol::qpLabelFilterGhosts(
+                looseAddrs, static_cast<int>(nLoose),
+                g_qpLabelGhosts, static_cast<int>(nGhost), looseKept, 9);
+            bool textFallback = false;
+            if (nStrictKept == 1)
+            {
+                slot = strictKept[0];
+            }
+            else if (nLooseKept == 1)
+            {
+                slot = looseKept[0];
+                textFallback = true;
+            }
+            else if (nLooseKept == 0 && nText == 1u)
+            {
+                // qp-label-2 B8/B10: a single text match is either a ghost
+                // (restored dead slot: never re-patch) or dirty slack. B8
+                // skipped dirty slack; F8-brad proved the slack can stay
+                // dirty for the whole menu lifetime on packed pools, so
+                // B10 redirects instead (see below): the handle aims at a
+                // restored ghost's zeroed text area, never at dirty bytes.
+                bool isGhost = false;
+                for (uint32_t g = 0u; g < nGhost; ++g)
+                    isGhost = isGhost || g_qpLabelGhosts[g] == textAddrs[0];
+                if (isGhost)
+                {
+                    qpNavLabelNote("skip: only ghosted match", tick);
+                    return;
+                }
+                // Dirty-slack single: fall through to the verify, which
+                // routes to the redirect path below.
+                slot = textAddrs[0];
+            }
+            else if (nLooseKept == 0 && nText == 0u)
+            {
+                qpNavLabelNote("skip: no stock Online text match", tick);
+                return;
+            }
+            else
+            {
+                char reason[160];
+                std::snprintf(reason, sizeof(reason),
+                              "skip: ambiguous %u text matches (%d loose: 0x%x,0x%x)",
+                              nText, nLooseKept, looseKept[0], looseKept[1]);
+                qpNavLabelNote(reason, tick);
+                return;
+            }
             const uint32_t ptr = qpNavReadMenu(rdram, slot);
             uint8_t text[14] = {};
             uint8_t slack[kQpLabelBytes] = {};
@@ -1071,24 +1290,61 @@ namespace ps2_stubs
                 std::memcmp(text, kStockText, sizeof(text)) != 0 ||
                 !qpNavReadBytes(rdram, slot + 8u, slack, sizeof(slack)))
             {
-                std::fprintf(stderr, "[qpnav] label: text verify failed, skipped\n");
+                qpNavLabelNote("skip: text verify failed", tick);
                 return;
             }
+            bool slackClean = true;
             for (uint32_t i = 0u; i < sizeof(slack); ++i)
+                slackClean = slackClean && slack[i] == 0u;
+            // qp-label-2 B10/B11: strict/loose candidates are clean-slack
+            // by construction, so dirty slack here means the unique-text
+            // path. B10 borrowed any zeroed ghost area and poisoned the
+            // net flow (F9-F12b stuck where F5/F6/F8 escaped): a ghost
+            // address says nothing once the game reallocates the entry
+            // (at F9@5657 the owner no longer even scan-matched). B11
+            // borrows only from an owner that STILL scan-matches (handle
+            // aims at stock "Online", len 7, area zeroed): dead by
+            // construction, not by address history.
+            uint32_t redirectBuf = 0u;
+            if (!slackClean)
             {
-                if (slack[i] != 0u)
+                for (uint32_t g = 0u; g < nGhost && redirectBuf == 0u; ++g)
                 {
-                    std::fprintf(stderr, "[qpnav] label: slack in use, skipped\n");
+                    const uint32_t owner = g_qpLabelGhosts[g];
+                    if (owner == 0u || owner + 8u == g_qpLabelBuf)
+                        continue;
+                    const uint32_t area = owner + 8u;
+                    const uint32_t oPtr = qpNavReadMenu(rdram, owner);
+                    const uint32_t oLen = qpNavReadMenu(rdram, owner + 4u);
+                    uint8_t oText[14] = {};
+                    uint8_t areaBytes[kQpLabelBytes] = {};
+                    bool dead = oLen == kQpLabelStockLen &&
+                                qpNavReadBytes(rdram, oPtr, oText, sizeof(oText)) &&
+                                std::memcmp(oText, kStockText, sizeof(oText)) == 0 &&
+                                qpNavReadBytes(rdram, area, areaBytes, sizeof(areaBytes));
+                    for (uint32_t i = 0u; dead && i < sizeof(areaBytes); ++i)
+                        dead = areaBytes[i] == 0u;
+                    if (dead)
+                        redirectBuf = area;
+                }
+                if (redirectBuf == 0u)
+                {
+                    char slackNote[160];
+                    std::snprintf(slackNote, sizeof(slackNote),
+                                  "skip: slack in use %02x%02x%02x%02x%02x%02x%02x%02x",
+                                  slack[0], slack[1], slack[2], slack[3],
+                                  slack[4], slack[5], slack[6], slack[7]);
+                    qpNavLabelNote(slackNote, tick);
                     return;
                 }
             }
-            if (!qpNavWriteBytes(rdram, slot + 8u, kNewText, sizeof(kNewText)))
+            const uint32_t textAt = redirectBuf != 0u ? redirectBuf : slot + 8u;
+            if (!qpNavWriteBytes(rdram, textAt, kNewText, sizeof(kNewText)))
             {
                 return;
             }
             uint8_t handle[8] = {};
-            const uint32_t newPtr = slot + 8u;
-            std::memcpy(handle, &newPtr, 4u);
+            std::memcpy(handle, &textAt, 4u);
             std::memcpy(handle + 4u, &kQpLabelNewLen, 4u);
             if (!qpNavWriteBytes(rdram, slot, handle, sizeof(handle)))
             {
@@ -1096,8 +1352,15 @@ namespace ps2_stubs
             }
             g_qpLabelSlot = slot;
             g_qpLabelStockPtr = ptr;
-            std::fprintf(stderr, "[qpnav] label: main-menu Online -> Quick Play (Alpha) at tick=%llu\n",
-                         static_cast<unsigned long long>(tick));
+            g_qpLabelBuf = redirectBuf;
+            {
+                char patched[160];
+                std::snprintf(patched, sizeof(patched),
+                              "main-menu Online -> Quick Play (Alpha) at slot=0x%x%s%s",
+                              slot, textFallback ? " (text fallback)" : "",
+                    redirectBuf != 0u ? " (redirect)" : "");
+                qpNavLabelNote(patched, tick);
+            }
         }
         // f3 lesson: restore stock + zero the text when the menu is left
         // while our patch is in place, so no stale handle rides into a
@@ -1106,13 +1369,56 @@ namespace ps2_stubs
         void qpNavRestoreMenuLabel(uint8_t *rdram, uint64_t tick)
         {
             if (g_qpLabelSlot == 0u) return;
+            static const uint8_t kZero[kQpLabelBytes] = {};
+            // qp-label-2 B10: redirect patches keep the live slot's own
+            // bytes untouched; zero the borrowed ghost area instead, then
+            // re-ghost both the live slot and the area owner (its handle
+            // still aims at stock, so it scan-matches again).
+            if (g_qpLabelBuf != 0u)
+            {
+                const uint32_t ptr = qpNavReadMenu(rdram, g_qpLabelSlot);
+                const uint32_t len = qpNavReadMenu(rdram, g_qpLabelSlot + 4u);
+                if (ptr != g_qpLabelBuf || len != kQpLabelNewLen)
+                {
+                    char stale[160];
+                    std::snprintf(stale, sizeof(stale),
+                                  "restore skipped: redirect slot=0x%x reused (ptr=0x%x len=%u)",
+                                  g_qpLabelSlot, ptr, len);
+                    qpNavLabelNote(stale, tick);
+                    return;
+                }
+                if (!qpNavWriteBytes(rdram, g_qpLabelBuf, kZero, sizeof(kZero)))
+                {
+                    return;
+                }
+                uint8_t handle[8] = {};
+                std::memcpy(handle, &g_qpLabelStockPtr, 4u);
+                std::memcpy(handle + 4u, &kQpLabelStockLen, 4u);
+                if (!qpNavWriteBytes(rdram, g_qpLabelSlot, handle, sizeof(handle)))
+                {
+                    return;
+                }
+                g_qpLabelGhosts[g_qpLabelGhostCount % 8u] = g_qpLabelSlot;
+                ++g_qpLabelGhostCount;
+                g_qpLabelGhosts[g_qpLabelGhostCount % 8u] = g_qpLabelBuf - 8u;
+                ++g_qpLabelGhostCount;
+                g_qpLabelSlot = 0u;
+                g_qpLabelStockPtr = 0u;
+                g_qpLabelBuf = 0u;
+                qpNavLabelNote("restored stock (redirect)", tick);
+                return;
+            }
             const uint32_t ptr = qpNavReadMenu(rdram, g_qpLabelSlot);
             const uint32_t len = qpNavReadMenu(rdram, g_qpLabelSlot + 4u);
             if (ptr != g_qpLabelSlot + 8u || len != kQpLabelNewLen)
             {
+                char stale[128];
+                std::snprintf(stale, sizeof(stale),
+                              "restore skipped: slot=0x%x reused (ptr=0x%x len=%u)",
+                              g_qpLabelSlot, ptr, len);
+                qpNavLabelNote(stale, tick);
                 return;
             }
-            static const uint8_t kZero[kQpLabelBytes] = {};
             if (!qpNavWriteBytes(rdram, g_qpLabelSlot + 8u, kZero, sizeof(kZero)))
             {
                 return;
@@ -1124,10 +1430,12 @@ namespace ps2_stubs
             {
                 return;
             }
+            g_qpLabelGhosts[g_qpLabelGhostCount % 8u] = g_qpLabelSlot;
+            ++g_qpLabelGhostCount;
             g_qpLabelSlot = 0u;
             g_qpLabelStockPtr = 0u;
-            std::fprintf(stderr, "[qpnav] label: restored stock at tick=%llu\n",
-                         static_cast<unsigned long long>(tick));
+            g_qpLabelBuf = 0u;
+            qpNavLabelNote("restored stock", tick);
         }
 
         bool qpNavMenuIs(uint8_t *rdram, uint32_t addr, uint32_t expect)
@@ -1393,13 +1701,21 @@ namespace ps2_stubs
                 {
                     const uint32_t labelMain = qpNavReadMenu(labelRam, kQpNavMenuMain);
                     const uint32_t labelSub = qpNavReadMenu(labelRam, kQpNavMenuSub);
-                    if ((labelMain == 1u && labelSub == 7u) ||
-                        (labelMain == 2u && labelSub == 9u))
+                    qpNavLabelWords(labelMain, labelSub, guestVsyncTick);
+                    if (ps2_net_protocol::qpLabelMenuShowing(labelMain, labelSub))
                     {
                         qpNavPatchMenuLabel(labelRam, guestVsyncTick);
                     }
                     else
                     {
+                        if (g_qpLabelSlot == 0u)
+                        {
+                            char off[96];
+                            std::snprintf(off, sizeof(off),
+                                          "off-menu main=0x%x sub=0x%x", labelMain,
+                                          labelSub);
+                            qpNavLabelNote(off, guestVsyncTick);
+                        }
                         qpNavRestoreMenuLabel(labelRam, guestVsyncTick);
                     }
                 }
