@@ -23,6 +23,10 @@ constexpr size_t kMaxTriangles = 2048u;
 constexpr uint32_t kResetEntry = 0x00116120u;
 constexpr uint32_t kResetEntryA1 = 0u; // no surface flag
 constexpr uint32_t kResetEntryA2 = 1u; // reset-action instance (0x139dd8)
+// Control state = [[rider+0x77c]+0xde4] (getter 0x11fee8); 9 = the course
+// reset already running (0x12f398). A rider still crossing the zone during the
+// fade must not re-enter it.
+constexpr uint32_t kCtlStateResetting = 9u;
 constexpr uint32_t kRiderUpdateSource = 0x00128ddcu;
 constexpr uint32_t kRiderUpdateTarget = 0x001216e0u;
 
@@ -239,7 +243,13 @@ inline int poll(State &state, const std::vector<Course> &courses, const uint8_t 
     const double delta[3] = {donor[0] - edge.previous[0], donor[1] - edge.previous[1],
                              donor[2] - edge.previous[2]};
     const bool continuous = edge.hasPrevious && dot(delta, delta) < 4000.0 * 4000.0;
-    const int hit = continuous && riderMode == 7u ? firstCrossing(*course, edge.previous, donor) : -1;
+    uint32_t ctl = 0u, ctlState = 0u;
+    std::memcpy(&ctl, ram + r + 0x77cu, 4);
+    ctl &= mask;
+    if (ctl >= 0x1000u && !(ctl & 3u) && ctl + 0xde8u > ctl && ctl + 0xde8u <= ramSize)
+        std::memcpy(&ctlState, ram + ctl + 0xde4u, 4);
+    const int hit = continuous && riderMode == 7u && ctlState != kCtlStateResetting
+        ? firstCrossing(*course, edge.previous, donor) : -1;
     std::memcpy(edge.previous, donor, sizeof donor);
     edge.hasPrevious = true;
     return hit;

@@ -52,6 +52,17 @@ void register_ps2_ssx3_tricky_resetvol_tests()
             std::memcpy(ram.data() + r + 0x110u, xyz, sizeof xyz);
             t.IsTrue(poll(state, courses, ram.data(), ram.size(), true, 14, "ALOHA", r) == 1273,
                      "reverse crossing resets");
+            // A crossing while the course reset (control state 9) runs does not re-enter it.
+            const uint32_t ctl = 0x1100u, resetting = 9u, riding = 0u;
+            std::memcpy(ram.data() + r + 0x77cu, &ctl, 4);
+            std::memcpy(ram.data() + ctl + 0xde4u, &resetting, 4);
+            std::memcpy(ram.data() + r + 0x110u, crossing, sizeof crossing);
+            t.IsTrue(poll(state, courses, ram.data(), ram.size(), true, 14, "ALOHA", r) == -1,
+                     "crossing during the reset is ignored");
+            std::memcpy(ram.data() + ctl + 0xde4u, &riding, 4);
+            std::memcpy(ram.data() + r + 0x110u, xyz, sizeof xyz);
+            t.IsTrue(poll(state, courses, ram.data(), ram.size(), true, 14, "ALOHA", r) == 1273,
+                     "crossing after the reset resets");
             t.IsTrue(!parseTableText("tri ALOHA 1 0 0 0 1 1 1 2 2 2\n", courses, error),
                      "triangle without placement rejected");
         });
