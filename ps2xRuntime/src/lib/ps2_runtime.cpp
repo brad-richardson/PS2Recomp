@@ -733,8 +733,8 @@ namespace
     // slot*stride and the sweep loops to [c+4], so a larger init is the same
     // shape TK34's runtime growth produced.
     // tk-alaska-opus-1: the game allocates the larger cache itself, in its own
-    // heap, at init: the 0x38AF58 call gets a2 = cap and t1 = ceil(146*cap/220)
-    // (second pool scaled as before) and the 0x38AF90 alloc gets cap*0x100.
+    // heap, at init: the 0x38AF58 call gets a2 = cap and t1 = the second-pool
+    // size below, and the 0x38AF90 alloc gets cap*0x100.
     // No runtime region above the heap ceiling any more (the lazy copy into
     // 0x01F33400.. is gone), which lets the ceiling rise (ps2_hle_pools.h).
     // The init is patched only when its caller and stock args match and the
@@ -766,7 +766,10 @@ namespace
         return cap;
     }
 
-    uint32_t ssx3PatchGrowSecond(uint32_t cap) { return (146u * cap + 219u) / 220u; }
+    // The type-1 second pool: at least 292 (the size TK34's lazy 440 growth
+    // proved; Elysium's race exhausts 213 while type 1 stays <= 220), more
+    // for caps above 440. 0x1B4 B a slot.
+    uint32_t ssx3PatchGrowSecond(uint32_t cap) { return std::max<uint32_t>(292u, (146u * cap + 219u) / 220u); }
 
     void ssx3PatchGrowInit(uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
     {
