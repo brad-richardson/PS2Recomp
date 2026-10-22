@@ -197,6 +197,55 @@ void register_ps2_ssx3_tricky_menu_tests()
                      {{kPreviewsIndex, "Previews"}, {kDonorIndex, "No dial tone is detected. Please check your phone line."}});
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), -1, "unexpected index refused"); });
 
+        tc.Run("qp-label-4: Online entry repoints at the dialing-busy donor, idempotent", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky;
+            std::vector<uint8_t> ram(ps2_ssx3_course::kRamSize, 0);
+            const uint32_t base = 0x6A1230;
+            buildLoc(ram, base, kCmnAmer, {{0x11111111u, 3u}, {kKeyOnline, kOnlineIndex}, {0x22222222u, kOnlineDonorIndex}},
+                     {{kOnlineIndex, "Online"},
+                      {kOnlineDonorIndex, "The number you are dialing is currently busy. Please try again."},
+                      {kDonorIndex, "No dial tone is detected. Please check your phone line and network adaptor."}});
+            std::string msg;
+            t.Equals(patchOnlineLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 1, msg.c_str());
+            const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyOnline);
+            t.Equals(ps2_ssx3_tricky::rd32(ram.data(), e + 4), kOnlineDonorIndex, "Online now reads the donor index");
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kOnlineDonorIndex)),
+                     std::string("Online (Alpha)"), "label text");
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kOnlineIndex)),
+                     std::string("Online"), "the Online string itself is untouched");
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kDonorIndex)),
+                     std::string("No dial tone is detected. Please check your phone line and network adaptor."),
+                     "the Tricky donor is untouched");
+            t.Equals(patchOnlineLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "second call: already patched"); });
+
+        tc.Run("qp-label-4: loader-resolved Online address form + refusal without writing", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky;
+            std::vector<uint8_t> ram(ps2_ssx3_course::kRamSize, 0);
+            const uint32_t base = 0xAB0000;
+            buildLoc(ram, base, kCmnAmer, {{kKeyOnline, kOnlineIndex}},
+                     {{kOnlineIndex, "Online"},
+                      {kOnlineDonorIndex, "The number you are dialing is currently busy. Please try again."}});
+            const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyOnline);
+            put32(ram, e + 4, locString(ram.data(), base, kCmnAmer, kOnlineIndex)); // resolved as by the loader
+            std::string msg;
+            t.Equals(patchOnlineLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 1, msg.c_str());
+            const uint32_t donor = locString(ram.data(), base, kCmnAmer, kOnlineDonorIndex);
+            t.Equals(ps2_ssx3_tricky::rd32(ram.data(), e + 4), donor, "entry now holds the donor's address");
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, donor), std::string("Online (Alpha)"), "label");
+            t.Equals(patchOnlineLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "idempotent");
+            const uint32_t fb = 0xC00000;
+            buildLoc(ram, fb, kCmnAmer, {{kKeyOnline, kOnlineIndex}},
+                     {{kOnlineIndex, "Online"}, {kOnlineDonorIndex, "Some other text that is long enough"}});
+            const std::vector<uint8_t> before(ram.begin() + fb, ram.begin() + fb + 0x10000);
+            t.Equals(patchOnlineLabel(ram.data(), ps2_ssx3_course::kRamSize, fb, msg), -1, "foreign donor refused");
+            t.IsTrue(std::equal(before.begin(), before.end(), ram.begin() + fb), "nothing written");
+            buildLoc(ram, fb, kCmnAmer, {{kKeyOnline, 12u}},
+                     {{kOnlineIndex, "Online"},
+                      {kOnlineDonorIndex, "The number you are dialing is currently busy. Please try again."}});
+            t.Equals(patchOnlineLabel(ram.data(), ps2_ssx3_course::kRamSize, fb, msg), -1, "unexpected index refused"); });
+
         tc.Run("help: Previews help line rewritten in place", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky;

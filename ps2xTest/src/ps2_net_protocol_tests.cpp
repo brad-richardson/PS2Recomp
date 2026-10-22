@@ -137,65 +137,6 @@ namespace
             t.IsFalse(qpNavTitleShowing(0u, 0u), "unreadable words: no recovery");
         });
 
-        tc.Run("qp-label-2: menu sight survives the frozen post-load sub word", [](TestCase &t)
-        {
-            using ps2_net_protocol::qpLabelFilterGhosts;
-            using ps2_net_protocol::qpLabelMenuShowing;
-            t.IsTrue(qpLabelMenuShowing(1u, 7u), "boot title: scan, content decides");
-            t.IsTrue(qpLabelMenuShowing(2u, 9u), "boot main: scan, content decides");
-            t.IsTrue(qpLabelMenuShowing(1u, 0xffffffffu), "post-quit title: scan");
-            t.IsTrue(qpLabelMenuShowing(2u, 0xffffffffu), "rebuilt main: scan");
-            t.IsTrue(qpLabelMenuShowing(3u, 0xffffffffu), "pause-frozen words: scan, finds nothing");
-            t.IsTrue(qpLabelMenuShowing(0u, 0xffffffffu), "frozen-word main: scan");
-            t.IsTrue(qpLabelMenuShowing(0u, 0x41u), "idle-title words: scan, finds nothing");
-            t.IsTrue(qpLabelMenuShowing(0u, 0u), "blank words: scan, finds nothing");
-            t.IsTrue(qpLabelMenuShowing(2u, 0x41u), "live-sub main (F5-brad D2): scan, content decides");
-            t.IsTrue(qpLabelMenuShowing(2u, 0x10u), "tune-row main 2: scan, content decides");
-            t.IsTrue(qpLabelMenuShowing(6u, 0x1234u), "race-live words: scan, finds nothing");
-            t.IsFalse(qpLabelMenuShowing(2u, 0x12u), "char select routes to restore");
-            t.IsFalse(qpLabelMenuShowing(3u, 0x15u), "setup routes to restore");
-            t.IsFalse(qpLabelMenuShowing(2u, 0x14u), "setup routes to restore");
-            t.IsFalse(qpLabelMenuShowing(3u, 0x14u), "setup routes to restore");
-            t.IsFalse(qpLabelMenuShowing(3u, 0x16u), "login modal routes to restore");
-            t.IsFalse(qpLabelMenuShowing(4u, 2u), "persona screen: no sight");
-            t.IsFalse(qpLabelMenuShowing(5u, 0xffffffffu), "loading screen: no sight");
-
-            const uint32_t live = 0x5ae7b4u, ghost = 0x5ab2b4u;
-            const uint32_t both[2] = {ghost, live};
-            const uint32_t ghosts[1] = {ghost};
-            uint32_t kept[2] = {};
-            t.Equals(qpLabelFilterGhosts(both, 2, ghosts, 1, kept, 2), 1, "ghost dropped");
-            t.Equals(kept[0], live, "live slot kept");
-            t.Equals(qpLabelFilterGhosts(both, 2, nullptr, 0, kept, 2), 2, "no ghosts: all kept");
-            const uint32_t only[1] = {ghost};
-            t.Equals(qpLabelFilterGhosts(only, 1, ghosts, 1, kept, 2), 0, "sole ghost filtered");
-            t.Equals(qpLabelFilterGhosts(nullptr, 0, ghosts, 1, kept, 2), 0, "empty scan");
-        });
-
-        tc.Run("boot-seq-1: label rescans on build/change, never on steady skip", [](TestCase &t)
-        {
-            using ps2_net_protocol::QpLabelScanCursor;
-            using ps2_net_protocol::qpLabelShouldRescan;
-            constexpr uint64_t kRefire = 30u;
-            QpLabelScanCursor fresh;
-            t.IsTrue(qpLabelShouldRescan(fresh, 1u, 7u, false, 500u, kRefire),
-                     "first sight scans");
-            QpLabelScanCursor title{1u, 7u, 500u, true, false};
-            t.IsFalse(qpLabelShouldRescan(title, 1u, 7u, false, 2000u, kRefire),
-                      "title skip stands: same words, nothing patched");
-            t.IsTrue(qpLabelShouldRescan(title, 2u, 9u, false, 2000u, kRefire),
-                     "menu build (words changed) rescans");
-            t.IsFalse(qpLabelShouldRescan(title, 1u, 7u, true, 2000u, kRefire),
-                      "intact patch never rescans");
-            QpLabelScanCursor rebuilt{2u, 9u, 1000u, true, true};
-            t.IsFalse(qpLabelShouldRescan(rebuilt, 2u, 9u, false, 1010u, kRefire),
-                      "rebuild refire backs off inside the floor");
-            t.IsTrue(qpLabelShouldRescan(rebuilt, 2u, 9u, false, 1030u, kRefire),
-                     "rebuild refires at the floor");
-            t.IsFalse(qpLabelShouldRescan(rebuilt, 2u, 9u, true, 2000u, kRefire),
-                      "re-patched menu stays silent");
-        });
-
         tc.Run("online-stock-2: ST keep-alives are state only when STOCK120 is on", [](TestCase &t)
         {
             const uint8_t st[] = {'O', '5', 'K', 'A', 'S', 'T', 1, 2, 3};

@@ -98,103 +98,10 @@ namespace ps2_net_protocol
         return menuMain == 7u && menuSub == 0x16u;
     }
 
-    // qp-label-2 B8: blocklist gate for the Quick Play label. F5-brad
-    // proved the words gate cannot sight a displayed menu: the post-quit
-    // main menu sat on screen (frames) for ~2800 ticks with live words
-    // no allowlist shape matches, so a torn first scan never retried.
-    // Scan everything EXCEPT proven submenu/loading shapes; the content
-    // scan (Online text + Main Menu header + zero slack, strict then
-    // unique-loose, ghosted slots never re-patched) decides whether the
-    // menu handle set is really present. Blocked shapes route to restore.
-    inline bool qpLabelMenuShowing(uint32_t menuMain, uint32_t menuSub)
-    {
-        if (menuMain == 2u)
-        {
-            // Char select; the tune/difficulty rows share main 2.
-            return menuSub != 0x12u && menuSub != 0x14u;
-        }
-        if (menuMain == 3u)
-        {
-            // Setup rows and the login modal.
-            return menuSub != 0x14u && menuSub != 0x15u &&
-                   menuSub != 0x16u;
-        }
-        if (menuMain == 4u)
-        {
-            // Persona screen.
-            return menuSub != 2u;
-        }
-        if (menuMain == 5u)
-        {
-            // Loading screen: no menu row is displayed.
-            return false;
-        }
-        return true;
-    }
-
-    // boot-seq-1 (B): rescan cadence for the Quick Play label. Scan on
-    // first sight and on menu build/change (words changed). A skip for
-    // these words stands until the words change (the title has no Online
-    // row; rescanning it every 30 ticks burned host CPU + Documents stderr
-    // on every boot). An intact patch never rescans; an intact-loss after
-    // a patch rescans (menu rebuild), backed off so a flapping pool cannot
-    // rescan every read. Pure: the caller owns the cursor.
-    struct QpLabelScanCursor
-    {
-        uint32_t main = 0u;
-        uint32_t sub = 0u;
-        uint64_t tick = 0u;
-        bool scannedOnce = false;
-        bool patched = false;
-    };
-    inline bool qpLabelShouldRescan(const QpLabelScanCursor &cursor,
-                                    uint32_t sightMain, uint32_t sightSub,
-                                    bool intact, uint64_t tick,
-                                    uint64_t refireTicks)
-    {
-        if (!cursor.scannedOnce)
-            return true;
-        if (sightMain != cursor.main || sightSub != cursor.sub)
-            return true;
-        if (intact)
-            return false;
-        if (!cursor.patched)
-            return false;
-        return tick - cursor.tick >= refireTicks;
-    }
-
-    // qp-label-2: drop restored-slot ghosts from a scan's candidate
-    // list. A restore zeroes the slack and points the dead slot back at
-    // the stock text, so the dead slot still matches a later scan; the
-    // rebuilt menu adds a second match and the ambiguity guard would
-    // skip forever. Returns the kept count (cap-sized output).
-    inline int qpLabelFilterGhosts(const uint32_t *matches, int nMatch,
-                                   const uint32_t *ghosts, int nGhost,
-                                   uint32_t *kept, int cap)
-    {
-        if (!matches || !kept || cap <= 0)
-        {
-            return 0;
-        }
-        int n = 0;
-        for (int i = 0; i < nMatch && n < cap; ++i)
-        {
-            bool ghost = false;
-            for (int g = 0; g < nGhost; ++g)
-            {
-                if (ghosts && matches[i] == ghosts[g])
-                {
-                    ghost = true;
-                    break;
-                }
-            }
-            if (!ghost)
-            {
-                kept[n++] = matches[i];
-            }
-        }
-        return n;
-    }
+    // qp-label-4: the "Online (Alpha)" label lives at main-menu build time
+    // now (ssx3-quickplay-label override on 0x194D18, via the CMNAMER entry
+    // the row's text resolves from). The per-read scan/patch helpers were
+    // removed with it: their writes outlived rebuilt menus (qp-label-2/3).
 
     inline bool parseLoginLine(std::string line, std::string &name, std::string &pass)
     {

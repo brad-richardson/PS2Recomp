@@ -2176,6 +2176,90 @@ void applyTrickyMcPost(PS2Runtime &runtime)
 }
 } // namespace
 
+// qp-label-4: "Online (Alpha)" at main-menu build time through the game's
+// own menu-building path. The main-menu build calls 0x194D18(this, item)
+// once per row; for the Online row (item+0x38 == nameHash("5online")) the
+// function stores state 0x31 at item+0x18 and touches nothing else. The
+// row's text is not in the item: it resolves at draw time from the CMNAMER
+// key-0x12F325 LOCT entry, so the wrapper repoints that entry at the
+// session-persistent donor string 936 (patchOnlineLabel:
+// verify-before-write, idempotent, fail-closed). Every later build (boot,
+// event quits, QP cancel, Options) resolves the label with no per-menu
+// handle to restore, which is what poisoned qp-label-2/3.
+// Installed only under the online knob (exact old visibility: QUICKPLAY
+// nav online/direct + NET, or the netsync menu); knob off: nothing is
+// wrapped, nothing is read or written. Chains with the Tricky module's
+// 0x194D18 wrapper in either registration order.
+namespace
+{
+PS2Runtime::RecompiledFunction g_qpOnlineMenuBuildPrev = nullptr;
+
+uint32_t qpOnlineRd(const uint8_t *ram, uint32_t a)
+{
+    uint32_t v = 0u;
+    if (ram && a < 0x02000000u - 4u)
+        std::memcpy(&v, ram + a, 4u);
+    return v;
+}
+
+void qpOnlineNote(const std::string &msg)
+{
+    static std::string last;
+    if (msg == last)
+        return;
+    last = msg;
+    std::fprintf(stderr, "[ssx3-quickplay-label] %s\n", msg.c_str());
+}
+
+void qpOnlineMenuBuildWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // Entry action (checkpoint-unwind safe): the caller sets the widget
+    // hash before the call; 0x194D18 itself only stores the next state.
+    const uint32_t item = (ctx ? getRegU32(ctx, 5) : 0u) & 0x1FFFFFFFu;
+    if (rdram && item >= 0x00100000u && item < 0x02000000u - 0x100u &&
+        qpOnlineRd(rdram, item + ps2_ssx3_tricky::kItemWidgetHash) == ps2_ssx3_tricky::nameHash("5online"))
+    {
+        for (uint32_t base = ps2_ssx3_tricky::findLoc(rdram, PS2_RAM_SIZE, ps2_ssx3_tricky::kCmnAmer); base;
+             base = ps2_ssx3_tricky::findLoc(rdram, PS2_RAM_SIZE, ps2_ssx3_tricky::kCmnAmer, base + 4u))
+        {
+            std::string msg;
+            const int r = ps2_ssx3_tricky::patchOnlineLabel(rdram, PS2_RAM_SIZE, base, msg);
+            if (r != 0)
+                qpOnlineNote(msg);
+        }
+    }
+    if (g_qpOnlineMenuBuildPrev)
+        g_qpOnlineMenuBuildPrev(rdram, ctx, runtime);
+}
+
+void applyQuickPlayOnlineLabel(PS2Runtime &runtime)
+{
+    const int nav = ps2_net::qpNavMode();
+    const bool on = ((nav == 2 || nav == 3) && ps2_net::enabled()) || ps2_netsync::menuOn();
+    if (!on)
+        return; // Knob off: nothing wrapped, nothing read or written (det-identical)
+    constexpr uint32_t kPc = ps2_ssx3_tricky::kMainMenuItemState;
+    PS2Runtime::RecompiledFunction prev = runtime.lookupFunction(kPc);
+    if (!prev || prev == &qpOnlineMenuBuildWrapper)
+        return;
+    g_qpOnlineMenuBuildPrev = prev;
+    if (!runtime.replaceFunction(kPc, &qpOnlineMenuBuildWrapper))
+    {
+        g_qpOnlineMenuBuildPrev = nullptr;
+        std::fprintf(stderr, "[ssx3-quickplay-label] cannot wrap 0x%x\n", kPc);
+        return;
+    }
+    std::fprintf(stderr, "[ssx3-quickplay-label] armed at 0x%x (Online -> \"%s\")\n", kPc,
+                 ps2_ssx3_tricky::kOnlineLabel);
+}
+} // namespace
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-quickplay-label",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyQuickPlayOnlineLabel);
+
 PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-mc",
                            "SLUS_207.72",
                            0x00100008u,

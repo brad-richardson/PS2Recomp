@@ -127,6 +127,17 @@ inline constexpr uint32_t kKeyPreviewsHelp = 0x05C9A824u; // FEAMER, index 672
 inline constexpr uint32_t kPreviewsHelpIndex = 672u;
 inline constexpr const char *kLabel = "Tricky Courses (Alpha)";
 inline constexpr const char *kHelp = "Alpha: SSX Tricky courses, WIP.";
+// qp-label-4: the main-menu Online row reads CMNAMER key 0x12F325 (index 375
+// "Online"); the row's text resolves at draw time from that LOCT entry, so
+// pointing the entry at a session-persistent donor string relabels every
+// build with no per-menu handle. Donor 936 ("The number you are dialing is
+// currently busy...", dial-up only, like 941) is distinct from the Tricky
+// donor so both labels coexist.
+inline constexpr uint32_t kKeyOnline = 0x012F325u;
+inline constexpr uint32_t kOnlineIndex = 375u;
+inline constexpr uint32_t kOnlineDonorIndex = 936u;
+inline constexpr const char *kOnlineLabel = "Online (Alpha)";
+inline constexpr const char *kOnlineDonorPrefix = "The number you are dialing";
 
 inline uint32_t rd32(const uint8_t *ram, uint32_t a)
 {
@@ -243,6 +254,47 @@ inline int patchLabel(uint8_t *ram, uint32_t ramSize, uint32_t base, std::string
     char buf[192];
     std::snprintf(buf, sizeof(buf), "label: CMNAMER at 0x%06x, key 0x%x entry 0x%x -> 0x%x (\"%s\" at 0x%06x)", base,
                   kKeyPreviews, value, next, kLabel, donor);
+    msg = buf;
+    return 1;
+}
+
+// qp-label-4: relabels Online in the CMNAMER copy at `base`. 1 = patched
+// now, 0 = already patched, -1 = refused (layout or strings differ; nothing
+// written). Same shape as patchLabel: the Online entry (key 0x12F325) is
+// repointed at donor 936, whose dial-up-busy text is overwritten with
+// "Online (Alpha)". The pool is session-persistent, so every menu build
+// resolves the label through the game's own draw path with no per-menu
+// handle to restore.
+inline int patchOnlineLabel(uint8_t *ram, uint32_t ramSize, uint32_t base, std::string &msg)
+{
+    const LocFile &f = kCmnAmer;
+    const uint32_t e = locAt(ram, ramSize, base, f) ? loctEntry(ram, base, f, kKeyOnline) : 0u;
+    if (!e)
+    {
+        msg = "online-label: no Online entry in CMNAMER";
+        return -1;
+    }
+    const uint32_t value = rd32(ram, e + 4u);
+    const uint32_t target = entryString(ram, ramSize, base, f, value);
+    const uint32_t donor = locString(ram, base, f, kOnlineDonorIndex);
+    const std::string cur = utf16At(ram, ramSize, donor);
+    if (target == donor && cur == kOnlineLabel)
+        return 0;
+    if (target != locString(ram, base, f, kOnlineIndex) || utf16At(ram, ramSize, target) != "Online" ||
+        cur.rfind(kOnlineDonorPrefix, 0) != 0 || cur.size() < std::strlen(kOnlineLabel))
+    {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf), "online-label: CMNAMER strings differ (entry 0x%x, donor \"%s\"); nothing written",
+                      value, cur.substr(0, 24).c_str());
+        msg = buf;
+        return -1;
+    }
+    const uint32_t next = entryValue(ram, base, f, value, kOnlineDonorIndex);
+    writeUtf16(ram, donor, kOnlineLabel);
+    wr32(ram, e + 4u, next);
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "online-label: CMNAMER at 0x%06x, key 0x%x entry 0x%x -> 0x%x (\"%s\" at 0x%06x)",
+                  base, kKeyOnline, value, next, kOnlineLabel, donor);
     msg = buf;
     return 1;
 }
