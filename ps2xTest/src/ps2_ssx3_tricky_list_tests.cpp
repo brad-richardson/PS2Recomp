@@ -59,6 +59,15 @@ std::vector<uint8_t> viewRam(uint32_t sub, uint32_t peak, uint32_t type, uint8_t
     return ram;
 }
 
+// Navigator fixtures for the hidden Showoff options (tk-alaska-opus-1: the
+// picker keeps one mode per course; the drive model still covers the shape).
+constexpr CourseOption kGariShowoffGoal{0, 1, 3, {14, "GARI", "Garibaldi"}};
+
+// Stock discipline of each SSX 3 event (SLUS event table 0x442820 +4,
+// tk-menu-1 events.py): 2 race, 3 slopestyle, 4 big air, 5 superpipe,
+// 6 backcountry, 1 freeride station.
+constexpr int kStockDiscipline[23] = {2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 1, 1, 1, 1, 1, 1};
+
 FeView evView(uint32_t peak, uint32_t type, uint8_t row)
 {
     auto ram = viewRam(2, peak, type, row, 0x600000, 0x601000, 0x602000);
@@ -84,7 +93,7 @@ ResetDrive driveResetPeak(int reset, bool persist = false)
     int screen = 0;
     bool left = false;
     NavState n;
-    navStart(n, kCourses[0].opts[1], 14, 0);
+    navStart(n, kGariShowoffGoal, 14, 0);
     uint64_t tick = 0;
     uint16_t lastOut = 0;
     const auto view = [&]() {
@@ -271,48 +280,49 @@ void register_ps2_ssx3_tricky_list_tests()
             const uint64_t before = pickerSession().load();
             pickerSessionBump();
             t.Equals(pickerSession().load(), before + 1u, "overlay open starts a new session"); });
-        tc.Run("course table: Tricky order, targets and dual-type defaults", [](TestCase &t)
+        tc.Run("course table: Tricky order, one carrier-native mode per course", [](TestCase &t)
                {
             t.Equals(kCourseCount, 10u, "ten courses");
             const char *want[] = {"Garibaldi", "Snowdream", "Elysium Alps", "Mesablanca", "Merqury City",
                                   "Aloha Ice Jam", "Pipedream", "Untracked", "Tokyo Megaplex", "Alaska"};
             for (uint32_t i = 0; i < 10; ++i)
                 t.Equals(std::strcmp(kCourses[i].name, want[i]), 0, "Tricky order");
-            // Part 4: every goal is Peak 1 (fresh-card selectable). Singles
-            // keep their native rows; dual-mode Races share P1 Race row 0
-            // (ev0), Showoffs share P1 Free row 3 (ev14).
+            // Part 4: every goal is Peak 1 (fresh-card selectable).
             for (uint32_t i = 0; i < 10; ++i)
                 for (uint32_t m = 0; m < kCourses[i].nOpts; ++m)
                     t.Equals(kCourses[i].opts[m].peak, 0, "all goals Peak 1");
-            t.Equals(kCourses[0].opts[0].row, 0, "Garibaldi row 0");
-            t.Equals(kCourses[6].opts[0].type, 0, "Pipedream Race first");
-            t.Equals(kCourses[6].opts[0].row, 0, "Pipedream Race row 0");
-            t.Equals(kCourses[6].opts[1].type, 1, "Pipedream Showoff second");
-            t.Equals(kCourses[6].opts[1].row, 2, "Pipedream Showoff row 2");
-            t.Equals(kCourses[9].opts[0].type, 0, "Alaska Race first");
-            t.Equals(kCourses[9].opts[1].type, 1, "Alaska Showoff second");
-            // Dual-type courses share one event id; Race is the default.
-            t.Equals(kCourses[2].nOpts, 2, "Elysium dual");
-            t.Equals(kCourses[2].event, 16, "Elysium event 16 both rows");
-            t.Equals(kCourses[2].opts[0].row, 0, "Elysium race row 0");
-            t.Equals(kCourses[2].opts[1].row, 3, "Elysium jam row 3");
+            // tk-alaska-opus-1 (Brad 10-21): one mode per course, the one its
+            // carrier's stock discipline supports. Race carrier (2) or
+            // backcountry (6, fits neither) -> Race; slopestyle (3), big air
+            // (4) or superpipe (5) -> Showoff. Never zero modes.
+            const char *wantMode[] = {"Race", "Race", "Race", "Race", "Race",
+                                      "Race", "Showoff", "Showoff", "Race", "Showoff"};
+            for (uint32_t i = 0; i < 10; ++i)
+            {
+                const Course &c = kCourses[i];
+                t.Equals(c.nOpts, static_cast<uint8_t>(1), std::string("one mode: ") + c.name);
+                t.Equals(std::strcmp(c.modeName[0], wantMode[i]), 0, std::string("kept mode: ") + c.name);
+                const DirectGoal g = directGoalFor(c, c.opts[0]);
+                t.IsTrue(g.ok && g.event >= 0 && g.event < 23, std::string("kept cell directable: ") + c.name);
+                const int disc = kStockDiscipline[g.event];
+                const bool showoffCarrier = disc == 3 || disc == 4 || disc == 5;
+                t.Equals(c.opts[0].type, static_cast<uint8_t>(showoffCarrier ? 1 : 0),
+                         std::string("mode matches carrier discipline: ") + c.name);
+                t.Equals(courseOptionIndex(c, c.opts[0].type), 0, "kept mode found by type");
+                t.Equals(courseOptionIndex(c, static_cast<uint8_t>(1 - c.opts[0].type)), -1, "hidden mode absent");
+                t.IsFalse(listCourseOpensModes(static_cast<uint8_t>(i)), "single mode rides from the course tap");
+            }
+            t.Equals(kCourses[0].opts[0].row, 0, "Garibaldi Race row 0");
             t.Equals(kCourses[5].opts[0].row, 2, "Aloha race row 2");
-            t.Equals(kCourses[5].opts[1].row, 3, "Aloha jam row 3");
-            t.Equals(kCourses[8].nOpts, 2, "Megaplex dual");
+            t.Equals(kCourses[6].opts[0].row, 2, "Pipedream Showoff row 2");
+            t.Equals(kCourses[7].opts[0].row, 3, "Untracked Showoff row 3");
+            t.Equals(kCourses[9].opts[0].row, 3, "Alaska Showoff row 3");
+            t.Equals(kCourses[2].event, 16, "Elysium event 16");
             t.IsTrue(kCourses[8].tp == nullptr, "Megaplex has no preview art");
             ListState s;
             t.Equals(listGoal(s).row, 0, "step 0 goal is opts[0]");
-            s.sel = 2;
-            t.Equals(listGoal(s).row, 0, "Elysium step 0 is the Race row");
-            s.step = 1;
-            s.mode = 1;
-            t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Showoff row");
-            s.mode = 0;
-            t.Equals(listGoal(s).row, 0, "step 1 mode 0 is Race");
-            t.Equals(std::strcmp(kCourses[2].modeName[1], "Showoff"), 0, "Jam mode name");
-            t.Equals(kCourses[6].nOpts, 2, "Pipedream dual");
-            t.Equals(kCourses[7].nOpts, 2, "Untracked dual");
-            t.Equals(kCourses[9].nOpts, 2, "Alaska dual"); });
+            s.sel = 9;
+            t.Equals(listGoal(s).type, 1, "Alaska step 0 goal is its Showoff"); });
 
         tc.Run("Part 4 table: remapped goals share two fresh P1 cells", [](TestCase &t)
                {
@@ -332,14 +342,13 @@ void register_ps2_ssx3_tricky_list_tests()
                 t.Equals(std::strcmp(kCourses[i].opts[0].map.archive, raceArch[k]), 0, "world archive");
                 t.Equals(std::strcmp(kCourses[i].opts[0].map.name, raceNames[k]), 0, "world name");
             }
-            const int jamMapped[] = {0, 1, 2, 3, 4, 7, 8, 9};
-            const char *jamArch[] = {"GARI", "SNOW", "ELYS", "MESA", "MERQ", "UNTRACK", "MEGA", "ALASKA"};
-            const char *jamNames[] = {"Garibaldi", "Snowdream", "Elysium Alps", "Mesablanca",
-                                      "Merqury City", "Untracked", "Tokyo Megaplex", "Alaska"};
-            for (int k = 0; k < 8; ++k)
+            const int jamMapped[] = {7, 9};
+            const char *jamArch[] = {"UNTRACK", "ALASKA"};
+            const char *jamNames[] = {"Untracked", "Alaska"};
+            for (int k = 0; k < 2; ++k)
             {
                 const int i = jamMapped[k];
-                const int opt = (kCourses[i].nOpts == 2) ? 1 : 0;
+                const int opt = 0;
                 t.Equals(kCourses[i].opts[opt].peak, 0, "jam donor P1");
                 t.Equals(kCourses[i].opts[opt].type, 1, "donor freestyle list");
                 t.Equals(kCourses[i].opts[opt].row, 3, "donor row 3 (ev14)");
@@ -347,12 +356,11 @@ void register_ps2_ssx3_tricky_list_tests()
                 t.Equals(std::strcmp(kCourses[i].opts[opt].map.archive, jamArch[k]), 0, "world archive");
                 t.Equals(std::strcmp(kCourses[i].opts[opt].map.name, jamNames[k]), 0, "world name");
             }
-            // The five native rows stay unmapped: both Aloha rows, both
-            // Garibaldi/Snowdream Race rows, Pipedream.
+            // The native rows stay unmapped: Garibaldi/Snowdream/Aloha Race,
+            // Pipedream Showoff.
             t.Equals(kCourses[0].opts[0].map.event, -1, "Garibaldi race native");
             t.Equals(kCourses[1].opts[0].map.event, -1, "Snowdream race native");
             t.Equals(kCourses[5].opts[0].map.event, -1, "Aloha race native");
-            t.Equals(kCourses[5].opts[1].map.event, -1, "Aloha jam native");
             t.Equals(kCourses[6].opts[0].map.event, -1, "Pipedream native"); });
 
         tc.Run("list nav wraps per step; mode step moves modes", [](TestCase &t)
@@ -365,14 +373,12 @@ void register_ps2_ssx3_tricky_list_tests()
             s.sel = 2;
             s.step = 1;
             listMove(s, false);
-            t.Equals(s.mode, 1, "Elysium mode down to Showoff");
-            listMove(s, false);
-            t.Equals(s.mode, 0, "mode wraps over the course's own modes");
+            t.Equals(s.mode, 0, "single-mode course: mode stays on its only mode");
             s.sel = 6;
             s.mode = 0;
             listMove(s, false);
             t.Equals(s.sel, 6, "step 1 moves modes, not courses");
-            t.Equals(s.mode, 1, "Pipedream dual: mode moves to Showoff"); });
+            t.Equals(s.mode, 0, "Pipedream single: mode stays"); });
 
         tc.Run("readView gates on the Map sub-state and short RAM", [](TestCase &t)
                {
@@ -406,12 +412,15 @@ void register_ps2_ssx3_tricky_list_tests()
                {
             // tk-racedonor-1: fixed cells ride their converted location's own
             // stock event shell (screened carriers, rel3). tk-three-opus-1:
-            // Elys/Aloha/Untrack join (ev16/ev14/ev7, guarded env). Both
-            // options of every course stay directable.
+            // Elys/Aloha/Untrack join (ev16/ev14/ev7, guarded env).
+            // tk-alaska-opus-1: the picker keeps one mode per course; the
+            // hidden cells' carrier rows stay and are checked via local options.
+            const CourseOption raceRow0{0, 0, 0};
+            const CourseOption showoffRow3{0, 1, 3};
             for (int i = 0; i < static_cast<int>(kCourseCount); ++i)
             {
                 const Course &c = kCourses[i];
-                t.Equals(c.nOpts, static_cast<uint8_t>(2), std::string("dual: ") + c.name);
+                t.Equals(c.nOpts, static_cast<uint8_t>(1), std::string("single: ") + c.name);
                 for (uint32_t m = 0; m < c.nOpts; ++m)
                 {
                     const DirectGoal goal = directGoalFor(c, c.opts[m]);
@@ -429,7 +438,7 @@ void register_ps2_ssx3_tricky_list_tests()
             const DirectGoal g = directGoalFor(gari, gari.opts[0]);
             t.IsTrue(g.ok && g.event == 0, "Garibaldi donor ev0 (probe shape)");
             t.Equals(std::string(g.map.archive), std::string("GARI"), "Garibaldi archive");
-            const DirectGoal gs = directGoalFor(gari, gari.opts[1]);
+            const DirectGoal gs = directGoalFor(gari, kGariShowoffGoal);
             t.IsTrue(gs.ok && gs.event == 0 && gs.typeArg == 6 && gs.rulesArg == 5,
                      "Garibaldi Showoff donor ev0 (ARA1 carrier)");
             const Course &mesa = kCourses[3];
@@ -437,28 +446,28 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(m.ok && m.event == 2 && m.typeArg == 0 && m.rulesArg == 0,
                      "Mesablanca Race donor ev2 (CRA3 carrier)");
             t.Equals(std::string(m.map.archive), std::string("MESA"), "Mesablanca archive");
-            const DirectGoal msl = directGoalFor(mesa, mesa.opts[1]);
+            const DirectGoal msl = directGoalFor(mesa, CourseOption{0, 1, 3, {14, "MESA", "Mesablanca"}});
             t.IsTrue(msl.ok && msl.event == 2 && msl.typeArg == 6 && msl.rulesArg == 5,
                      "Mesablanca Showoff donor ev2");
             const Course &snow = kCourses[1];
             const DirectGoal s = directGoalFor(snow, snow.opts[0]);
             t.IsTrue(s.ok && s.event == 1, "Snowdream native donor ev1");
-            const DirectGoal ssl = directGoalFor(snow, snow.opts[1]);
+            const DirectGoal ssl = directGoalFor(snow, CourseOption{0, 1, 3, {14, "SNOW", "Snowdream"}});
             t.IsTrue(ssl.ok && ssl.event == 1 && ssl.typeArg == 6 && ssl.rulesArg == 5,
                      "Snowdream Showoff donor ev1 (BRA2 carrier)");
             const Course &merq = kCourses[4];
             const DirectGoal q = directGoalFor(merq, merq.opts[0]);
             t.IsTrue(q.ok && q.event == 4 && q.typeArg == 0 && q.rulesArg == 0,
                      "Merqury City Race donor ev4 (ERA5 carrier)");
-            const DirectGoal qsl = directGoalFor(merq, merq.opts[1]);
+            const DirectGoal qsl = directGoalFor(merq, CourseOption{0, 1, 3, {14, "MERQ", "Merqury City"}});
             t.IsTrue(qsl.ok && qsl.event == 4 && qsl.typeArg == 6 && qsl.rulesArg == 5,
                      "Merqury City Showoff donor ev4");
             const Course &pipe = kCourses[6];
-            const DirectGoal p = directGoalFor(pipe, pipe.opts[0]);
+            const DirectGoal p = directGoalFor(pipe, raceRow0);
             t.IsTrue(p.ok && p.event == 11 && p.typeArg == 0 && p.rulesArg == 0,
                      "Pipedream Race donor ev11 (BHP1 carrier, Race rules)");
             t.Equals(std::string(p.map.archive), std::string("PIPE"), "Pipedream world pin");
-            const DirectGoal ps = directGoalFor(pipe, pipe.opts[1]);
+            const DirectGoal ps = directGoalFor(pipe, pipe.opts[0]);
             t.IsTrue(ps.ok && ps.event == 11 && ps.typeArg == 3 && ps.rulesArg == 2,
                      "Pipedream Showoff donor ev11 (BHP1 carrier)");
             int pta = -1, pra = -1;
@@ -468,7 +477,7 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(ar.ok && ar.event == 14 && ar.typeArg == 0 && ar.rulesArg == 0,
                      "Aloha Race donor ev14 (ABC1 carrier, Race rules)");
             t.Equals(std::string(ar.map.archive), std::string("ALOHA"), "Aloha world pin");
-            const DirectGoal asl = directGoalFor(aloha, aloha.opts[1]);
+            const DirectGoal asl = directGoalFor(aloha, showoffRow3);
             t.IsTrue(asl.ok && asl.event == 14 && asl.typeArg == 6 && asl.rulesArg == 5,
                      "Aloha Showoff donor ev14");
             int ata = -1, ara = -1;
@@ -479,7 +488,7 @@ void register_ps2_ssx3_tricky_list_tests()
             const DirectGoal mg = directGoalFor(mega, mega.opts[0]);
             t.IsTrue(mg.ok && mg.event == 15 && mg.typeArg == 5 && mg.rulesArg == 4,
                      "Megaplex Race donor ev15 (DBC2 carrier)");
-            const DirectGoal mgs = directGoalFor(mega, mega.opts[1]);
+            const DirectGoal mgs = directGoalFor(mega, CourseOption{0, 1, 3, {14, "MEGA", "Tokyo Megaplex"}});
             t.IsTrue(mgs.ok && mgs.event == 15 && mgs.typeArg == 6 && mgs.rulesArg == 5,
                      "Megaplex Showoff donor ev15");
             const Course &elys = kCourses[2];
@@ -487,22 +496,22 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(e.ok && e.event == 16 && e.typeArg == 0 && e.rulesArg == 0,
                      "Elysium Race donor ev16 (EBC3 carrier, Race rules)");
             t.Equals(std::string(e.map.archive), std::string("ELYS"), "Elysium world pin");
-            const DirectGoal esl = directGoalFor(elys, elys.opts[1]);
+            const DirectGoal esl = directGoalFor(elys, CourseOption{0, 1, 3, {14, "ELYS", "Elysium Alps"}});
             t.IsTrue(esl.ok && esl.event == 16 && esl.typeArg == 6 && esl.rulesArg == 5,
                      "Elysium Showoff donor ev16");
             const Course &untrack = kCourses[7];
-            const DirectGoal ur = directGoalFor(untrack, untrack.opts[0]);
+            const DirectGoal ur = directGoalFor(untrack, raceRow0);
             t.IsTrue(ur.ok && ur.event == 7 && ur.typeArg == 0 && ur.rulesArg == 0,
                      "Untracked Race donor ev7 (ESS3 carrier, Race rules)");
             t.Equals(std::string(ur.map.archive), std::string("UNTRACK"), "Untracked world pin");
-            const DirectGoal usl = directGoalFor(untrack, untrack.opts[1]);
+            const DirectGoal usl = directGoalFor(untrack, untrack.opts[0]);
             t.IsTrue(usl.ok && usl.event == 7 && usl.typeArg == 1 && usl.rulesArg == 1,
                      "Untracked Showoff donor ev7 (own freestyle args)");
             const Course &alaska = kCourses[9];
-            const DirectGoal ak = directGoalFor(alaska, alaska.opts[0]);
+            const DirectGoal ak = directGoalFor(alaska, raceRow0);
             t.IsTrue(ak.ok && ak.event == 6 && ak.typeArg == 0 && ak.rulesArg == 0,
                      "Alaska Race donor ev6 (DSS2 carrier)");
-            const DirectGoal aks = directGoalFor(alaska, alaska.opts[1]);
+            const DirectGoal aks = directGoalFor(alaska, alaska.opts[0]);
             t.IsTrue(aks.ok && aks.event == 6 && aks.typeArg == 1 && aks.rulesArg == 1,
                      "Alaska Showoff donor ev6 (own freestyle args)");
             t.Equals(directCourseByCode("MESA"), 3, "archive lookup");
@@ -616,7 +625,7 @@ void register_ps2_ssx3_tricky_list_tests()
             g.peak = 0;
             g.type = 0;
             g.row = 0;
-            g.goal = kCourses[0].opts[1];
+            g.goal = kGariShowoffGoal;
             g.goalEvent = 14;
             NavState n;
             navStart(n, g.goal, 14, 0);
@@ -1474,9 +1483,9 @@ void register_ps2_ssx3_tricky_list_tests()
             }
             // One-tap rule: multi-mode courses open the mode screen,
             // single-mode courses ride straight away.
-            t.IsTrue(listCourseOpensModes(0), "Garibaldi opens modes");
-            t.IsTrue(listCourseOpensModes(6), "Pipedream opens modes");
-            t.IsTrue(listCourseOpensModes(9), "Alaska opens modes");
+            t.IsFalse(listCourseOpensModes(0), "Garibaldi (Race only) rides from the tap");
+            t.IsFalse(listCourseOpensModes(6), "Pipedream (Showoff only) rides from the tap");
+            t.IsFalse(listCourseOpensModes(9), "Alaska (Showoff only) rides from the tap");
             t.IsFalse(listCourseOpensModes(10), "out of range rides nowhere");
             // Triangle-back (Brad 10-19): step 0 leaves the overlay flow
             // (the list closes at once); step 1 returns to the course list.
@@ -1499,33 +1508,24 @@ void register_ps2_ssx3_tricky_list_tests()
                 t.IsTrue(barY + h * 0.06f <= h, "legend inside screen");
             } });
 
-        tc.Run("one-tap ride default is Race, toggle cycles dual courses", [](TestCase &t)
+        tc.Run("one-tap ride default is the course's only mode; toggle is inert", [](TestCase &t)
                {
             ListState s;
-            t.Equals(listDefMode(s), 0, "Garibaldi defaults Race");
+            t.Equals(listDefMode(s), 0, "Garibaldi default index 0");
             t.IsTrue(std::strcmp(listDefaultModeName(s), "Race") == 0, "Garibaldi default name");
             t.Equals(listDefaultGoal(s).peak, 0, "Garibaldi Race peak");
             t.Equals(listDefaultGoal(s).type, 0, "Garibaldi Race type");
             t.Equals(listDefaultGoal(s).row, 0, "Garibaldi Race row");
-            t.Equals(listCycleMode(s), 1, "toggle to Showoff");
-            t.IsTrue(std::strcmp(listDefaultModeName(s), "Showoff") == 0, "toggled name");
-            t.Equals(listDefaultGoal(s).type, 1, "Showoff type");
-            t.Equals(listDefaultGoal(s).row, 3, "Showoff row");
-            t.Equals(listCycleMode(s), 0, "toggle wraps to Race");
-            // Pipedream is dual too: Race default, toggle to Showoff.
+            t.Equals(listCycleMode(s), 0, "single-mode toggle stays");
+            t.IsTrue(std::strcmp(listDefaultModeName(s), "Race") == 0, "still Race");
+            // Pipedream keeps only Showoff.
             ListState p;
             p.sel = 6;
-            t.IsTrue(std::strcmp(listDefaultModeName(p), "Race") == 0, "pipe default Race");
-            t.Equals(listCycleMode(p), 1, "pipe toggles to Showoff");
-            t.IsTrue(std::strcmp(listDefaultModeName(p), "Showoff") == 0, "pipe name");
+            t.IsTrue(std::strcmp(listDefaultModeName(p), "Showoff") == 0, "pipe default Showoff");
+            t.Equals(listCycleMode(p), 0, "pipe toggle stays");
             t.Equals(listDefaultGoal(p).row, 2, "pipe row");
-            // Defaults are per course: cycling Garibaldi leaves Snowdream.
-            ListState m;
-            m.sel = 0;
-            listCycleMode(m);
-            m.sel = 1;
-            t.Equals(listDefMode(m), 0, "Snowdream untouched");
             // Clamp: a stale default index falls back to the first mode.
+            ListState m;
             m.sel = 6;
             m.modeDef[6] = 5;
             t.Equals(listDefMode(m), 0, "clamped to 0"); });

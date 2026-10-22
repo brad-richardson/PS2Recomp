@@ -108,25 +108,45 @@ inline constexpr Course kCourses[10] = {
     // Slopestyle options share P1 Free row 3 (ev14, proven fresh by Aloha
     // Slopestyle): same (cell, rules-kind) pairings as the validated legs,
     // only the world/name swap target changes. Tricky-authentic modes
-    // (local Tricky ISO survey): every course offers Race AND Showoff,
-    // opts[0] = Race, opts[1] = Showoff, no navigator fallback in the
-    // picker path. Each mapped option carries map{loadedEv, ownArchive,
+    // (local Tricky ISO survey): Tricky offers Race AND Showoff on every
+    // course; the list below keeps one per course for now (see the note
+    // after this block), no navigator fallback in the picker path. Each mapped option carries map{loadedEv, ownArchive,
     // ownName}; native rows stay unmapped. Archive codes verified live
     // (preview course() gate, except MEGA which ships in preset/worlds);
     // names are display strings (<= 31 chars).
-    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 1, 3, {14, "GARI", "Garibaldi"}}}, 2, {"Race", "Showoff"}},
-    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 1, 3, {14, "SNOW", "Snowdream"}}}, 2, {"Race", "Showoff"}},
-    {"Elysium Alps", "ELYS", 16, {{0, 0, 0, {0, "ELYS", "Elysium Alps"}}, {0, 1, 3, {14, "ELYS", "Elysium Alps"}}}, 2, {"Race", "Showoff"}},
-    {"Mesablanca", "MESA", 2, {{0, 0, 0, {0, "MESA", "Mesablanca"}}, {0, 1, 3, {14, "MESA", "Mesablanca"}}}, 2, {"Race", "Showoff"}},
-    {"Merqury City", "MERQ", 4, {{0, 0, 0, {0, "MERQ", "Merqury City"}}, {0, 1, 3, {14, "MERQ", "Merqury City"}}}, 2, {"Race", "Showoff"}},
-    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Showoff"}},
-    {"Pipedream", "PIPE", 11, {{0, 0, 0}, {0, 1, 2}}, 2, {"Race", "Showoff"}},
-    {"Untracked", "UNTRACK", 7, {{0, 0, 0}, {0, 1, 3, {14, "UNTRACK", "Untracked"}}}, 2, {"Race", "Showoff"}},
-    {"Tokyo Megaplex", nullptr, 15, {{0, 0, 0, {0, "MEGA", "Tokyo Megaplex"}}, {0, 1, 3, {14, "MEGA", "Tokyo Megaplex"}}}, 2, {"Race", "Showoff"}},
-    {"Alaska", "ALASKA", 6, {{0, 0, 0}, {0, 1, 3, {14, "ALASKA", "Alaska"}}}, 2, {"Race", "Showoff"}},
+    //
+    // tk-alaska-opus-1 (Brad 10-21, "for now"): each course offers only the
+    // mode that matches its carrier event's stock discipline (event table
+    // 0x442820 +4: 2 race, 3 slopestyle, 4 big air, 5 superpipe, 6
+    // backcountry). Race carrier -> Race only; slopestyle/superpipe carrier
+    // -> Showoff only; backcountry (fits neither) -> Race only. A Showoff on
+    // a race carrier has no time limit (Garibaldi: "out of time" at GO); a
+    // Race on a slopestyle carrier resets to the gate (Alaska). The hidden
+    // options' carrier rows below stay for when each mode gets its own shell.
+    // Single-mode courses ride straight from the course tap (nOpts == 1).
+    {"Garibaldi", "GARI", 0, {{0, 0, 0}}, 1, {"Race"}},                                  // ev0 race
+    {"Snowdream", "SNOW", 1, {{0, 0, 1}}, 1, {"Race"}},                                  // ev1 race
+    {"Elysium Alps", "ELYS", 16, {{0, 0, 0, {0, "ELYS", "Elysium Alps"}}}, 1, {"Race"}}, // ev16 backcountry
+    {"Mesablanca", "MESA", 2, {{0, 0, 0, {0, "MESA", "Mesablanca"}}}, 1, {"Race"}},      // ev2 race
+    {"Merqury City", "MERQ", 4, {{0, 0, 0, {0, "MERQ", "Merqury City"}}}, 1, {"Race"}},  // ev4 race
+    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}}, 1, {"Race"}},                            // ev14 backcountry
+    {"Pipedream", "PIPE", 11, {{0, 1, 2}}, 1, {"Showoff"}},                              // ev11 superpipe
+    {"Untracked", "UNTRACK", 7, {{0, 1, 3, {14, "UNTRACK", "Untracked"}}}, 1, {"Showoff"}}, // ev7 slopestyle
+    {"Tokyo Megaplex", nullptr, 15, {{0, 0, 0, {0, "MEGA", "Tokyo Megaplex"}}}, 1, {"Race"}}, // ev15 backcountry
+    {"Alaska", "ALASKA", 6, {{0, 1, 3, {14, "ALASKA", "Alaska"}}}, 1, {"Showoff"}},       // ev6 slopestyle
 };
 
 inline constexpr uint32_t kCourseCount = 10u;
+
+// Index of the course option with list type `type` (0 Race, 1 Showoff), or
+// -1 when the course does not offer that mode.
+inline int courseOptionIndex(const Course &c, uint8_t type)
+{
+    for (uint8_t m = 0; m < c.nOpts; ++m)
+        if (c.opts[m].type == type)
+            return m;
+    return -1;
+}
 
 // ---- Direct-launch goal ---------------------------------------------------
 // The guest chain (config + shared loader, no menu walk) rides proven-clean
@@ -327,8 +347,8 @@ inline int directCourseByCode(const char *code)
 // ---- List navigation (pad edges and touch taps map to the same steps) ----
 // Two steps (Part 2 amendment): step 0 picks the course (10 names, Tricky
 // order); step 1 picks the mode from the course's own modeName list
-// (data-driven: later modes appear with no UI change). Every course is
-// dual-mode (Race / Showoff), so step 1 always shows. Triangle steps back.
+// (data-driven: later modes appear with no UI change). A single-mode course
+// rides from the course tap and never shows step 1. Triangle steps back.
 struct ListState
 {
     uint8_t sel = 0;  // highlighted course 0..9 (kept across re-opens)
