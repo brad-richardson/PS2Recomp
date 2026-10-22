@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // TK43a phase 1: TRICKY meter HUD reskin on Tricky courses (output-only).
 //

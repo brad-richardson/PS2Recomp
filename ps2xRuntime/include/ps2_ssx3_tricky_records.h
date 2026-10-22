@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // Guest-affecting, Tricky only. Preserve this user's complete SET0001
 // source fields before a race; never infer clean bytes from a sample save.

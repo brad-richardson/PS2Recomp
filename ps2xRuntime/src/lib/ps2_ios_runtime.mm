@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // I25: iOS env-file loader + SDL/UIKit glue (Objective-C++). Compiled only
 // for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"

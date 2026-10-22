@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // Included inside namespace ps2_fh1, after rd32/wr32 (LCY2).
 // LCY1 source: 3a7e10..28 caches int(rate*.1); 3a8448 refreshes,
 // 3a84c8 forces expiry, 3a8668 compares raw update age. Rescale BOTH

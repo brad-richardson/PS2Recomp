@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // TK52: read the Select Event cursor, rather than the last accepted event.
 // Addresses/strides: func_207430, func_39D860. All async ownership remains

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // HUD4 (from HUD3): shared GLES3 composite (iOS EAGL; the Android EGL glue
 // is dropped). P0 copies the HUD region to a temp texture with a trivial
 // shader (exact copy; a blit would need matching frame/temp formats, and

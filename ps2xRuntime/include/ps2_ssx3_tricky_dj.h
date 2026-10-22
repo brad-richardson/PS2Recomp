@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // tk-audio-1 step 3: Tricky-gated SSX 3 DJ/PA commentary.
 //
 // On Tricky courses the guest still posts stock radio/PA speech events

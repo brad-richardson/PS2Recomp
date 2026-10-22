@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 
 // IN4 Part A: event-fed iOS touches (portable record + merge; no SDL here so

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 
 // Pure arithmetic of the full-120 events restamp of the 0x1e1458 periodic

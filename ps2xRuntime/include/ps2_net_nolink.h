@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // OFL1: minimal DirtySock responder — the game never leaves the menu
 // without it.

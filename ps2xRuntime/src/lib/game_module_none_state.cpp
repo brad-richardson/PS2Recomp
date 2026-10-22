@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // full120 slice 5: zeroed copies of the module-owned post-call state for
 // a no-module binary (the runtime sees the state through extern
 // declarations). This TU must stay its OWN archive member (never merged

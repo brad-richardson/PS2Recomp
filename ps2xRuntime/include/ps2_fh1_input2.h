@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 
 // INP2: 0x321298's digital record in stock half-frame units. All persistent

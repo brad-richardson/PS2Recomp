@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // TKL1: one EE-owned Tricky layer (TKA1 stages 1-3).
 //

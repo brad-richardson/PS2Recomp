@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // F2 (appsec-fix-1): online-secret file locations + one-time migration.
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // RPL1: replays follow the recording's 60/120 rate per input sample
 // (PS2X_SSX3_FULL120=events; PS2X_SSX3_REPLAY_RATE, default on, "0" = off).
 //

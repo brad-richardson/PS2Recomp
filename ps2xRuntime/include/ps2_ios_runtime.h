@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // I25: iOS-only startup and window helpers (implemented in
 // src/lib/ps2_ios_runtime.mm, compiled only when PS2X_IS_IOS).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // tk-banner-2: baked banner strings (generated; do not hand-edit).
 // Regenerate: local/research/tk-banner-2/tooling/gen_banner_tables.py

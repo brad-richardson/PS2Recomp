@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // F1 (appsec-fix-1): credential-adjacent key detection, shared by the iOS
 // loader (keys-only logging) and the knob dump (value redaction).

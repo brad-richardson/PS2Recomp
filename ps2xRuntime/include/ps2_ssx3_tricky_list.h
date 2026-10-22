@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 #include "ps2_ssx3_fe_launch.h"
 // tk-menu-1 Part 2: the dedicated Tricky course list (option (a), Brad 10-15).

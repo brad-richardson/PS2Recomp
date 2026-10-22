@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // JDR2 shadowpub: render-facing publication of the query-held ground frame on
 // the odd update of a pair (included by ps2_fh1_full120.h after the parity
 // and query definitions; namespace ps2_fh1).

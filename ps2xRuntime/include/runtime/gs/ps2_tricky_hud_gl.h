@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // HUD4 (from HUD3): GPU composite for the Tricky HUD (output-only). Draws
 // the HUD scene (ps2_ssx3_tricky_hud.h HudScene) as GLES3 passes over the

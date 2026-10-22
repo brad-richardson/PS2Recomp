@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // HUD3: iOS platform glue for the GLES3 HUD composite. Own EAGLContext
 // (GLES3) + own CVOpenGLESTextureCache (the presenter's context/cache on the
 // GL thread is untouched) + per-surface frame textures (cached; the pool

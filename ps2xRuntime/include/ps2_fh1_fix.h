@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 
 // Full-120 FIX groups (PS2X_SSX3_FULL120_FIX) and their pure parser, split out

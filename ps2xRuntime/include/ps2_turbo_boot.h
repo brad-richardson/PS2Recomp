@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 // PS2X_TURBO_BOOT=1 (BTS1): run the boot unpaced with host audio muted,
 // then return to normal pacing at the first input-needing screen.
 //

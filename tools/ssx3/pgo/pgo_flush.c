@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 /* Optional Android local PGO training: flush every 30 s before process kill.
  * Compile only with -fprofile-generate; outputs remain private. */
 #include <pthread.h>

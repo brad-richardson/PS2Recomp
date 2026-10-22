@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 // preserve-fix-1: Tricky files do not participate in the guest's ISO boot
 // walk. Publish them into free slots after the fixed stock sorted prefix only at

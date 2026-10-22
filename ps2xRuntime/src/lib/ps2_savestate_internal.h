@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR MIT
 #pragma once
 
 // SS1: per-owner save-state serializers. Each is a friend of the class it
