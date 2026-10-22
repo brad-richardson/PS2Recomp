@@ -1271,6 +1271,66 @@ namespace
     Ssx3SpatialState g_ssx3Spatial;
     std::atomic<bool> g_ssx3SpatialPending{false};
 
+    // QCAP1 (tk-alaska-opus-1, global): sub_00334888 appends each sub-object's
+    // hits (up to 0x40 from its local query 0x32C0F8) at index s7 of the
+    // caller's 0x80-byte result buffer and never checks the capacity the caller
+    // passed in a3. More hits than that (a rider wedged in dense converted Tricky
+    // collision returned >= 67 into 0x104e70's 64-entry stack buffer) run the copy
+    // past the buffer into the caller's frame, nulling a vtable pointer the
+    // caller then calls (JALR 0 at 0x104f1c). The guard records a3 per frame on
+    // entry and, at the call that precedes every copy loop (0x334f5c), clamps the
+    // pending local count s3 to the room left, so the extra hits are dropped as a
+    // capped query would drop them. Stock queries never reach the cap (they would
+    // crash): the guard only reads there.
+    constexpr uint32_t kSsx3QueryAppend = 0x00334888u;
+    constexpr uint32_t kSsx3QueryAppendFrame = 0x27D0u;
+    constexpr uint32_t kSsx3QueryCopyCall = 0x00334F5Cu;
+    struct Ssx3QueryCap
+    {
+        uint32_t frame = 0u;
+        int32_t cap = 0;
+    };
+    std::array<Ssx3QueryCap, 8> g_ssx3QueryCaps{};
+    uint32_t g_ssx3QueryNext = 0u;
+    uint64_t g_ssx3QueryClamps = 0u;
+
+    void ssx3QueryCapEnter(const R5900Context *ctx)
+    {
+        const uint32_t frame = getRegU32(ctx, 29) - kSsx3QueryAppendFrame;
+        const int32_t cap = static_cast<int32_t>(getRegU32(ctx, 7));
+        for (Ssx3QueryCap &c : g_ssx3QueryCaps)
+        {
+            if (c.frame == frame)
+            {
+                c.cap = cap;
+                return;
+            }
+        }
+        g_ssx3QueryCaps[g_ssx3QueryNext++ % g_ssx3QueryCaps.size()] = Ssx3QueryCap{frame, cap};
+    }
+
+    void ssx3QueryCapClamp(R5900Context *ctx)
+    {
+        const uint32_t frame = getRegU32(ctx, 29);
+        for (const Ssx3QueryCap &c : g_ssx3QueryCaps)
+        {
+            if (c.frame != frame)
+                continue;
+            const int32_t used = static_cast<int32_t>(getRegU32(ctx, 23)); // s7
+            const int32_t hits = static_cast<int32_t>(getRegU32(ctx, 19)); // s3
+            const int32_t room = c.cap > used ? c.cap - used : 0;
+            if (hits > room)
+            {
+                SET_GPR_S32(ctx, 19, room);
+                const uint64_t n = ++g_ssx3QueryClamps;
+                if (n <= 4u || (n & (n - 1u)) == 0u)
+                    std::fprintf(stderr, "[ssx3-query-cap] clamp hits=%d used=%d cap=%d kept=%d clamps=%llu\n",
+                                 hits, used, c.cap, room, static_cast<unsigned long long>(n));
+            }
+            return;
+        }
+    }
+
     bool ssx3SpatialGuardOn()
     {
         static const bool on = [] {
@@ -5836,8 +5896,9 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3PatchChainAppend, kSsx3PatchChainAppendCE, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
                         kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
                         kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u,
-                        0x001216E0u, 0x00117838u}) // TK45c gems
+                        0x001216E0u, 0x00117838u, kSsx3QueryAppend}) // TK45c gems; QCAP1
         dspSet(g_dsp.tgt, pc);
+    dspSet(g_dsp.src, kSsx3QueryCopyCall); // QCAP1 clamp (one call site)
     if (ssx3PatchGrowCap() != 0u)
         dspSet(g_dsp.src, kSsx3RendererType1DmaCall); // TK34 type-1 DMA size (one call site)
     const char *megaLaps = std::getenv("PS2X_SSX3_MEGA_LAPS");
@@ -6372,6 +6433,13 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) && ssx3SpatialGuardOn())
     {
         ssx3SpatialGuard(rdram, ctx, targetPc, sourcePc);
+    }
+    if (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall)
+    {
+        if (targetPc == kSsx3QueryAppend)
+            ssx3QueryCapEnter(ctx);
+        else if (sourcePc == kSsx3QueryCopyCall)
+            ssx3QueryCapClamp(ctx);
     }
     if (targetPc == kSsx3DrawReset &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
