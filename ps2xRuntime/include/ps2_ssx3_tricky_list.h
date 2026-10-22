@@ -254,7 +254,7 @@ inline constexpr CarrierCell kCarrierCells[] = {
     {11, 0, 11, 0, 0}, // Pipedream Race: BHP1 under Race rules
     {6, 0, 6, 0, 0},   // Alaska Race
     {6, 1, 6, 1, 1},   // Alaska Showoff: own freestyle args
-    {15, 0, 15, 5, 4}, // Mega Race: P2 Race row2 args
+    {15, 0, 15, 0, 0}, // Mega Race: DBC2 carrier under Race rules (6 riders; was P2 row2 5/4 1v1)
     {15, 1, 15, 6, 5}, // Mega Showoff: P2 Freestyle row3 args
     {0, 1, 0, 6, 5},   // Garibaldi Showoff: ARA1 under Jam rules
     {1, 1, 1, 6, 5},   // Snowdream Showoff: BRA2 under Jam rules

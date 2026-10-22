@@ -486,8 +486,8 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(directCellArgs(1, 3, sta, sra) && sta == 6 && sra == 5, "showoff args (6,5)");
             const Course &mega = kCourses[8];
             const DirectGoal mg = directGoalFor(mega, mega.opts[0]);
-            t.IsTrue(mg.ok && mg.event == 15 && mg.typeArg == 5 && mg.rulesArg == 4,
-                     "Megaplex Race donor ev15 (DBC2 carrier)");
+            t.IsTrue(mg.ok && mg.event == 15 && mg.typeArg == 0 && mg.rulesArg == 0,
+                     "Megaplex Race donor ev15 (DBC2 carrier, 6 riders)");
             const DirectGoal mgs = directGoalFor(mega, CourseOption{0, 1, 3, {14, "MEGA", "Tokyo Megaplex"}});
             t.IsTrue(mgs.ok && mgs.event == 15 && mgs.typeArg == 6 && mgs.rulesArg == 5,
                      "Megaplex Showoff donor ev15");
