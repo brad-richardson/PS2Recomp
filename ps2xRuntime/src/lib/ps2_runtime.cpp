@@ -6107,9 +6107,10 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
         }
     }
     // RSV1: one Tricky-only donor-volume test per rider update. Redirect this
-    // call into SSX 3's existing course-reset entry; that guest routine owns
-    // the fade, route respawn, camera, and contact state. Stock mode and the
-    // default-off knob leave both the call and guest memory untouched.
+    // call into SSX 3's fall reset (a reset-action instance's call); that guest
+    // routine owns the fade, route respawn, camera, and contact state. Stock
+    // mode and the default-off knob leave both the call and guest memory
+    // untouched.
     if (sourcePc == ps2_ssx3_tricky_resetvol::kRiderUpdateSource &&
         targetPc == ps2_ssx3_tricky_resetvol::kRiderUpdateTarget &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
@@ -6128,6 +6129,8 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
         if (hit >= 0)
         {
             targetPc = ps2_ssx3_tricky_resetvol::kResetEntry;
+            SET_GPR_U32(ctx, 5, ps2_ssx3_tricky_resetvol::kResetEntryA1);
+            SET_GPR_U32(ctx, 6, ps2_ssx3_tricky_resetvol::kResetEntryA2);
             std::fprintf(stderr, "[rsv1] RESET t=%llu event=%d archive=%s rider=%08x donor=%d\n",
                          static_cast<unsigned long long>(m_memory.gs().vsyncTick.load(std::memory_order_relaxed)),
                          event, archive.c_str(), getRegU32(ctx, 4), hit);

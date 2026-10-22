@@ -1,8 +1,11 @@
 #pragma once
 // RSV1: Tricky donor ResetZone collision surfaces, checked at the EE rider update boundary.
 // The sidecar holds donor-space triangles and the course placement. A swept
-// triangle hit redirects the current guest call to SSX 3's
-// own course-reset entry (0x11d390), which chooses the route respawn and fade.
+// triangle hit redirects the current guest call to SSX 3's own fall reset,
+// the call its reset-action instances make (0x116120 with a1 = 0, a2 = 1 at
+// 0x139dd8): control state 9 (0x12f398), white fade, respawn on the nearest
+// course reset path. The earlier entry 0x11d390 placed the rider at its start
+// record, so every out-of-bounds sent a Tricky rider back to the start.
 
 #include <array>
 #include <cmath>
@@ -17,7 +20,9 @@
 namespace ps2_ssx3_tricky_resetvol
 {
 constexpr size_t kMaxTriangles = 2048u;
-constexpr uint32_t kResetEntry = 0x0011d390u;
+constexpr uint32_t kResetEntry = 0x00116120u;
+constexpr uint32_t kResetEntryA1 = 0u; // no surface flag
+constexpr uint32_t kResetEntryA2 = 1u; // reset-action instance (0x139dd8)
 constexpr uint32_t kRiderUpdateSource = 0x00128ddcu;
 constexpr uint32_t kRiderUpdateTarget = 0x001216e0u;
 
