@@ -807,7 +807,7 @@ namespace ps2_savestate
             h.push_back({"hle_callback_top", std::to_string(0x00100000u), true});
             h.push_back({"hle_grow_base", std::to_string(grow.base), true});
             h.push_back({"hle_grow_capacity", std::to_string(grow.capacity), true});
-            h.push_back({"hle_arena_base", std::to_string(ps2_hle_pools::kHleArenaBase), true});
+            h.push_back({"hle_arena_base", std::to_string(ps2_hle_pools::hleArenaBase()), true});
             h.push_back({"hle_arena_bytes", std::to_string(ps2_hle_pools::kHleArenaBytes), true});
             h.push_back({"full120_mode", std::to_string(static_cast<unsigned>(ps2_fh1::mode())), true});
             h.push_back({"full120_fix", std::to_string(ps2_fh1::fixMask()) + ":" +

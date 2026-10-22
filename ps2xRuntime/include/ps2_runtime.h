@@ -478,7 +478,7 @@ public:
     void clearLLBit(R5900Context *ctx);
     void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
-    // HNG1: runtime-owned guest blocks (ps2_hle_pools::kHleArenaBase); the
+    // HNG1: runtime-owned guest blocks (ps2_hle_pools::hleArenaBase()); the
     // SetupHeap heap if the arena is full. guestFree takes either.
     uint32_t guestMallocHle(uint32_t size, uint32_t alignment = 16u);
     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
